@@ -1,42 +1,35 @@
 # Security
 
-## What is enforced
+Overview and known limitations. Details:
+- [SECURITY_MODEL.md](SECURITY_MODEL.md): platform policy, permissions, filesystem, execution, secrets.
+- [WORKFLOW_SECURITY.md](WORKFLOW_SECURITY.md): workflow-specific threats and evidence.
 
-- **Telegram authorization**: control commands are accepted only from `TELEGRAM_ALLOWED_USER_IDS`, and only inside `TELEGRAM_CONTROL_CHAT_ID`.
-  Callback buttons require an allowlisted user and a click inside the control group or the report channel.
-  The linked discussion group is **not** an authorization boundary. Unauthorized updates are logged and ignored.
-- **REST API**: every control endpoint needs `Authorization: Bearer $API_TOKEN` (constant-time compare).
-  With no `API_TOKEN`, control endpoints return 503. Binds to `127.0.0.1` by default.
-  Artifact and attachment files are never served over HTTP; only metadata is returned.
-- **Quick Actions**: 12-character random tokens (`secrets.token_urlsafe`) carry no payload.
-  Each is bound to a task, single-use, and expires (`ACTION_TTL_S`).
-  It's valid only in specific task states. Approve and Reject share a group, so using one consumes the other.
-  Check-and-set happens without an `await`, so it is atomic in asyncio.
-- **Attachments**: MIME allowlist plus a content-signature check. Size limit is enforced before download (Telegram) and while reading (API).
-  Stored under generated IDs, so user filenames never become paths. Root containment is checked, symlinks are refused on read, and writes are create-only.
-  Archives aren't accepted, and nothing is extracted. Attachments are bound to one task.
-- **Secrets**: never logged. The JSON log formatter redacts registered secret values, bot-token patterns, `sk-` keys, and bearer/authorization values.
-  `httpx` logging is raised to WARNING because it logs request URLs, which contain the bot token.
-  Secrets are removed from the Claude Code subprocess environment. The QA environment is reduced to `PATH`, `HOME`, `LANG`, `LC_ALL`, `TMPDIR`, and `UNITY_PATH`.
-- **Workspaces**: agents work only in `git worktree`s under `DATA_DIR/worktrees`, one writer per worktree.
-  Nothing is committed, merged, or pushed by the platform. Worktree removal never uses `--force`.
-- **Approvals**: every workflow that writes files needs explicit approval before an agent runs.
-  Generated assets need approval before they're copied into a worktree. Approved assets are never overwritten (create-only).
-- **QA**: only commands named in `QA_COMMANDS` run, with no shell, plus a timeout and an output cap. Models can't add commands.
+## Enforced
 
-## Known limitations (be honest about these)
+- **Telegram:** commands only from allowlisted users inside the control group. Buttons only from allowlisted users in the control group or report channel.
+- **REST:** bearer token on all `/api/v1/*` endpoints; disabled without `API_TOKEN`. Binds to `127.0.0.1` by default.
+- **Quick Actions:** opaque, single-use, expiring, state-checked.
+- **Approvals:** persisted with the approver, and cannot be bypassed by plugins or workflow definitions.
+- **Central policy:** schema validation and the permission ceiling for every tool call. That includes model tool calls, plugin tools and MCP tools. Unknown tools are rejected, never improvised.
+- **Workspace confinement:** canonical paths, symlink-escape rejection, `.git` blocked, create-only writes in isolated worktrees or scratch dirs, nothing merged or pushed.
+- **Uploads:** MIME allowlist plus content signature, size limits, task-bound attachments, artifact hashes re-checked on read.
+- **Execution:** only configured QA commands (no shell). Scrubbed environment, timeouts, output caps, and process-group kill on cancellation. Docker mode for real isolation.
+- **Secrets:** environment only. Redacted in logs; Claude Code and MCP child processes get minimal environments.
+- **Side effects:** never blindly retried or replayed after a crash (`unknown` instead).
 
-- `QA_SANDBOX=none` (default) is **not a sandbox**: commands run as your user on the host.
-  Use `QA_SANDBOX=docker` (`--network none`, only the worktree mounted, 2 GB memory) for isolation. It can't run Unity.
-- **Claude Code runs on the host.** The implementer uses `--permission-mode acceptEdits`, which lets Claude Code edit files and run common filesystem commands.
-  Other shell commands run only if listed in `CLAUDE_CODE_ALLOWED_TOOLS`. Claude Code's own permission system, not this platform, decides which paths it may touch.
-  The worktree is its working directory, but that is not an OS-level boundary.
-  A `-p` run also loads `.claude/settings.json` hooks and `.mcp.json` servers from the target repository. Only point `WORKSPACE_ROOT` at repositories you trust.
-- Runtime tool-permission prompts are **not** bridged to Telegram. The app-level "Approve" button approves running the workflow, not individual tool calls.
-- User attachments and diffs are sent to the selected external provider (Anthropic, OpenAI, or DeepSeek). Don't attach material you aren't allowed to share.
-- State is in memory: a restart drops pending approvals. Their tokens become invalid.
-- No rate limiting on the REST API. Keep it on localhost or behind an authenticated reverse proxy.
+## Known limitations
+
+1. `QA_SANDBOX=none` (default) and the Claude Code runtime execute on the host as your user. They are **not** sandboxed.
+   The worktree is a working directory, not an OS boundary. A `claude -p` run also loads hooks and `.mcp.json` from the target repo, so only point `WORKSPACE_ROOT` at trusted repositories.
+2. Claude Code's per-tool permission prompts are not bridged to Telegram. The app-level approval covers a whole agent run.
+3. Plugins are Python code loaded in-process. The permission ceiling governs what their **tools** may do through the policy engine.
+   A malicious plugin module could still call Python APIs directly, so enable only plugins you trust (`PLUGINS`).
+4. MCP servers run as local processes with the workspace as cwd. Allowlist only tools you have reviewed; non-read-only tools also need `mcp:execute` plus approval.
+5. Single-tenant: one user allowlist, no per-user quotas or tenant isolation.
+6. Quick Action tokens are in memory, so after a restart old buttons stop working (approvals are re-issued). See [WORKFLOW_RECOVERY.md](WORKFLOW_RECOVERY.md).
+7. No REST rate limiting. Keep the API on localhost or behind an authenticated proxy.
+8. Attachments, diffs and documents are sent to whichever external provider handles a step (Anthropic, OpenAI, DeepSeek). None is configured and working on this machine today.
 
 ## Do not commit
 
-`.env`, `var/` (media, artifacts, worktrees), `.venv/`. These are in `.gitignore`.
+`.env`, `var/` (state DB, media, artifacts, worktrees, scratch), `.venv/`. All are git-ignored. `docs/evidence/demo_results.json` contains only synthetic demo data.

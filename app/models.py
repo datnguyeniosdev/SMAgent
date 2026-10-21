@@ -20,21 +20,39 @@ def new_id(prefix: str) -> str:
 class TaskState(StrEnum):
     created = "created"
     queued = "queued"
+    planning = "planning"
     running = "running"
     waiting_for_user = "waiting_for_user"
     waiting_for_approval = "waiting_for_approval"
+    validating = "validating"
     succeeded = "succeeded"
     failed = "failed"
     cancelled = "cancelled"
     unknown = "unknown"  # outcome could not be established (e.g. runtime killed mid-edit)
+    expired = "expired"  # an approval or human answer was not given in time
 
 
-TERMINAL = {TaskState.succeeded, TaskState.failed, TaskState.cancelled, TaskState.unknown}
-_ACTIVE = {TaskState.running, TaskState.waiting_for_user, TaskState.waiting_for_approval}
+TERMINAL = {
+    TaskState.succeeded,
+    TaskState.failed,
+    TaskState.cancelled,
+    TaskState.unknown,
+    TaskState.expired,
+}
+_WAITING = {TaskState.waiting_for_user, TaskState.waiting_for_approval}
 TRANSITIONS: dict[TaskState, set[TaskState]] = {
     TaskState.created: {TaskState.queued, TaskState.waiting_for_approval, TaskState.cancelled},
-    TaskState.queued: {TaskState.running, TaskState.cancelled, TaskState.failed},
-    **{s: _ACTIVE | TERMINAL for s in _ACTIVE},
+    TaskState.queued: {
+        TaskState.planning,
+        TaskState.running,
+        TaskState.cancelled,
+        TaskState.failed,
+    },
+    TaskState.planning: _WAITING | {TaskState.running} | TERMINAL,
+    TaskState.running: _WAITING | {TaskState.validating} | TERMINAL,
+    TaskState.waiting_for_user: {TaskState.planning, TaskState.running} | TERMINAL,
+    TaskState.waiting_for_approval: {TaskState.running} | TERMINAL,
+    TaskState.validating: {TaskState.running} | TERMINAL,
     **{s: set() for s in TERMINAL},
 }
 
@@ -90,6 +108,10 @@ class Artifact(BaseModel):
     sha256: str
     size_bytes: int
     created_at: datetime = Field(default_factory=now)
+    mime_type: str | None = None
+    step_id: str | None = None  # producing workflow step
+    producer: str | None = None  # agent/tool/provider that produced it
+    validation_status: Literal["unchecked", "passed", "failed"] = "unchecked"
     meta: dict[str, Any] = {}
 
 
@@ -136,7 +158,12 @@ class Task(BaseModel):
     task_id: str = Field(default_factory=lambda: new_id("tsk"))
     title: str
     description: str
-    workflow: Workflow = Workflow.ask
+    workflow: Workflow = Workflow.ask  # legacy alias; domain/task_type drive planning
+    domain: str | None = None
+    task_type: str | None = None
+    request: dict[str, Any] = {}  # normalized TaskRequest (app.intake)
+    run_id: str | None = None  # workflow run executing this task
+    question: str | None = None  # pending clarification question
     role: str | None = None  # implementer | designer | reviewer for child steps
     agent: str | None = None  # explicit connector choice
     state: TaskState = TaskState.created

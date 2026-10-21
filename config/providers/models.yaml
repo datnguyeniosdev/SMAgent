@@ -1,0 +1,29 @@
+schema_version: 1
+# Model APIs only. Keys/models come from environment variables; nothing secret lives here.
+providers:
+  - id: gemini
+    type: gemini
+    api_key_env: GEMINI_API_KEY
+    model_env: GEMINI_MODEL
+    capabilities: [model.text, model.vision, model.structured]
+  - id: openai
+    type: openai_compatible
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    model_env: OPENAI_MODEL
+    capabilities: [model.text, model.vision, model.files, model.structured, model.tool_calling]
+    json_mode: json_schema
+  - id: deepseek
+    type: openai_compatible
+    base_url: https://api.deepseek.com
+    api_key_env: DEEPSEEK_API_KEY
+    model: deepseek-flash
+    capabilities: [model.text, model.files, model.structured, model.tool_calling]
+    json_mode: json_object
+  - id: fal
+    type: fal                    # fal.ai queue API; image/design generation
+    api_key_env: FAL_KEY
+    model_env: FAL_MODEL         # e.g. fal-ai/flux/schnell (default when unset)
+    capabilities: [image.generate]
+    timeout_s: 300
+    options: {}                  # extra model input, e.g. {num_inference_steps: 4}

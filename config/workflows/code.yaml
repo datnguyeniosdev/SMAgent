@@ -1,0 +1,15 @@
+schema_version: 1
+workflows:
+  - id: code.implement_and_test
+    version: "1"
+    description: Coding runtime implements in an isolated worktree; the gateway itself runs the tests and diff.
+    timeout_s: 3600
+    steps:
+      - {id: implement, executor: capability, ref: implementation.handoff, agent: implementer, inputs: {prompt: $task.objective}}
+      - {id: tests, executor: tool, ref: qa.run, depends_on: [implement], inputs: {check: tests}, on_failure: continue}
+      - {id: diff, executor: tool, ref: git.status, depends_on: [implement]}
+      - {id: gate, executor: validator, ref: software.checks_passed, depends_on: [tests], inputs: {results: [$steps.tests.output]}}
+      - {id: publish, executor: capability, ref: report.publish, agent: coordinator, depends_on: [gate, diff],
+         inputs: {text: $steps.implement.output.agent_summary, artifact_ids: $steps.implement.artifacts}}
+    success_criteria: [{kind: gate_passed, step: gate}]
+    outputs: {handoff: $steps.implement.output, changed: $steps.diff.output.changed, tests: $steps.tests.output.status}

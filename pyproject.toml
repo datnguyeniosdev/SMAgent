@@ -10,10 +10,24 @@ dependencies = [
     "aiogram>=3.31.0",
     "fastapi>=0.150.0",
     "httpx>=0.28.1",
+    "jsonschema>=4.26.0",
+    "mcp>=2.3.0",
     "pydantic-settings>=2.16.0",
     "python-multipart>=0.0.32",
+    "pyyaml>=6.0.3",
     "uvicorn[standard]>=0.54.0",
 ]
+
+[project.scripts]
+agw = "app.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.13.2,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "app"
+module-root = ""
 
 [dependency-groups]
 dev = [
@@ -22,9 +36,6 @@ dev = [
     "pytest-timeout>=2.4.0",
     "ruff>=0.17.1",
 ]
-
-[tool.uv]
-package = false
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -40,5 +51,9 @@ target-version = "py312"
 select = ["E", "F", "I", "B", "UP", "ASYNC", "S"]
 ignore = ["S101", "S603", "S607", "ASYNC230", "ASYNC240"]
 
+[tool.ruff.lint.pycodestyle]
+max-line-length = 120  # formatter wraps code at 100; long literals may run to 120
+
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S", "B", "E501", "ASYNC"]
+"scripts/*" = ["S", "E501", "ASYNC"]  # operator CLIs: long report strings, blocking subprocess by design

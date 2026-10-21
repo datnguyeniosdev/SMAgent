@@ -1,37 +1,173 @@
-# Agent Gateway
+# Agent Gateway: Generic Multi-Agent Platform
 
-A Telegram-controlled multi-agent gateway (MVP). Send a task with reference images or files to a private control group, pick a workflow, approve risky steps, and get reports in a channel.
-Behind it, an orchestrator routes work by capability to Claude Code (coding runtime), OpenAI, or DeepSeek (model APIs), plus an image provider.
-Code changes happen in isolated git worktrees, then get QA'd and independently reviewed. Nothing is ever merged automatically.
+One gateway accepts different kinds of tasks (from Telegram, REST or scripts) and handles each one end to end:
+1. Picks verified capabilities through a central registry.
+2. Plans a validated workflow (domain plugins provide the knowledge).
+3. Executes it with a durable workflow engine and a policy-checked tool subsystem.
+4. Validates real outputs with quality gates.
+5. Returns an evidence-based result envelope.
 
-> Read [docs/CAPABILITY_MATRIX.md](docs/CAPABILITY_MATRIX.md) first: it says what was really verified and what is mocked.
-> In short: worktrees, QA, REST and asset validation are verified locally. Telegram and the HTTP providers are tested with mocks only.
-> Claude Code is partially verified: the CLI protocol works, but this machine's login returned 401.
+> **What actually works today:** [CAPABILITY_MATRIX.md](docs/CAPABILITY_MATRIX.md), with run evidence in [DEMO_EVIDENCE.md](docs/DEMO_EVIDENCE.md).
+> - **Verified locally:** workflow engine, crash recovery, tool/MCP subsystem, software (deterministic), documents, data, media-inspect and Unity-inspect plugins, REST.
+> - **Verified with a real coding runtime:** OpenCode 2.1.0 (`task_type: code_change`), with gateway-enforced permissions.
+> - **Not working here:** Claude Code (stored login returns 401), model/image providers (no API keys), Telegram group/channel (placeholder chat IDs), Unity Editor tools (no Editor running).
 
-Docs: [Architecture](docs/ARCHITECTURE.md) · [Workflows](docs/WORKFLOWS.md) · [Security](docs/SECURITY.md) · [Plan & status](docs/IMPLEMENTATION_PLAN.md)
+## Config-driven orchestration (new)
 
-## Prerequisites
+Agents, capabilities, executors, model providers, MCP servers, routes, versioned workflows and policies are declared in [`config/`](config/) (YAML, schema-versioned, validated at startup).
+- Adding an agent with existing capabilities, or a new workflow plus route, needs **no code change**.
+- Telegram reports, and replies in the linked Discussion Group, become correlated feedback that runs a configured follow-up workflow, e.g. visual feedback: Gemini design analysis, a deterministic implementation prompt, then a handoff to Claude Code or back to the caller.
+- The gateway is also an **MCP server** (`/mcp`) for clients like Claude Code.
 
-- [uv](https://docs.astral.sh/uv/) (`brew install uv`). uv installs Python 3.12 from `.python-version`.
-- git (worktrees). Optional: Claude Code CLI, Docker (QA sandbox), Unity + Unity-MCP.
+Details: [CONFIG_DRIVEN_GATEWAY.md](docs/CONFIG_DRIVEN_GATEWAY.md). Audit: [CONFIG_UPGRADE_AUDIT.md](docs/CONFIG_UPGRADE_AUDIT.md).
 
-## Setup
+```bash
+uv run python -m app.gateway_config config
+```
+
+```bash
+claude mcp add --transport http --scope project agent-gateway http://127.0.0.1:8000/mcp --header "Authorization: Bearer $API_TOKEN"
+```
+
+## Documentation
+
+| Topic | Doc |
+|---|---|
+| Architecture | [GENERIC_PLATFORM_ARCHITECTURE.md](docs/GENERIC_PLATFORM_ARCHITECTURE.md) |
+| Capability registry | [CAPABILITY_REGISTRY.md](docs/CAPABILITY_REGISTRY.md) · [CAPABILITY_MATRIX.md](docs/CAPABILITY_MATRIX.md) |
+| Workflow engine / recovery | [WORKFLOW_ENGINE.md](docs/WORKFLOW_ENGINE.md) · [WORKFLOW_RECOVERY.md](docs/WORKFLOW_RECOVERY.md) |
+| Security | [SECURITY.md](docs/SECURITY.md) · [SECURITY_MODEL.md](docs/SECURITY_MODEL.md) · [WORKFLOW_SECURITY.md](docs/WORKFLOW_SECURITY.md) |
+| Plugins | [PLUGIN_DEVELOPMENT.md](docs/PLUGIN_DEVELOPMENT.md) · [software](docs/SOFTWARE_ENGINEERING_PLUGIN.md) · [documents](docs/RESEARCH_DOCUMENTS_PLUGIN.md) · [data](docs/DATA_PROCESSING_PLUGIN.md) · [media](docs/MEDIA_PLUGIN.md) · [unity](docs/UNITY_PLUGIN.md) |
+| Config-driven gateway | [CONFIG_DRIVEN_GATEWAY.md](docs/CONFIG_DRIVEN_GATEWAY.md) · [CONFIG_UPGRADE_AUDIT.md](docs/CONFIG_UPGRADE_AUDIT.md) |
+| Phase reports | [P2 audit](docs/PHASE_2_AUDIT.md) · [P2](docs/PHASE_2_IMPLEMENTATION.md) · [P3 audit](docs/PHASE_3_ARCHITECTURE_AUDIT.md) · [P3](docs/PHASE_3_IMPLEMENTATION.md) · [P4 audit](docs/PHASE_4_AUDIT.md) · [P4](docs/PHASE_4_IMPLEMENTATION.md) · [P5 audit](docs/PHASE_5_AUDIT.md) · [P5](docs/PHASE_5_IMPLEMENTATION.md) |
+
+## Quick start (uv commands)
 
 ```bash
 uv sync
 ```
 
 ```bash
+uv run agw init-env
+```
+
+`init-env` creates `.env` if needed and fills only missing secrets (`API_TOKEN`, `OPENCODE_PASSWORD`).
+
+```bash
+uv run agw dev
+```
+
+`dev` starts the OpenCode server (when `OPENCODE_ENABLED=true`) and the gateway on `127.0.0.1:8000`.
+
+```bash
+uv run agw mcp-setup
+```
+
+`mcp-setup` registers the gateway's MCP server (`agent-gateway`) in Claude Code at user scope. Check it with `claude mcp list`.
+
+| Command | Purpose |
+|---|---|
+| `uv run agw serve [--port 8000] [--reload]` | gateway only (REST, Telegram, `/mcp`) |
+| `uv run agw opencode` | `opencode serve` with `OPENCODE_PASSWORD`/`OPENCODE_URL` from `.env` |
+| `uv run agw dev` | OpenCode + gateway together |
+| `uv run agw validate` | validate `config/` |
+| `uv run agw doctor` | what is configured and reachable (gateway, OpenCode, Telegram, Claude MCP) |
+| `uv run agw mcp-setup [--scope user\|project\|local]` | (re)register the MCP server in Claude Code |
+| `uv run agw init-env` | generate missing local secrets |
+
+## Setup
+
+Requires [uv](https://docs.astral.sh/uv/) (`brew install uv`) and git. uv installs Python 3.12 from `.python-version`.
+
+```bash
+uv sync --locked
+```
+
+```bash
 cp .env.example .env
 ```
 
-Edit `.env` (blank values are treated as unset), then run:
+Edit `.env` (blank values are treated as unset). Then start the gateway:
 
 ```bash
 uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-Other commands:
+At startup the gateway:
+- discovers configured MCP servers
+- runs free health checks (`claude --version`, `GET /models`)
+- recovers interrupted tasks from `var/state.db`
+- starts Telegram long polling if `TELEGRAM_BOT_TOKEN` is set
+
+## Using it
+
+**REST** (all `/api/v1/*` endpoints need `Authorization: Bearer $API_TOKEN`):
+
+```bash
+curl -s -H "Authorization: Bearer $API_TOKEN" -F "file=@sales.csv;type=text/csv" http://127.0.0.1:8000/api/v1/attachments
+```
+
+```bash
+curl -s -H "Authorization: Bearer $API_TOKEN" -H 'content-type: application/json' -d '{"objective":"aggregate the sales by region","attachment_ids":["att_…"],"data":{"group_by":["region"],"metrics":{"amount":["sum","count"]}}}' http://127.0.0.1:8000/api/v1/tasks
+```
+
+Endpoints:
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /health` | health check (no auth) |
+| `POST /api/v1/tasks` | generic `TaskRequest`; `workflow` = explicit definition; `tool` = direct tool; legacy `description` + `workflow` enum still works |
+| `GET /api/v1/tasks/{id}` | task + workflow steps |
+| `/api/v1/tasks/{id}/result` · `/workflow` · `/events` · `/artifacts` · `/cancel` · `/answer` | result envelope, definition + step records, events, artifacts, cancel, answer a clarification |
+| `GET /api/v1/approvals` · `POST /api/v1/approvals/{id}` | pending approvals; `{"approve": true}` |
+| `/api/v1/config/validate` · `POST /api/v1/config/reload` · `/api/v1/agents/registry` | configuration diagnostics, validated reload, agents/capabilities with executor eligibility |
+| `/api/v1/tasks/{id}/reports` · `POST /api/v1/reports/{id}/feedback` · `/api/v1/tasks/{id}/handoffs` · `/api/v1/human-input` | reports with screenshots, feedback, handoff records, human input |
+| `POST /api/v1/maintenance/cleanup-artifacts` | retention cleanup (never touches active or referenced artifacts) |
+| `/mcp` | gateway MCP server (Streamable HTTP, same bearer token) |
+| `GET /api/v1/artifacts/{id}/content` | download an artifact |
+| `/api/v1/tools` · `/capabilities` · `/plugins` · `POST /api/v1/plugins/{id}/activate\|deactivate` | registry views and plugin control |
+| `/api/v1/agents` · `/sessions` · `/attachments` · `/messages` · `POST /api/v1/actions/{token}/execute` | Phase 1 endpoints, unchanged |
+
+**Telegram** (control group, allowlisted users):
+- `/task <text>` with optional attachments, then pick a button: 🤖 Auto, a domain, or a legacy workflow.
+- Reply to a report in the linked Discussion Group (or `/feedback <task_id|report_id> <text>`) to give feedback; it starts the configured follow-up workflow.
+- `/tool <name> <json>` · `/tools` · `/status` · `/report <id>` · `/steps <id>` · `/stop <id>` · `/retry <id>` · `/answer <id> <text>` · `/approvals` · `/plugins` · `/capabilities` · `/agents` · `/agents_status` · `/sessions`
+
+Reports, tool results, approvals and failures go to the report channel or control group.
+
+### Telegram setup
+
+1. Create the bot with @BotFather and set `TELEGRAM_BOT_TOKEN`.
+2. Add it to a private **control group**. Disable privacy mode (`/setprivacy`) if you want albums.
+3. Add it as **admin with "Post messages"** to the **report channel**. Linking the channel to the group (Discussion) is optional and grants nothing.
+4. Send a message in each, then run this to get the IDs:
+
+   ```bash
+   uv run python -m scripts.smoke_telegram --discover
+   ```
+
+5. Set `TELEGRAM_CONTROL_CHAT_ID`, `TELEGRAM_REPORT_CHANNEL_ID` and `TELEGRAM_ALLOWED_USER_IDS`.
+6. Verify with a real tool task whose reports go to Telegram:
+
+   ```bash
+   uv run python -m scripts.smoke_telegram
+   ```
+
+## Providers, runtimes, MCP
+
+| What | Enable with |
+|---|---|
+| OpenCode runtime (**verified**) | `opencode serve` with `OPENCODE_SERVER_PASSWORD`, then `OPENCODE_ENABLED=true`, `OPENCODE_PASSWORD`, optional `OPENCODE_MODEL`, `OPENCODE_SHELL_ALLOWLIST` |
+| Claude Code runtime | `CLAUDE_CODE_ENABLED=true` and a working `claude` login. Run the gateway outside Claude Code (nested sessions are refused) |
+| OpenAI / DeepSeek | `OPENAI_API_KEY` + `OPENAI_MODEL` / `DEEPSEEK_API_KEY` |
+| Image generation | `OPENAI_API_KEY` + `OPENAI_IMAGE_MODEL` |
+| MCP servers | `MCP_SERVERS` JSON: only `allowed_tools` are registered; non-read-only tools need `mcp:execute` in `TOOL_PERMISSIONS` plus approval |
+| Plugins | `PLUGINS`, `PLUGIN_PERMISSIONS`, `TOOL_PERMISSIONS`, `PLUGIN_CONFIG` |
+| QA | `QA_COMMANDS` (JSON name → command, no shell), `QA_SANDBOX=docker` for isolation |
+
+## Tests
+
+Unit, regression, real-local and recovery tests (no network, no paid calls):
 
 ```bash
 uv run pytest
@@ -42,84 +178,30 @@ uv run ruff check .
 ```
 
 ```bash
-uv run ruff format .
+uv run ruff format --check .
+```
+
+Opt-in real integrations (free checks; add `RUN_PAID=1` for paid calls). Missing configuration reports `SKIPPED` / `NOT CONFIGURED`, never a pass:
+
+```bash
+RUN_INTEGRATION=1 uv run pytest tests/integration -rs
+```
+
+Re-run every demonstration for real and regenerate the evidence:
+
+```bash
+uv run python -m scripts.demo --unity-project /path/to/UnityProject
 ```
 
 ```bash
-uv tree
+uv run python -m scripts.render_evidence
 ```
-
-CI runs `uv sync --locked` (see `.github/workflows/ci.yml`). For a runtime-only install, use `uv sync --locked --no-dev`.
-
-## Telegram setup
-
-1. **Create the bot** with @BotFather (`/newbot`) and put the token in `TELEGRAM_BOT_TOKEN`.
-2. **Privacy mode**: by default, bots in groups only see commands. A `/task` caption on a single photo or file works. In an album, only the captioned item is a command.
-   To use albums, either disable privacy (@BotFather → `/setprivacy` → Disable) or make the bot a group admin, then re-add it to the group.
-3. **Control group**: create a private group, add the bot, and set `TELEGRAM_CONTROL_CHAT_ID` (negative, usually `-100…`).
-4. **Report channel**: create a channel and add the bot as an admin with only *Post messages*. Set `TELEGRAM_REPORT_CHANNEL_ID`.
-   Optionally link the group to the channel (Channel → Edit → Discussion). Linking is a convenience only; it grants no permissions.
-5. **IDs**: get user and chat IDs from a helper such as @userinfobot, or from `getUpdates` *before* the gateway starts polling.
-   `getUpdates` fails while a webhook is set, and the gateway won't poll in that case either. Check with `https://api.telegram.org/bot<token>/getWebhookInfo`.
-6. Set `TELEGRAM_ALLOWED_USER_IDS` (comma-separated). Only these users, and only in the control group, can issue commands. Button clicks also require an allowlisted user.
-
-At startup the gateway logs whether it can see both chats and what its member status is in each.
-
-Commands: `/start` `/help` `/task <description>` `/status` `/report <task_id>` `/stop <task_id|session_id>` `/retry <task_id>` `/agents` `/agents_status` `/sessions`.
-After `/task`, an inline keyboard offers the workflows. Approvals appear in the control group with Approve/Reject/Stop buttons.
-Final reports go to the channel with View report / Retry / Review diff. A report longer than 4096 characters is summarized, and the full text is attached as a file.
-
-## Providers and runtimes
-
-| Connector | Enable with | Notes |
-|---|---|---|
-| `claude_code` | `CLAUDE_CODE_ENABLED=true`, logged-in `claude` CLI | Implementer/reviewer. Run the gateway **outside** a Claude Code session (the CLI refuses to nest). Smoke test: `uv run python -m scripts.smoke_claude_code` (makes one small paid call). |
-| `openai` | `OPENAI_API_KEY` + `OPENAI_MODEL` | Text, vision, structured output, tool-call passthrough |
-| `openai_images` | `OPENAI_API_KEY` + `OPENAI_IMAGE_MODEL` | Asset generation (`/v1/images/generations`) |
-| `deepseek` | `DEEPSEEK_API_KEY` | Text, JSON mode, tools. Image input is off by default (`DEEPSEEK_IMAGE_INPUT`) |
-| Gemini, OpenCode, Claude Desktop | — | Not available; see the capability matrix |
-
-Role preferences (`IMPLEMENTER_PREFERENCE`, `DESIGNER_PREFERENCE`, `REVIEWER_PREFERENCE`) order the candidates.
-The router only picks a connector that has every required capability. Otherwise the task fails with an explicit `unsupported` error and no silent downgrade.
-
-**Unity**: point `CLAUDE_CODE_MCP_CONFIG` at an MCP config for [Unity-MCP](https://github.com/IvanMurzak/Unity-MCP), and add a Unity batch-mode build to `QA_COMMANDS`.
-Without these, reports say Unity build and visual validation were not performed.
-
-## REST API
-
-All `/api/v1/*` endpoints need `Authorization: Bearer $API_TOKEN`. They're disabled (503) when the token is unset.
-
-`GET /health` · `GET /api/v1/agents` · `GET /api/v1/sessions[/{id}]` · `POST /api/v1/attachments` (multipart `file`) · `POST /api/v1/messages` · `POST /api/v1/tasks` · `GET /api/v1/tasks/{id}` · `GET /api/v1/tasks/{id}/artifacts` · `POST /api/v1/actions/{token}/execute`
-
-Example:
-
-```bash
-curl -s -H "Authorization: Bearer $API_TOKEN" -H 'content-type: application/json' -d '{"description":"Summarise the attached spec","workflow":"ask"}' http://127.0.0.1:8000/api/v1/tasks
-```
-
-## Attachments, artifacts, workspaces
-
-- Accepted: PNG, JPEG, GIF, WebP, PDF, and UTF-8 text (txt/md/csv/json/cs/py), checked by content signature. Default limit is 20 MB (the Bot API download limit).
-  Audio, video, and archives are rejected with an explicit message.
-- Files live under `DATA_DIR` (`var/` by default): `media/<task>/`, `artifacts/<task>/`, `worktrees/<task>/`. None of it is committed, and cleanup is manual.
-- Each writing task gets `git worktree add -b agw/<task_id>` from `WORKSPACE_ROOT` HEAD.
 
 ## Limitations
 
-- In-memory task/session/approval state: **a restart loses it**. Worktrees and artifacts survive.
-- `QA_SANDBOX=none` is not a sandbox. Claude Code runs on the host under its own permission system. See [SECURITY.md](docs/SECURITY.md).
-- No streaming progress from agents yet. Reports cover start, approvals, QA, findings, and final state.
+- **Not sandboxed:** the Claude Code runtime and `QA_SANDBOX=none` run on the host.
+- **Process-local:** single process, single tenant. Quick Action buttons don't survive restarts (approvals are re-issued).
+- **Rule-based plugins:** planning is deterministic (no model-assisted planning yet), and document extraction is rule-based; there's no web research.
+- **Unverified integrations:** agent implementation, review, summarization and image generation are implemented but unverified here (credentials and runtime are blocked).
 
-## Troubleshooting
-
-- *Bot doesn't respond*: check the logs for `unauthorized message` (wrong user/chat ID), and check that privacy mode allows what you send.
-  `A webhook is configured` means delete the webhook (`deleteWebhook`) if you want polling.
-- *`claude_code error … authenticate`*: run `claude` and `/login`, or set `ANTHROPIC_API_KEY`.
-- *`Claude Code cannot be launched inside another Claude Code session`*: the gateway already strips `CLAUDECODE`. Run the gateway from a normal terminal.
-- *Task `unsupported`*: no enabled connector has the capability (for example, image input with only DeepSeek configured).
-
-## Cost
-
-Each agent call records tokens where the provider reports them. Claude Code also reports `total_cost_usd`, which its docs call a client-side estimate.
-No other cost figures are computed. Use `CLAUDE_CODE_MAX_BUDGET_USD` to cap a Claude Code run. `parallel` doubles agent cost.
-Unit tests never call paid APIs.
+See [SECURITY.md](docs/SECURITY.md#known-limitations).

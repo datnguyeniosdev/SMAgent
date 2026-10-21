@@ -1,0 +1,15 @@
+schema_version: 1
+# Downstream MCP servers. Only allowlisted tools are registered. Disabled by default.
+mcp_servers:
+  - name: claude_code
+    enabled: false
+    command: claude
+    args: [mcp, serve]
+    allowed_tools: [Read, Grep]
+    read_only_tools: [Read, Grep]
+  - name: unity
+    enabled: false
+    command: unity            # e.g. ~/.unity/bin/unity; tools appear only while an Editor is connected
+    args: [mcp]
+    allowed_tools: [editor_status, get_scene_hierarchy]
+    read_only_tools: [editor_status, get_scene_hierarchy]

@@ -26,6 +26,7 @@ _READ_ONLY_TOOLS = "Read,Grep,Glob"
 
 class ClaudeCodeConnector:
     name = "claude_code"
+    kind = "runtime"  # an agent runtime, not a model API
     caps = frozenset(
         {
             Cap.text,
@@ -144,6 +145,26 @@ class ClaudeCodeConnector:
             output_tokens=usage.get("output_tokens"),
             cost_usd=data.get("total_cost_usd"),  # client-side estimate per docs
         )
+
+    async def health_status(self) -> tuple[str, str]:
+        """Free check: binary runs and reports a version. Auth is only proven by a real run."""
+        if not self.available:
+            return "unavailable", "CLAUDE_CODE_ENABLED is false"
+        env = {k: v for k, v in os.environ.items() if k not in _STRIP_ENV}
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                self.binary,
+                "--version",
+                env=env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            out, _ = await asyncio.wait_for(proc.communicate(), 20)
+        except (FileNotFoundError, TimeoutError) as e:
+            return "unavailable", f"{self.binary} --version failed: {type(e).__name__}"
+        if proc.returncode != 0:
+            return "unavailable", f"{self.binary} --version exited {proc.returncode}"
+        return "validated", f"{out.decode().strip()} (binary ok; auth not yet proven)"
 
     async def cancel(self, task_id: str) -> bool:
         proc = self._procs.get(task_id)

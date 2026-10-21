@@ -262,7 +262,8 @@ def test_api_attachments_and_tasks(api):
     task_id = r.json()["task_id"]
     body = api.get(f"/api/v1/tasks/{task_id}", headers=H).json()["task"]
     assert body["state"] == "failed" and body["error_category"] == "unsupported"
-    assert api.get(f"/api/v1/tasks/{task_id}/artifacts", headers=H).json() == []
+    arts = api.get(f"/api/v1/tasks/{task_id}/artifacts", headers=H).json()
+    assert [a["kind"] for a in arts] == ["envelope"]  # result envelope only; nothing executed
     r = api.post("/api/v1/tasks", headers=H, json={"description": "x", "workflow": "code"})
     assert r.status_code == 422 and "WORKSPACE_ROOT" in r.json()["detail"]
     assert api.post("/api/v1/actions/forged/execute", headers=H).status_code == 409
@@ -305,3 +306,40 @@ def test_env_example_loads_with_blank_values(tmp_path):
     # Blank WORKSPACE_ROOT must not silently become the current directory.
     assert s.workspace_root is None and s.claude_code_mcp_config is None
     assert s.telegram_bot_token is None and s.qa_commands == {}
+
+
+async def test_generic_telegram_commands(tg):
+    gw, bot, orch = tg
+    m = msg()
+    await gw.on_tool(m, cmd('workspace.list_files {"pattern": "*.py"}'))
+    assert "Tool task" in m.answer.call_args.args[0]
+    task = next(iter(orch.tasks.values()))
+    await asyncio.sleep(0.2)
+    assert task.state == TaskState.succeeded and task.request["tool"] == "workspace.list_files"
+    m = msg()
+    await gw.on_tool(m, cmd("workspace.list_files [1]"))
+    assert "JSON object" in m.answer.call_args.args[0]
+    m = msg()
+    await gw.on_plugins(m)
+    assert (
+        "<b>data</b>" in m.answer.call_args.args[0] and "<b>unity</b>" in m.answer.call_args.args[0]
+    )
+    m = msg()
+    await gw.on_steps(m, cmd(task.task_id))
+    assert "<code>run</code> succeeded" in m.answer.call_args.kwargs["text"]
+    m = msg()
+    await gw.on_answer(m, cmd(f"{task.task_id} yes"))
+    assert "not waiting" in m.answer.call_args.args[0]
+    m = msg(user=STRANGER)
+    await gw.on_tool(m, cmd("workspace.list_files {}"))
+    m.answer.assert_not_called()
+
+
+async def test_auto_draft_uses_generic_intake(tg):
+    gw, bot, orch = tg
+    m = msg()
+    await gw.on_task(m, cmd("profile the dataset"))
+    labels = [
+        b.text for row in m.answer.call_args.kwargs["reply_markup"].inline_keyboard for b in row
+    ]
+    assert labels[0] == "🤖 Auto" and "📊 Data" in labels and "🛠 Code" in labels

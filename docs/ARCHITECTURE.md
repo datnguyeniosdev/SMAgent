@@ -1,5 +1,7 @@
 # Architecture
 
+> **Superseded (Phase 1 snapshot).** Current architecture: [GENERIC_PLATFORM_ARCHITECTURE.md](GENERIC_PLATFORM_ARCHITECTURE.md). Phase 1 workflows now run as plugin task types.
+
 ```
 Telegram (control group) ─┐                      ┌─> Telegram (report channel)
 REST API (bearer token) ──┴─> FastAPI app/main.py │

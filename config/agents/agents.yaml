@@ -1,0 +1,21 @@
+schema_version: 1
+agents:
+  - id: assistant
+    name: General assistant
+    capabilities: [general.answer]
+  - id: designer
+    name: UI designer
+    description: Visual analysis and layout redesign (Gemini preferred).
+    capabilities: [design.layout_analysis, design.image_generate, general.answer]
+    executor_preference: [provider:gemini, provider:openai]
+  - id: implementer
+    name: Implementer
+    description: Hands implementation prompts to a coding runtime.
+    capabilities: [implementation.handoff, workspace.write_file]
+  - id: coordinator
+    name: Coordinator
+    description: Context, prompt assembly and reporting (deterministic).
+    capabilities: [context.load, prompt.implementation, report.publish]
+  - id: researcher
+    name: Researcher
+    capabilities: [document.extract, document.report, research.web_search]

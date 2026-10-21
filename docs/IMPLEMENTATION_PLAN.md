@@ -1,8 +1,10 @@
 # Implementation Plan
 
+> **Phase 1 plan.** Later phases: [PHASE_2_IMPLEMENTATION.md](PHASE_2_IMPLEMENTATION.md), [PHASE_3_IMPLEMENTATION.md](PHASE_3_IMPLEMENTATION.md), [PHASE_4_IMPLEMENTATION.md](PHASE_4_IMPLEMENTATION.md), [PHASE_5_IMPLEMENTATION.md](PHASE_5_IMPLEMENTATION.md). In-memory state (risk below) is resolved by the SQLite store in Phase 4.
+
 ## Repository state before work (2026-10-20)
 
-- `/Users/darrennguyen/Working/local_agent_tool` was **empty**: no git repo, code, tests, or config.
+- The project directory was **empty**: no git repo, code, tests, or config.
 - Toolchain: Python 3.10 system, **uv not installed** (installed 0.13.2 via Homebrew); project pinned to 3.12.
 - Found: Claude Code CLI 2.1.71, Claude.app, Unity 6000.3.24f1, `unity` CLI 1.0.0-beta.12, Docker 27.5.1.
 - Missing: OpenCode, Gemini CLI. No provider API keys or Telegram credentials in the environment.

@@ -1,0 +1,98 @@
+schema_version: 1
+workflows:
+  - id: general.answer
+    version: "1"
+    description: Default workflow; answers with the first eligible text model.
+    steps:
+      - {id: answer, executor: capability, ref: general.answer, agent: assistant, inputs: {prompt: $task.objective}}
+      - {id: publish, executor: capability, ref: report.publish, agent: coordinator, depends_on: [answer],
+         inputs: {text: $steps.answer.output.text}}
+    outputs: {answer: $steps.answer.output.text}
+
+  - id: unity.ui_task
+    version: "1"
+    description: Delegate a Unity UI task to the implementer; the agent later reports back with screenshots.
+    steps:
+      - id: handoff
+        executor: capability
+        ref: implementation.handoff
+        agent: implementer
+        inputs: {prompt: $task.objective}
+    outputs: {handoff: $steps.handoff.output}
+
+  - id: visual_feedback
+    version: "1"
+    description: Human visual feedback -> design analysis -> deterministic implementation prompt -> handoff -> report.
+    timeout_s: 7200
+    steps:
+      - id: context
+        executor: capability
+        ref: context.load
+        agent: coordinator
+        inputs: {source_task_id: $input.source_task_id, report_id: $input.report_id, feedback_id: $input.feedback_id}
+      - id: design
+        executor: capability
+        ref: design.layout_analysis
+        agent: designer
+        depends_on: [context]
+        inputs:
+          objective: $steps.context.output.objective
+          feedback: $steps.context.output.feedback
+          report_text: $steps.context.output.report_text
+          constraints: $steps.context.output.constraints
+          image_artifact_ids: $steps.context.output.screenshots
+      - id: prompt
+        executor: capability
+        ref: prompt.implementation
+        agent: coordinator
+        depends_on: [context, design]
+        inputs:
+          objective: $steps.context.output.objective
+          feedback: $steps.context.output.feedback
+          design_spec: $steps.design.output
+          constraints: $steps.context.output.constraints
+          artifacts: $steps.context.output.artifacts
+          validation_requirements:
+            - Open the scene and confirm there are no console errors.
+            - Capture new screenshots at the same resolution as the originals.
+      - id: handoff
+        executor: capability
+        ref: implementation.handoff
+        agent: implementer
+        depends_on: [prompt]
+        inputs: {prompt: $steps.prompt.output.prompt, context_refs: $steps.prompt.output.artifact_refs}
+      - id: publish
+        executor: capability
+        ref: report.publish
+        agent: coordinator
+        depends_on: [handoff]
+        inputs:
+          text: $steps.design.output.summary
+          artifact_ids: $steps.prompt.artifacts
+    outputs:
+      design: $steps.design.output
+      prompt_sha256: $steps.prompt.output.sha256
+      handoff: $steps.handoff.output
+
+  - id: feedback.acknowledge
+    version: "1"
+    description: Record non-visual feedback. The bot's reply to the operator's message is the acknowledgement.
+    final_report: false   # no extra post: the threaded reply already confirms it
+    steps:
+      - {id: context, executor: capability, ref: context.load, agent: coordinator,
+         inputs: {source_task_id: $input.source_task_id, report_id: $input.report_id, feedback_id: $input.feedback_id}}
+
+  - id: files.write_with_approval
+    version: "1"
+    description: Create a file; policy requires approval before the side effect.
+    steps:
+      - {id: write, executor: capability, ref: workspace.write_file, agent: implementer,
+         inputs: {path: $input.path, content: $input.content}}
+    outputs: {file: $steps.write.output}
+
+  - id: repo.status
+    version: "1"
+    description: Read-only git status of the configured workspace (a safe end-to-end check).
+    steps:
+      - {id: status, executor: capability, ref: repo.inspect}
+    outputs: {changed: $steps.status.output.changed}

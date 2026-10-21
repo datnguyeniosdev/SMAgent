@@ -116,10 +116,13 @@ def settings(tmp_path, repo):
         workspace_root=repo,
         max_attachment_bytes=1024 * 1024,
         action_ttl_s=60,
+        config_dir=None,  # legacy tests run without the YAML gateway configuration
     )
 
 
-def build_orch(settings: Settings, connectors, qa_commands=None, image=None, auto="approve"):
+def build_orch(
+    settings: Settings, connectors, qa_commands=None, image=None, auto="approve", gateway_cfg=None
+):
     notifier = RecordingNotifier(auto)
     orch = Orchestrator(
         settings,
@@ -131,6 +134,7 @@ def build_orch(settings: Settings, connectors, qa_commands=None, image=None, aut
         ActionRegistry(settings.action_ttl_s),
         image_provider=image,
         notifier=notifier,
+        gateway_cfg=gateway_cfg,
     )
     notifier.orch = orch
     return orch, notifier

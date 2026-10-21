@@ -1,0 +1,38 @@
+schema_version: 1
+workflows:
+  - id: design.image
+    version: "1"
+    description: Generate a design image with the image provider, validate the file, publish it to the channel.
+    input_schema:
+      type: object
+      required: [prompt, width, height, transparent]
+      properties:
+        prompt: {type: string, minLength: 3}
+        width: {type: integer, minimum: 16, maximum: 3840}
+        height: {type: integer, minimum: 16, maximum: 3840}
+        transparent: {type: boolean}
+    input_schema:
+      type: object
+      required: [prompt, width, height, transparent]
+      properties:
+        prompt: {type: string, minLength: 3}
+        width: {type: integer, minimum: 16, maximum: 3840}
+        height: {type: integer, minimum: 16, maximum: 3840}
+        transparent: {type: boolean}
+    steps:
+      - id: generate
+        executor: capability
+        ref: design.image_generate
+        agent: designer
+        inputs: {prompt: $input.prompt, width: $input.width, height: $input.height, transparent: $input.transparent}
+      - id: validate
+        executor: validator
+        ref: media.image_valid
+        depends_on: [generate]
+        inputs:
+          images: [$steps.generate.output]
+          rules: {width: $input.width, height: $input.height, require_alpha: $input.transparent}
+    success_criteria:
+      - {kind: artifact_exists, step: generate}
+      - {kind: gate_passed, step: validate}
+    outputs: {image: $steps.generate.output}

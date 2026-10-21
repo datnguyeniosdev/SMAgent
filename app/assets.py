@@ -1,4 +1,4 @@
-"""Image inspection (stdlib only), Unity-oriented validation and asset manifests."""
+"""Image inspection (stdlib only), configurable asset validation rules and manifests."""
 
 import struct
 from dataclasses import asdict, dataclass, field

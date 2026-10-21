@@ -68,6 +68,7 @@ class AgentResult:
     input_tokens: int | None = None
     output_tokens: int | None = None
     cost_usd: float | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)  # runtime-specific evidence
 
 
 class AgentConnector(Protocol):

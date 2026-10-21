@@ -1,0 +1,15 @@
+schema_version: 1
+workflows:
+  - id: research.document_report
+    version: "1"
+    description: Extract one supplied document and publish a cited report.
+    steps:
+      - {id: extract, executor: capability, ref: document.extract, agent: researcher, inputs: {ref: $input.document_ref}}
+      - {id: build, executor: capability, ref: document.report, agent: researcher, depends_on: [extract],
+         inputs: {extractions: [$steps.extract.output], objective: $task.objective}}
+      - {id: validate, executor: validator, ref: documents.report_valid, depends_on: [build],
+         inputs: {artifact_ids: $steps.build.artifacts, sources: $steps.build.output.sources}}
+      - {id: publish, executor: capability, ref: report.publish, agent: coordinator, depends_on: [validate],
+         inputs: {text: $task.objective, artifact_ids: $steps.build.artifacts}}
+    success_criteria: [{kind: gate_passed, step: validate}]
+    outputs: {report: $steps.build.output}

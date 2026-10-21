@@ -1,0 +1,110 @@
+schema_version: 1
+capabilities:
+  - id: general.answer
+    description: Answer a question with any configured text model.
+    input_schema: {type: object, required: [prompt], properties: {prompt: {type: string, minLength: 1}}}
+    output_schema: {type: object, required: [text], properties: {text: {type: string, minLength: 1}}}
+    executors:
+      - {type: provider, ref: openai, operation: generate, priority: 10}
+      - {type: provider, ref: gemini, operation: generate, priority: 20}
+      - {type: provider, ref: deepseek, operation: generate, priority: 30}
+
+  - id: design.layout_analysis
+    description: Analyse UI screenshots plus user feedback and return a structured layout redesign.
+    input_schema:
+      type: object
+      required: [objective, feedback, image_artifact_ids]
+      properties:
+        objective: {type: string}
+        feedback: {type: string, minLength: 1}
+        report_text: {type: string}
+        constraints: {type: array, items: {type: string}}
+        image_artifact_ids: {type: array, items: {type: string}, minItems: 1}
+    output_schema:
+      type: object
+      required: [summary, issues, acceptance_criteria]
+      properties:
+        summary: {type: string, minLength: 1}
+        issues:
+          type: array
+          items: {type: object, required: [element, problem, fix]}
+        layout: {type: object}
+        acceptance_criteria: {type: array, items: {type: string}, minItems: 1}
+        assumptions: {type: array, items: {type: string}}
+    timeout_s: 180
+    retry: {max_attempts: 2, delay_s: 2, retry_on: [timeout, rate_limit, network]}
+    executors:
+      - type: provider
+        ref: gemini
+        operation: generate_structured
+        priority: 10
+        options:
+          system: >-
+            You are a senior UI/UX designer for a Unity game. Analyse the screenshots and the user's
+            feedback. Propose concrete layout fixes (anchors, spacing, alignment, sizes in reference
+            resolution units). Do not claim anything is implemented.
+          prompt_template: |-
+            Objective: {objective}
+            Previous report: {report_text}
+            User feedback: {feedback}
+            Constraints: {constraints}
+            Return the redesign as JSON.
+      - type: provider
+        ref: openai
+        operation: generate_structured
+        priority: 20
+        options:
+          system: You are a senior UI/UX designer. Propose concrete layout fixes. Do not claim anything is implemented.
+          prompt_template: "Objective: {objective}\nUser feedback: {feedback}\nConstraints: {constraints}"
+
+  - id: prompt.implementation
+    description: Deterministically assemble an implementation prompt from objective, feedback and a validated design spec.
+    input_schema: {type: object, required: [objective, design_spec]}
+    output_schema: {type: object, required: [prompt, sha256]}
+    executors:
+      - {type: internal, ref: prompt.build}
+
+  - id: implementation.handoff
+    description: Hand an implementation prompt to a coding runtime (new execution) or back to the caller.
+    side_effects: true
+    input_schema: {type: object, required: [prompt], properties: {prompt: {type: string, minLength: 20}}}
+    output_schema: {type: object, required: [handoff_id, status, mode]}
+    timeout_s: 3600
+    executors:
+      - {type: runtime, ref: opencode, operation: new_execution, priority: 5}
+      - {type: runtime, ref: claude_code, operation: new_execution, priority: 10}
+      - {type: runtime, ref: claude_code, operation: return_to_caller, priority: 90}
+
+  - id: report.publish
+    description: Persist a report and publish it to Telegram.
+    input_schema: {type: object, required: [text]}
+    executors:
+      - {type: internal, ref: report.publish}
+
+  - id: context.load
+    description: Load objective, constraints, history, screenshots and feedback of an earlier task.
+    input_schema: {type: object, required: [source_task_id]}
+    executors:
+      - {type: internal, ref: context.load}
+
+  - id: workspace.write_file
+    description: Create a new file in the task workspace (never overwrites).
+    side_effects: true
+    input_schema: {type: object, required: [path, content]}
+    executors:
+      - {type: tool, ref: workspace.create_file}
+
+  - id: design.image_generate
+    description: Generate a design image (mockup, icon, sprite, banner) with the configured image provider (fal.ai).
+    side_effects: true             # paid external generation
+    input_schema:
+      type: object
+      required: [prompt]
+      properties:
+        prompt: {type: string, minLength: 3, maxLength: 4000}
+        width: {type: integer, minimum: 16, maximum: 3840}
+        height: {type: integer, minimum: 16, maximum: 3840}
+        transparent: {type: boolean}
+    timeout_s: 360
+    executors:
+      - {type: tool, ref: media.generate}

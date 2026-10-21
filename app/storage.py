@@ -64,11 +64,19 @@ def _inside(root: Path, path: Path) -> Path:
 
 
 class AttachmentStore:
-    def __init__(self, root: Path, max_bytes: int):
+    def __init__(self, root: Path, max_bytes: int, store=None):
         self.root = root
         self.max_bytes = max_bytes
+        self.store = store
         self._items: dict[str, Attachment] = {}
         root.mkdir(parents=True, exist_ok=True)
+        for body in store.list("attachment") if store else []:
+            att = Attachment.model_validate(body)
+            self._items[att.attachment_id] = att
+
+    def _persist(self, att: Attachment) -> None:
+        if self.store:
+            self.store.put("attachment", att.attachment_id, att, task_id=att.task_id)
 
     def save(
         self,
@@ -106,6 +114,7 @@ class AttachmentStore:
             f.write(data)
         att.storage_path = path
         self._items[att.attachment_id] = att
+        self._persist(att)
         return att
 
     def get(self, attachment_id: str, task_id: str | None = None) -> Attachment:
@@ -120,6 +129,7 @@ class AttachmentStore:
         """Assign an inbox attachment to a task (one-way)."""
         att = self.get(attachment_id, task_id)
         att.task_id = task_id
+        self._persist(att)
         return att
 
     def read(self, att: Attachment) -> bytes:
@@ -140,14 +150,63 @@ class AttachmentStore:
         return True
 
 
+_MIME = {
+    ".json": "application/json",
+    ".csv": "text/csv",
+    ".md": "text/markdown",
+    ".txt": "text/plain",
+    ".log": "text/plain",
+    ".diff": "text/x-diff",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".webp": "image/webp",
+    ".html": "text/html",
+}
+
+
 class ArtifactStore:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, store=None, max_bytes: int = 50 * 1024 * 1024):
         self.root = root
+        self.store = store
+        self.max_bytes = max_bytes
         self._items: dict[str, Artifact] = {}
         root.mkdir(parents=True, exist_ok=True)
+        for body in store.list("artifact") if store else []:
+            art = Artifact.model_validate(body)
+            self._items[art.artifact_id] = art
 
-    def add(self, task_id: str, kind: str, filename: str, data: bytes | str, **meta) -> Artifact:
+    def _persist(self, art: Artifact) -> None:
+        if self.store:
+            self.store.put("artifact", art.artifact_id, art, task_id=art.task_id)
+
+    def set_validation(self, artifact_id: str, status: str) -> None:
+        art = self._items[artifact_id]
+        art.validation_status = status
+        self._persist(art)
+
+    def read(self, art: Artifact) -> bytes:
+        path = _inside(self.root, art.path)
+        if path.is_symlink():
+            raise AttachmentError("refusing to read symlink")
+        data = path.read_bytes()
+        if sha256(data) != art.sha256:
+            raise AttachmentError(f"artifact {art.artifact_id} content changed on disk")
+        return data
+
+    def add(
+        self,
+        task_id: str,
+        kind: str,
+        filename: str,
+        data: bytes | str,
+        *,
+        step_id: str | None = None,
+        producer: str | None = None,
+        **meta,
+    ) -> Artifact:
         raw = data.encode() if isinstance(data, str) else data
+        if len(raw) > self.max_bytes:
+            raise AttachmentError(f"artifact {filename} exceeds {self.max_bytes} bytes")
         name = Path(filename).name or "artifact"
         art = Artifact(
             task_id=task_id,
@@ -156,6 +215,9 @@ class ArtifactStore:
             path=Path("."),
             sha256=sha256(raw),
             size_bytes=len(raw),
+            mime_type=_MIME.get(Path(name).suffix.lower(), "application/octet-stream"),
+            step_id=step_id,
+            producer=producer,
             meta=meta,
         )
         path = _inside(self.root, self.root / _safe_segment(task_id) / f"{art.artifact_id}_{name}")
@@ -164,7 +226,24 @@ class ArtifactStore:
             f.write(raw)
         art.path = path
         self._items[art.artifact_id] = art
+        self._persist(art)
         return art
+
+    def delete(self, artifact_id: str) -> None:
+        art = self._items.pop(artifact_id)
+        path = _inside(self.root, art.path)
+        if path.exists() and not path.is_symlink():
+            path.unlink()
+        if self.store:
+            self.store.put(
+                "artifact_deleted",
+                artifact_id,
+                {"task_id": art.task_id, "sha256": art.sha256},
+                task_id=art.task_id,
+            )
+
+    def all(self) -> list[Artifact]:
+        return list(self._items.values())
 
     def get(self, artifact_id: str) -> Artifact | None:
         return self._items.get(artifact_id)

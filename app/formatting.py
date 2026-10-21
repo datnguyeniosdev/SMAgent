@@ -21,6 +21,70 @@ _STATE_ICON = {
 }
 
 
+# Prefix vocabulary: the first token of every outgoing message, so its type is recognisable at a glance.
+KINDS = {
+    "done": ("✅", "DONE"),
+    "failed": ("❌", "FAILED"),
+    "cancelled": ("⏹", "CANCELLED"),
+    "expired": ("⌛", "EXPIRED"),
+    "unknown": ("❓", "UNKNOWN"),
+    "report": ("📋", "REPORT"),
+    "feedback": ("💬", "FEEDBACK"),
+    "question": ("🙋", "QUESTION"),
+    "approval": ("🔐", "APPROVAL"),
+    "deploy": ("🚀", "DEPLOY"),
+    "step": ("⚙️", "STEP"),
+    "tool": ("🔧", "TOOL"),
+    "qa": ("🧪", "QA"),
+    "review": ("🔍", "REVIEW"),
+    "warn": ("⚠️", "WARN"),
+    "info": ("ℹ️", "INFO"),
+}
+STATE_KIND = {
+    "succeeded": "done",
+    "failed": "failed",
+    "cancelled": "cancelled",
+    "expired": "expired",
+    "unknown": "unknown",
+}
+
+
+def hashtag(text: str) -> str:
+    """Telegram hashtag (tap = search the chat for every message with it)."""
+    return "#" + (re.sub(r"[^0-9A-Za-z]+", "_", text).strip("_") or "gateway")
+
+
+def envelope(
+    kind: str,
+    body: str = "",
+    *,
+    project: str,
+    task_id: str | None = None,
+    title: str | None = None,
+    session: str | None = None,
+    ref: str | None = None,
+    reply: str | None = None,
+) -> str:
+    """Standard message: `ICON KIND · #project · #task`, title, body, then ids and a reply template.
+    body is HTML; title/ids are escaped here. reply is a command template shown tap-to-copy."""
+    icon, label = KINDS[kind]
+    head = f"{icon} <b>{label}</b> · {hashtag(project)}" + (f" · #{task_id}" if task_id else "")
+    out = [head]
+    if title:
+        out.append(f"<b>{escape(truncate(title, 120))}</b>")
+    if body:
+        out += ["", body]
+    ids = [f"project <b>{escape(project)}</b>"]
+    if session:
+        ids.append(f"session <code>{escape(session)}</code>")
+    if ref:
+        ids.append(f"ref <code>{escape(ref)}</code>")
+    out += ["", "🆔 " + " · ".join(ids)]
+    if reply:
+        out.append(f"↩️ {reply}")
+    return "\n".join(out)
+
+
 def code(text: str, lang: str | None = None) -> str:
     cls = f' class="language-{escape(lang)}"' if lang else ""
     return f"<pre><code{cls}>{escape(text, quote=False)}</code></pre>"

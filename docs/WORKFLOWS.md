@@ -1,5 +1,7 @@
 # Workflows
 
+> **Superseded (Phase 1 snapshot).** These workflows now run as plugin task types through the generic engine: ask → `general/answer`, code → `software/implement`, delegate_review → `software/implement_reviewed`, parallel → `software/parallel_implement`, design_implement_review → `unity/feature`. See [WORKFLOW_ENGINE.md](WORKFLOW_ENGINE.md) and the plugin docs.
+
 Choose one from the inline keyboard after `/task …`, or pass `workflow` to `POST /api/v1/tasks`.
 
 | Workflow | Steps | Needs |

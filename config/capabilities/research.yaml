@@ -1,0 +1,22 @@
+schema_version: 1
+capabilities:
+  - id: document.extract
+    description: Extract headings, facts (with line numbers) and links from a supplied text/Markdown document.
+    input_schema: {type: object, required: [ref]}
+    executors:
+      - {type: tool, ref: documents.extract}
+  - id: document.report
+    description: Build a source-attributed Markdown report from extractions.
+    input_schema: {type: object, required: [extractions]}
+    output_schema: {type: object, required: [sources, facts]}
+    executors:
+      - {type: plugin, ref: documents.build_report}
+  - id: research.web_search
+    description: Web search through a configured MCP search server (none is configured by default).
+    input_schema: {type: object, required: [query]}
+    executors:
+      - {type: tool, ref: mcp.search.web_search}
+  - id: repo.inspect
+    description: Git status of the configured workspace.
+    executors:
+      - {type: tool, ref: git.status}

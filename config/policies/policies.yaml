@@ -1,0 +1,11 @@
+schema_version: 1
+policies:
+  approvals:
+    - {match: "runtime:claude_code.new_execution", reason: coding runtime edits files}
+    - {match: "runtime:opencode.new_execution", reason: coding runtime edits files}
+    - {match: "capability:workspace.write_file", reason: file creation}
+    - {match: "tool:media.generate", reason: paid external generation}
+  provider_allowlist: null       # null = every configured provider
+  tool_allowlist: null           # fnmatch patterns, e.g. ["workspace.*", "mcp.claude_code.Read"]
+  mcp_url_hosts: [127.0.0.1, localhost, "::1"]
+  artifact_retention_days: 30
