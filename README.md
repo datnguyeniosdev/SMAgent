@@ -97,6 +97,18 @@ uv run agw --env dev dev
 - Paid providers (fal, ...) are off in dev/uat until you add their keys to that file.
 - `AGW_ENV=dev` works too, in place of `--env dev`.
 
+**Prod runs from its own copy.** `../.agw-prod` is a git worktree on `main`, with prod's `.env` and `var/`. The global Claude hook and channel run from its `.venv` too. Work happens here on `develop` (`--env dev`); prod only changes when you release:
+
+```bash
+git -C ../.agw-prod merge --ff-only develop
+```
+
+```bash
+cd ../.agw-prod && uv sync
+```
+
+Then restart prod there (Ctrl-C, `uv run agw dev`). To roll back, `git -C ../.agw-prod reset --hard <previous commit>` and restart.
+
 ```bash
 uv run agw dev
 ```
