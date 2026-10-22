@@ -41,6 +41,16 @@ claude mcp add --transport http --scope project agent-gateway http://127.0.0.1:8
 | Config-driven gateway | [CONFIG_DRIVEN_GATEWAY.md](docs/CONFIG_DRIVEN_GATEWAY.md) · [CONFIG_UPGRADE_AUDIT.md](docs/CONFIG_UPGRADE_AUDIT.md) |
 | Phase reports | [P2 audit](docs/PHASE_2_AUDIT.md) · [P2](docs/PHASE_2_IMPLEMENTATION.md) · [P3 audit](docs/PHASE_3_ARCHITECTURE_AUDIT.md) · [P3](docs/PHASE_3_IMPLEMENTATION.md) · [P4 audit](docs/PHASE_4_AUDIT.md) · [P4](docs/PHASE_4_IMPLEMENTATION.md) · [P5 audit](docs/PHASE_5_AUDIT.md) · [P5](docs/PHASE_5_IMPLEMENTATION.md) |
 
+## Quick install
+
+```bash
+scripts/install.sh
+```
+
+One idempotent script: Python environment, `.env` with local secrets, Claude Code global setup and a `doctor` check. Options: `--agents LIST`, `--env dev|uat`, `--no-global`, `--start`. Telegram values can be exported first (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CONTROL_CHAT_ID`, `TELEGRAM_ALLOWED_USER_IDS`); see `scripts/install.sh --help`.
+
+Agents that should install or connect themselves: point them to [docs/AGENT_CONNECT.md](docs/AGENT_CONNECT.md).
+
 ## Quick start (uv commands)
 
 ```bash
