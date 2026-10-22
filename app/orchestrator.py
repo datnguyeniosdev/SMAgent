@@ -30,6 +30,7 @@ from app.engine import StepError, StepOutput, WorkflowEngine
 from app.intake import TaskRequest
 from app.logs import correlation_id
 from app.models import (
+    ART_TASK_TYPES,
     TERMINAL,
     AgentProfile,
     AgentSession,
@@ -204,6 +205,7 @@ class Orchestrator:
         self.qa = qa
         self.actions = actions
         self._image_provider = image_provider
+        self._model3d_provider = None  # Meshy, set by app.main.build
         self.switches = Switches(self.store, {"generate_art": image_on})
         self.router.switches = self.switches
         self.notifier: Notifier = notifier or LogNotifier()
@@ -278,6 +280,15 @@ class Orchestrator:
     @image_provider.setter
     def image_provider(self, provider: ImageGenerationProvider | None) -> None:
         self._image_provider = provider
+
+    @property
+    def model3d_provider(self):
+        """The 3D provider (Meshy); None while generate_art is switched off (/mcp)."""
+        return self._model3d_provider if self.switches.on("generate_art") else None
+
+    @model3d_provider.setter
+    def model3d_provider(self, provider) -> None:
+        self._model3d_provider = provider
 
     def plan_for(self, task: Task, role: str | None) -> list[str]:
         """The project's executors for this workflow role (Telegram /plan), tried first."""
@@ -588,17 +599,19 @@ class Orchestrator:
         base = data.setdefault("base_prompt", data.get("prompt", ""))
         revisions = [*data.get("revisions", []), feedback.strip()[:500]]
         data["revisions"] = revisions
-        data["prompt"] = fmt.truncate(
-            f"{base.rstrip()}\n\nRevision requests from the operator (apply all, newest last; keep "
-            "everything else the same):\n- " + "\n- ".join(revisions[-5:]),
-            3900,
+        rev = ("\n\nRevision requests from the operator (apply all, newest last; keep everything else the "
+               "same):\n- " + "\n- ".join(revisions[-5:]))  # fmt: skip
+        limit = 790 if src.task_type == "design_model3d" else 3900  # Meshy takes 800 characters
+        data["prompt"] = fmt.truncate(base.rstrip(), max(100, limit - len(rev))) + fmt.truncate(
+            rev, limit - 100
         )
         data.update(revision_of=src.task_id, operator_requested=True)
         new = await self.submit_request(
             TaskRequest(
                 objective=f"Art revision: {feedback.strip()[:120]}",
-                task_type="design_image",
+                task_type=src.task_type,
                 data=data,
+                attachment_ids=list(src.attachment_ids),  # e.g. the reference image of a 3D model
                 user_id=user_id,
                 parent_task_id=src.task_id,
                 correlation_id=src.correlation_id,
@@ -954,7 +967,7 @@ class Orchestrator:
         )
         photos = self._final_photos(task)
         reply = "Reply to this post to send feedback"
-        if task.task_type == "design_image" and task.state == TaskState.succeeded and photos:
+        if task.task_type in ART_TASK_TYPES and task.state == TaskState.succeeded and photos:
             acts += [  # the operator reviews generated art before an agent may use it
                 self.actions.create("art_accept", task.task_id, "✅ Accept", TERMINAL),
                 self.actions.create("art_feedback", task.task_id, "✏️ Feedback", TERMINAL),
@@ -1309,7 +1322,7 @@ class Orchestrator:
 
     async def request_approval(self, task, run, step: StepDef, rec: StepRecord) -> bool:
         data = (task.request or {}).get("data") or {}
-        if task.task_type == "design_image" and data.get("operator_requested"):
+        if task.task_type in ART_TASK_TYPES and data.get("operator_requested"):
             rec.approved_by = "operator (asked for this revision on Telegram)"
             return True
         desc = {

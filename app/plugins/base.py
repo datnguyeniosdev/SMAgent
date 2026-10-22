@@ -125,6 +125,22 @@ class PluginManager:
         self.loaded[manifest.id] = lp
         return lp
 
+    def refresh_tools(self, services: Any, registry) -> list[str]:
+        """Register tools a plugin offers now but did not at start (e.g. a provider key set later)."""
+        added = []
+        for lp in self.active():
+            allowed = frozenset(lp.manifest.permissions) & self.granted
+            for t in lp.plugin.tools(services):
+                if (
+                    registry.get(t.name) is None
+                    and t.name.startswith(f"{lp.manifest.id}.")
+                    and t.permissions <= allowed
+                ):
+                    registry.register(t)
+                    lp.tool_names.append(t.name)
+                    added.append(t.name)
+        return added
+
     def active(self) -> list[LoadedPlugin]:
         return [lp for lp in self.loaded.values() if lp.active and lp.plugin]
 

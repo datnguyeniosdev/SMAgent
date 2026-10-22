@@ -7,6 +7,7 @@ routing:
     - {id: unity-ui, task_type: unity_ui, workflow: unity.ui_task, priority: 10}
     - {id: code-change, task_type: code_change, workflow: code.implement_and_test, priority: 15}
     - {id: design-image, task_type: design_image, workflow: design.image, priority: 16}
+    - {id: design-model3d, task_type: design_model3d, workflow: design.model3d, priority: 16}
     - {id: research, task_type: research_report, workflow: research.document_report, priority: 20}
     - {id: write-file, task_type: write_file, workflow: files.write_with_approval, priority: 30}
   feedback_routes:

@@ -75,7 +75,7 @@ class AgentDef(BaseModel):
 
 class ProviderDef(BaseModel):
     id: str = Field(pattern=_ID)
-    type: Literal["openai_compatible", "gemini", "fal"]
+    type: Literal["openai_compatible", "gemini", "fal", "meshy"]
     enabled: bool = True
     model: str | None = None
     model_env: str | None = None  # take the model id from this environment variable instead
@@ -89,6 +89,7 @@ class ProviderDef(BaseModel):
             "model.structured",
             "model.tool_calling",
             "image.generate",
+            "model3d.generate",
         ]
     ]
     json_mode: Literal["json_schema", "json_object", "prompt"] = "json_schema"

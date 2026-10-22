@@ -6,9 +6,11 @@ import json
 import re
 
 from app.assets import AssetRules, inspect_image, validate
+from app.connectors.base import ConnectorError
 from app.engine import StepOutput
 from app.intake import TaskRequest
 from app.plugins.base import Classification, OperationSpec, PlanResult, PluginManifest
+from app.storage import AttachmentError
 from app.tools import ToolContext, ToolDefinition, ToolError, ToolOutput
 from app.workflow import Criterion, GateResult, StepDef, WorkflowDef
 
@@ -67,8 +69,70 @@ async def tool_inspect(ctx: ToolContext, args: dict) -> ToolOutput:
     )
 
 
-def make_generate(provider):
+def _configured(services, attr: str):
+    """Registration follows what is configured; each call uses the provider as switched now (/mcp, /keys)."""
+    return getattr(services, f"_{attr}", getattr(services, attr, None))
+
+
+def _current(services, attr: str, what: str):
+    provider = getattr(services, attr, None)
+    if provider is None or not getattr(provider, "available", True):
+        raise ToolError(f"{what} is switched off (/mcp) or not configured (/keys)", "unavailable")
+    return provider
+
+
+GEN3D_SCHEMA = {
+    "type": "object",
+    "required": ["prompt"],
+    "properties": {
+        "prompt": {"type": "string", "minLength": 3, "maxLength": 800},
+        "image_ref": {"type": "string", "pattern": "^((att|art)_[0-9a-f]+)?$"},  # "" = text only
+        "texture": {"type": "boolean"},
+        "format": {"type": "string", "enum": ["glb", "fbx", "obj", "usdz", "stl"]},
+    },
+}
+
+
+def make_generate_3d(services):
+    async def generate_3d(ctx: ToolContext, args: dict) -> ToolOutput:
+        provider = _current(services, "model3d_provider", "3D generation")
+        image, mime = None, "image/png"
+        if args.get("image_ref"):
+            try:
+                _, mime, image = ctx.read_input(args["image_ref"])
+            except Exception as e:
+                raise ToolError(str(e), "forbidden") from e
+        fmt = args.get("format", "glb")
+        try:
+            r = await provider.generate_3d(
+                args["prompt"], image, mime, bool(args.get("texture", True)), fmt
+            )
+        except ConnectorError as e:
+            raise ToolError(str(e), e.category) from e
+        try:
+            model = ctx.artifacts.add(ctx.task_id, "model3d", f"model.{fmt}", r["model"], step_id=ctx.step_id,
+                                      producer=f"{provider.name}:{provider.model}", prompt=args["prompt"],
+                                      meshy_task=r["task_id"])  # fmt: skip
+        except AttachmentError as e:  # generated and paid for: say where it is
+            raise ToolError(
+                f"{e}; the model is in your Meshy account (task {r['task_id']})", "invalid_output"
+            ) from e
+        ids, out = [model.artifact_id], {"artifact_id": model.artifact_id, "format": fmt, "bytes": len(r["model"]),
+                                          "provider": provider.name, "model": provider.model,
+                                          "credits": r.get("credits")}  # fmt: skip
+        if r.get("thumbnail") and _info(r["thumbnail"])["format"] != "unknown":
+            thumb = ctx.artifacts.add(ctx.task_id, "image", "preview.png", r["thumbnail"], step_id=ctx.step_id,
+                                      producer=f"{provider.name}:{provider.model}")  # fmt: skip
+            ids.append(thumb.artifact_id)
+            out["preview_artifact_id"] = thumb.artifact_id
+        return ToolOutput(f"{fmt} model, {len(r['model'])} bytes", out, ids)
+
+    return generate_3d
+
+
+def make_generate(services):
     async def generate(ctx: ToolContext, args: dict) -> ToolOutput:
+        provider = _current(services, "image_provider", "image generation")
         w, h = args.get("width", 1024), args.get("height", 1024)
         data = await provider.generate(args["prompt"], f"{w}x{h}", bool(args.get("transparent")))
         info = _info(data)
@@ -246,18 +310,35 @@ class MediaPlugin:
                 source="plugin:media",
             )
         ]
-        provider = getattr(services, "image_provider", None)
+        provider = _configured(services, "image_provider")
         if provider is not None:  # only registered when a real provider is configured
             out.append(
                 ToolDefinition(
                     "media.generate",
                     f"Generate one image with {provider.name} ({provider.model}).",
                     {**GEN_SCHEMA, "additionalProperties": False},
-                    make_generate(provider),
+                    make_generate(services),
                     frozenset({"provider:image", "artifact:write"}),
                     risk="external",
                     environment=f"provider:{provider.name}",
                     timeout_s=300,
+                    requires_approval=True,
+                    side_effects=True,
+                    source="plugin:media",
+                )
+            )
+        m3d = _configured(services, "model3d_provider")
+        if m3d is not None:
+            out.append(
+                ToolDefinition(
+                    "media.generate_3d",
+                    f"Generate one 3D model with {m3d.name} (text or reference image -> glb/fbx/obj).",
+                    {**GEN3D_SCHEMA, "additionalProperties": False},
+                    make_generate_3d(services),
+                    frozenset({"provider:image", "artifact:write"}),
+                    risk="external",
+                    environment=f"provider:{m3d.name}",
+                    timeout_s=1500,
                     requires_approval=True,
                     side_effects=True,
                     source="plugin:media",

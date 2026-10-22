@@ -166,7 +166,7 @@ def test_example_config_validates():
     cfg = load_config(ROOT / "config")
     assert cfg.errors == []
     assert {"assistant", "designer", "implementer", "coordinator", "researcher"} <= set(cfg.agents)
-    assert len(cfg.agents["designer"].capabilities) == 3  # one agent, several capabilities
+    assert len(cfg.agents["designer"].capabilities) == 4  # one agent, several capabilities
     assert len(cfg.capabilities["design.layout_analysis"].executors) == 2  # several executors
     assert cfg.workflows["visual_feedback"].version == "1"
 

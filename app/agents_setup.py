@@ -55,7 +55,8 @@ title, else the folder name.
   `get_human_response`.
 - **Game art**: call `generate_art(prompt, purpose, requirements, width, height, project)`. The
   operator approves and reviews each image; use `get_task_result(...).images` only after
-  `review.state == "accepted"`.
+  `review.state == "accepted"`. 3D models: `output="model3d"` (+ `image_path`, `model_format`);
+  the file is `models[0].path` once accepted.
 - Confirm with the user before commits, pushes, deploys or anything destructive.
 """
 

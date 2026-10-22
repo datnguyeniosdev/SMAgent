@@ -49,7 +49,7 @@ def build_providers(cfg, client: httpx.AsyncClient) -> list:
         "model.tool_calling": Cap.tool_calling,
     }
     for p in cfg.providers.values():
-        if not p.enabled or p.type == "fal":  # image providers are built separately
+        if not p.enabled or p.type in ("fal", "meshy"):  # image / 3D providers are built separately
             continue
         key = os.environ.get(p.api_key_env)
         model = p.model or (os.environ.get(p.model_env) if p.model_env else None)
@@ -92,6 +92,20 @@ def load_gateway_config(s: Settings):
     if s.telegram_discussion_chat_id is not None:  # environment overrides YAML
         cfg.telegram.discussion_chat_id = s.telegram_discussion_chat_id
     return cfg
+
+
+def build_model3d(gateway_cfg, client):
+    """The 3D provider (Meshy) when configured with a key, else None."""
+    p = next(
+        (p for p in (gateway_cfg.providers.values() if gateway_cfg else []) if p.type == "meshy"),
+        None,
+    )
+    if p is None or not p.enabled or not os.environ.get(p.api_key_env):
+        return None
+    from app.connectors.meshy import MeshyProvider
+
+    model = p.model or (os.environ.get(p.model_env) if p.model_env else None)
+    return MeshyProvider(os.environ[p.api_key_env], model, client, timeout_s=p.timeout_s)
 
 
 def build_image(gateway_cfg, s: Settings, client) -> tuple:
@@ -213,7 +227,15 @@ def build(settings: Settings) -> Orchestrator:
         gateway_cfg=gateway_cfg,
     )
     orch.http_client = client  # reused by reload_providers
+    orch.model3d_provider = build_model3d(gateway_cfg, client)
+    refresh_tools(orch)
     return orch
+
+
+def refresh_tools(orch) -> None:
+    """Plugin tools whose provider appeared after the plugins loaded (e.g. media.generate_3d)."""
+    for name in orch.plugins.refresh_tools(orch, orch.tools):
+        orch.register_tool_capability(orch.tools.get(name))
 
 
 def reload_providers(orch) -> None:
@@ -229,6 +251,8 @@ def reload_providers(orch) -> None:
     orch.register_connectors()
     # ponytail: OpenAI images read Settings (loaded at start); only fal picks up a new key live
     orch.image_provider, _ = build_image(cfg, orch.s, client)
+    orch.model3d_provider = build_model3d(cfg, client)
+    refresh_tools(orch)
 
 
 @asynccontextmanager

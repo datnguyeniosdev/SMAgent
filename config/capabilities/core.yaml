@@ -108,3 +108,18 @@ capabilities:
     timeout_s: 360
     executors:
       - {type: tool, ref: media.generate}
+
+  - id: design.model3d_generate
+    description: Generate a 3D model (glb/fbx/obj) from text or a reference image with the 3D provider (Meshy).
+    side_effects: true             # paid external generation
+    input_schema:
+      type: object
+      required: [prompt]
+      properties:
+        prompt: {type: string, minLength: 3, maxLength: 800}
+        image_ref: {type: string}
+        texture: {type: boolean}
+        format: {type: string, enum: [glb, fbx, obj, usdz, stl]}
+    timeout_s: 1500
+    executors:
+      - {type: tool, ref: media.generate_3d}

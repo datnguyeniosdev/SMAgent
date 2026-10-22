@@ -17,7 +17,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from app.assets import inspect_image
-from app.models import TaskState, new_id, now
+from app.models import ART_TASK_TYPES, TaskState, new_id, now
 
 log = logging.getLogger(__name__)
 
@@ -628,7 +628,7 @@ class CollaborationService:
             )  # fmt: skip
             fb.follow_up_task_id = None
             fb.live_message_id, fb.delivered = _msg["message_id"], target is not None
-        elif (src := self.svc.tasks[task_id]).task_type == "design_image" and src.done:
+        elif (src := self.svc.tasks[task_id]).task_type in ART_TASK_TYPES and src.done:
             route, fb.route_id = None, "art_revision"  # Feedback on generated art: regenerate it
             fb.follow_up_task_id = (await self.svc.regenerate_art(src, fb.text, user_id)).task_id
         else:

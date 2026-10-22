@@ -110,6 +110,8 @@ folder name. Claude Code gets it from the session-start hook. Use the same name 
 - **Ask the operator:** `request_human_input(question, project)`, then `get_human_response`.
 - **Game art:** `generate_art(prompt, purpose, requirements, width, height, project)`. The operator
   approves it first and reviews each image; use images only after `review.state == "accepted"`.
+  3D models (Meshy): add `output="model3d"`, optionally `image_path` (reference image) and
+  `model_format` (glb, fbx, obj, usdz, stl); the file is `get_task_result(...).models[0].path`.
 
 ## Troubleshooting
 

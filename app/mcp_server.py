@@ -17,6 +17,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from app.agent_registry import CapabilityError
 from app.collaboration import CollaborationError
 from app.intake import TaskRequest
+from app.models import ART_TASK_TYPES
 from app.storage import AttachmentError, load_image_paths
 from app.workflow import StepState
 
@@ -68,6 +69,60 @@ def build_mcp_server(svc) -> MCPServer:
             return await fn(*args, **kwargs)
 
         return server.tool()(gated)
+
+    async def art_3d(prompt, purpose, requirements, project, session_id, image_path, fmt, texture):
+        """generate_art(output="model3d"): Meshy, with the same approval and review as images."""
+        if len(prompt.strip()) < 3 or len(purpose.strip()) < 3 or len(requirements.strip()) < 10:
+            raise GatewayToolError(
+                "describe the model: prompt (the object), purpose (where it is used) and requirements "
+                "(style, proportions, materials/colors, level of detail, what must or must not appear)"
+            )
+        if fmt not in ("glb", "fbx", "obj", "usdz", "stl"):
+            raise GatewayToolError("model_format must be glb, fbx, obj, usdz or stl")
+        if svc.model3d_provider is None:
+            raise GatewayToolError(
+                "no 3D provider is on: set MESHY_API_KEY (/keys) and check generate_art in /mcp"
+            )
+        brief = f"{prompt.strip()}. For: {purpose.strip()}. {requirements.strip()}"
+        if len(brief) > 800:
+            raise GatewayToolError(
+                f"the 3D brief is {len(brief)} characters; Meshy takes 800: shorten it"
+            )
+        att_ids, ref = [], ""
+        if image_path:
+            from app.assets import inspect_image
+
+            [(name, data)] = paths_or_error([image_path])
+            kind = inspect_image(data).format
+            if kind not in ("png", "jpeg", "webp"):
+                raise GatewayToolError(f"{name}: the reference image must be PNG, JPEG or WebP")
+            try:
+                att = svc.attachments.save(data, name, f"image/{kind}", "mcp")
+            except AttachmentError as e:
+                raise GatewayToolError(str(e)) from e
+            att_ids, ref = [att.attachment_id], att.attachment_id
+        data = {"prompt": brief, "image_ref": ref, "texture": bool(texture), "format": fmt}
+        data.update({k: v for k, v in (("project", project), ("session_id", session_id)) if v})
+        try:
+            task = await svc.submit_request(
+                TaskRequest(
+                    objective=f"3D: {brief[:200]}",
+                    task_type="design_model3d",
+                    data=data,
+                    attachment_ids=att_ids,
+                    user_id="mcp",
+                    source="mcp",
+                )  # fmt: skip
+            )
+        except ValueError as e:
+            raise GatewayToolError(str(e)) from e
+        return {
+            "task_id": task.task_id,
+            "state": task.state.value,
+            "note": "the operator approves the cost, then reviews the model's preview on Telegram. Poll "
+            "get_task_result every ~30 s: review.state accepted -> models[0].path is the file; "
+            "changes_requested -> follow review.next_task_id; pending -> wait (3D takes a few minutes)",
+        }
 
     def task_or_error(task_id: str):
         task = svc.tasks.get(task_id)
@@ -145,13 +200,17 @@ def build_mcp_server(svc) -> MCPServer:
             for a in svc._all_artifacts(task)
             if (a.mime_type or "").startswith("image/") and a.validation_status != "failed"
         ]  # fmt: skip
+        env["models"] = [  # 3D models (generate_art output=model3d)
+            {"artifact_id": a.artifact_id, "path": str(a.path), "filename": a.filename}
+            for a in svc._all_artifacts(task) if a.kind == "model3d"
+        ]  # fmt: skip
         if (
-            task.task_type == "design_image"
+            task.task_type in ART_TASK_TYPES
         ):  # generated art: only usable once the operator accepts it
             review = svc.art_review(task_id) or {"state": "pending" if task.done else "generating"}
             env["review"] = review
             if review.get("state") != "accepted":
-                env["images"] = []
+                env["images"], env["models"] = [], []
         env["feedback"] = [
             {"feedback_id": f.feedback_id, "report_id": f.report_id, "text": f.text,
              "user_id": f.user_id, "created_at": f.created_at.isoformat()}
@@ -366,6 +425,10 @@ def build_mcp_server(svc) -> MCPServer:
         transparent: bool = False,
         project: str | None = None,
         session_id: str | None = None,
+        output: str = "image",
+        image_path: str | None = None,
+        model_format: str = "glb",
+        texture: bool = True,
     ) -> dict[str, Any]:
         """Generate game art / a design image with the configured image provider (fal.ai): icons,
         sprites, backgrounds, UI mockups, banners. Paid: the operator approves each one on Telegram.
@@ -376,7 +439,24 @@ def build_mcp_server(svc) -> MCPServer:
         centered with 10% margin, solid #1B2A49 background, no text, no shadow").
         Returns a task_id at once; poll get_task_status, then get_task_result -> images[].path is the
         PNG to copy into the repo. width/height 16-3840; transparent=true also requires an alpha
-        channel (flux models produce opaque images, so the check fails for them)."""
+        channel (flux models produce opaque images, so the check fails for them).
+        output="model3d": a 3D model with Meshy instead (props, characters, items). prompt describes
+        the object (max 800 characters with purpose and requirements); image_path: absolute path of
+        a reference image (image-to-3D); model_format glb | fbx | obj | usdz | stl; texture=false for
+        a bare mesh. The operator reviews its preview; get_task_result(...).models[].path is the file."""
+        if output == "model3d":
+            return await art_3d(
+                prompt,
+                purpose,
+                requirements,
+                project,
+                session_id,
+                image_path,
+                model_format,
+                texture,
+            )
+        if output != "image":
+            raise GatewayToolError('output must be "image" or "model3d"')
         if len(prompt.strip()) < 3 or not (16 <= width <= 3840 and 16 <= height <= 3840):
             raise GatewayToolError("prompt needs 3+ characters; width and height must be 16-3840")
         if len(purpose.strip()) < 3 or len(requirements.strip()) < 10:

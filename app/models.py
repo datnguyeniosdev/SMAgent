@@ -206,3 +206,7 @@ class AgentProfile(BaseModel):
     label: str
     description: str
     preference: list[str]
+
+
+# generated art the operator reviews (Accept / Feedback) before an agent may use it
+ART_TASK_TYPES = ("design_image", "design_model3d")

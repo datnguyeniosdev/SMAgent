@@ -6,7 +6,7 @@ agents:
   - id: designer
     name: UI designer
     description: Visual analysis and layout redesign (Gemini preferred).
-    capabilities: [design.layout_analysis, design.image_generate, general.answer]
+    capabilities: [design.layout_analysis, design.image_generate, design.model3d_generate, general.answer]
     executor_preference: [provider:gemini, provider:openai]
   - id: implementer
     name: Implementer

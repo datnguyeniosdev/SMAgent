@@ -1003,6 +1003,16 @@ class TelegramGateway:
         if img is not None:
             api.append((f"{img.name} (images)", getattr(img, "available", True),
                         self.orch.switches.on("generate_art"), "generate_art"))  # fmt: skip
+        m3d = self.orch._model3d_provider
+        if m3d is not None:  # same switch as images: both are generate_art
+            api.append(
+                (
+                    f"{m3d.name} (3D)",
+                    m3d.available,
+                    self.orch.switches.on("generate_art"),
+                    "generate_art",
+                )
+            )
         api_buttons = []
         for name, ready, on, key in api:
             icon = ("🟢" if on else "⏸") if ready else "⚪"

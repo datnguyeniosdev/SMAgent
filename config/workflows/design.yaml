@@ -28,3 +28,23 @@ workflows:
       - {kind: artifact_exists, step: generate}
       - {kind: gate_passed, step: validate}
     outputs: {image: $steps.generate.output}
+  - id: design.model3d
+    version: "1"
+    description: Generate a 3D model with the 3D provider (Meshy) from text or a reference image; the operator reviews its preview.
+    input_schema:
+      type: object
+      required: [prompt]
+      properties:
+        prompt: {type: string, minLength: 3, maxLength: 800}
+        image_ref: {type: string}
+        texture: {type: boolean}
+        format: {type: string, enum: [glb, fbx, obj, usdz, stl]}
+    steps:
+      - id: generate
+        executor: capability
+        ref: design.model3d_generate
+        agent: designer
+        inputs: {prompt: $input.prompt, image_ref: $input.image_ref, texture: $input.texture, format: $input.format}
+    success_criteria:
+      - {kind: artifact_exists, step: generate}
+    outputs: {model: $steps.generate.output}

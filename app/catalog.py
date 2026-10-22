@@ -119,7 +119,7 @@ def choices(store, cfg, runtimes: list[str]) -> list[str]:
     """Everything a plan can use: each provider (default model), each added model, the runtimes."""
     out = []
     for pid in cfg.providers:
-        if cfg.providers[pid].type == "fal":
+        if cfg.providers[pid].type in ("fal", "meshy"):  # not chat models
             continue
         out.append(entry(pid))
         out += [entry(pid, m) for m in models(store, pid)]

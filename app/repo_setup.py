@@ -94,7 +94,9 @@ Requests from other agents arrive with `meta.kind: "request"`: do them and answe
 the answer goes back to that agent, not to Telegram.
 
 **Art and design (fal.ai).** For game art or design images (icons, sprites, backgrounds, UI
-mockups, store banners), call `generate_art` instead of drawing placeholders.
+mockups, store banners), call `generate_art` instead of drawing placeholders. For 3D models
+(props, characters, items) add `output="model3d"` (Meshy; optional `image_path` of a reference
+image, `model_format` glb/fbx/obj): the file is `get_task_result(...).models[0].path` once accepted.
 
 The model only knows what you write, so state the expected output precisely:
 - `prompt`: the subject, e.g. "a stack of three gold coins".
