@@ -46,6 +46,7 @@ from app.qa import QARunner
 from app.router import Router
 from app.storage import ArtifactStore, AttachmentError, AttachmentStore
 from app.store import Store
+from app.switches import Switches
 from app.tools import ToolContext, ToolExecutionRecord, ToolExecutor, ToolRegistry, ToolStatus
 from app.workflow import (
     STEP_BAD,
@@ -187,6 +188,7 @@ class Orchestrator:
         tools: ToolRegistry | None = None,
         plugins: list[str] | None = None,
         gateway_cfg=None,
+        image_on: bool = True,
     ):
         self.s = settings
         self.gateway_cfg = gateway_cfg  # app.gateway_config.GatewayConfig (validated) or None
@@ -201,7 +203,8 @@ class Orchestrator:
             self.artifacts.store = self.store
         self.qa = qa
         self.actions = actions
-        self.image_provider = image_provider
+        self._image_provider = image_provider
+        self.switches = Switches(self.store, {"generate_art": image_on})
         self.notifier: Notifier = notifier or LogNotifier()
         self.tasks: dict[str, Task] = {}
         self.sessions: dict[str, AgentSession] = {}
@@ -265,6 +268,15 @@ class Orchestrator:
         )
 
     # ---------- capability registry ----------
+
+    @property
+    def image_provider(self) -> ImageGenerationProvider | None:
+        """None while generate_art is switched off (Telegram /mcp): every image path refuses."""
+        return self._image_provider if self.switches.on("generate_art") else None
+
+    @image_provider.setter
+    def image_provider(self, provider: ImageGenerationProvider | None) -> None:
+        self._image_provider = provider
 
     def _register_capabilities(self) -> None:
         for c in self.router.connectors.values():

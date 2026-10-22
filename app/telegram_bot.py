@@ -61,6 +61,7 @@ Reply to any gateway message (text or photos) to give feedback or answer it.
 
 <b>Setup</b>
 /setup — status, install or remove the global setup
+/mcp — switch the tools agents call on or off (no restart)
 
 <b>More</b> (not in the / menu)
 /task · /status · /report · /steps · /retry · /stop · /answer · /feedback · /approvals ·
@@ -84,11 +85,13 @@ MENU = [  # the "/" menu: everyday commands only; the rest still work (see /help
     ("off", "Stop giving a session work"),
     ("on", "Resume giving a session work"),
     ("setup", "Status and global setup"),
+    ("mcp", "Agent tools on/off"),
     ("help", "All commands"),
 ]
 MENU_BUTTONS = [
     [("🖥 Sessions", "m:list"), ("📥 Queue", "m:queue"), ("📂 Open project", "m:open")],
-    [("⚙️ Setup", "m:setup"), ("🧩 Templates", "m:templates"), ("❓ Help", "m:help")],
+    [("⚙️ Setup", "m:setup"), ("🔀 Agent tools", "m:mcp"), ("🧩 Templates", "m:templates")],
+    [("❓ Help", "m:help")],
 ]
 _ID = re.compile(r"\b(tsk|rep|hin|apr|dep)_[0-9a-f]{10}\b")
 
@@ -394,6 +397,7 @@ class TelegramGateway:
         r.message(Command("start", "menu"))(self.on_menu)
         r.message(Command("help"))(self.on_help)
         r.message(Command("setup"))(self.on_setup)
+        r.message(Command("mcp"))(self.on_mcp)
         r.message(Command("agents"))(self.on_agents)
         r.message(Command("agents_status"))(self.on_agents_status)
         r.message(Command("sessions"))(self.on_sessions)
@@ -426,6 +430,7 @@ class TelegramGateway:
         r.callback_query(F.data.startswith("k:"))(self.on_ask_button)
         r.callback_query(F.data.startswith("m:"))(self.on_menu_button)
         r.callback_query(F.data.startswith("g:"))(self.on_setup_button)
+        r.callback_query(F.data.startswith("t:"))(self.on_mcp_button)
 
     async def on_help(self, m: TgMessage):
         if self._authorized_msg(m):
@@ -462,10 +467,51 @@ class TelegramGateway:
             await self._open_menu(answer)
         elif view == "setup":
             await self._setup_panel(answer)
+        elif view == "mcp":
+            await self._mcp_panel(answer)
         elif view == "templates":
             await answer(templates(""))
         else:
             await answer(HELP)
+
+    async def on_mcp(self, m: TgMessage):
+        if self._authorized_msg(m):
+            await self._mcp_panel(m.answer)
+
+    async def _mcp_panel(self, answer, note: str = "") -> None:
+        from app.mcp_server import TOOL_NAMES
+
+        sw = self.orch.switches
+        buttons = [InlineKeyboardButton(text=f"{'✅' if sw.on(t) else '⛔'} {t}", callback_data=f"t:{t}")
+                   for t in TOOL_NAMES]  # fmt: skip
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[buttons[i : i + 2] for i in range(0, len(buttons), 2)]
+        )
+        off = [t for t in TOOL_NAMES if not sw.on(t)]
+        text = ("🔀 <b>AGENT TOOLS</b> (tap to switch; applies to the next call, no restart)\n"
+                + (f"Off: {escape(', '.join(off))}" if off else "All on."))  # fmt: skip
+        await answer(text + (f"\n{note}" if note else ""), reply_markup=kb)
+
+    async def on_mcp_button(self, q: CallbackQuery):
+        from app.mcp_server import TOOL_NAMES
+
+        chat_id = q.message.chat.id if q.message else None
+        if not self.authorized(q.from_user.id, chat_id):
+            log.warning("unauthorized tool switch from user=%s chat=%s", q.from_user.id, chat_id)
+            await q.answer("Not authorized.", show_alert=True)
+            return
+        name = q.data[2:]
+        if name not in TOOL_NAMES:
+            await q.answer("Unknown tool.")
+            return
+        on = not self.orch.switches.on(name)
+        self.orch.switches.set(name, on)
+        log.info("tool %s switched %s by user=%s", name, "on" if on else "off", q.from_user.id)
+        await q.answer(f"{name}: {'on' if on else 'off'}")
+        await self._mcp_panel(
+            q.message.answer,
+            f"{'✅' if on else '⛔'} {escape(name)} is now {'on' if on else 'off'}",
+        )
 
     async def on_setup(self, m: TgMessage):
         if self._authorized_msg(m):

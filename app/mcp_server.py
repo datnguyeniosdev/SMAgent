@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import functools
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
@@ -53,13 +54,27 @@ def build_mcp_server(svc) -> MCPServer:
         ),
     )
 
+    def tool(fn):
+        """Register fn as an MCP tool that refuses while the operator has switched it off (/mcp)."""
+
+        @functools.wraps(fn)
+        async def gated(*args, **kwargs):
+            if not svc.switches.on(fn.__name__):
+                raise GatewayToolError(
+                    f"{fn.__name__} is switched off by the operator (Telegram /mcp); "
+                    "continue without it or ask the operator to turn it on"
+                )
+            return await fn(*args, **kwargs)
+
+        return server.tool()(gated)
+
     def task_or_error(task_id: str):
         task = svc.tasks.get(task_id)
         if task is None:
             raise GatewayToolError(f"unknown task {task_id}")
         return task
 
-    @server.tool()
+    @tool
     async def delegate_task(
         objective: str,
         task_type: str | None = None,
@@ -91,7 +106,7 @@ def build_mcp_server(svc) -> MCPServer:
             raise GatewayToolError(str(e)) from e
         return {"task_id": task.task_id, "state": task.state.value}
 
-    @server.tool()
+    @tool
     async def get_task_status(task_id: str) -> dict[str, Any]:
         """Task state, routing decision and per-step states (with attempts and errors)."""
         task = task_or_error(task_id)
@@ -113,7 +128,7 @@ def build_mcp_server(svc) -> MCPServer:
             ],
         }
 
-    @server.tool()
+    @tool
     async def get_task_result(task_id: str) -> dict[str, Any]:
         """Result envelope plus handoffs (with implementation prompts) and reports."""
         task = task_or_error(task_id)
@@ -143,7 +158,7 @@ def build_mcp_server(svc) -> MCPServer:
         ]  # fmt: skip
         return env
 
-    @server.tool()
+    @tool
     async def list_capabilities() -> list[dict[str, Any]]:
         """Configured capabilities with live status, declaring agents and executors."""
         if svc.registry is None:
@@ -162,7 +177,7 @@ def build_mcp_server(svc) -> MCPServer:
             )
         return out
 
-    @server.tool()
+    @tool
     async def get_capability_details(capability_id: str) -> dict[str, Any]:
         """Schemas, executor eligibility (with reasons) and status of one capability."""
         if svc.registry is None:
@@ -186,14 +201,14 @@ def build_mcp_server(svc) -> MCPServer:
             ],
         }
 
-    @server.tool()
+    @tool
     async def cancel_task(task_id: str) -> dict[str, Any]:
         """Cancel a task. 'unknown' means an in-flight side effect may already have happened."""
         task_or_error(task_id)
         stopped = await svc.stop(task_id)
         return {"task_id": task_id, "stopped": stopped, "state": svc.tasks[task_id].state.value}
 
-    @server.tool()
+    @tool
     async def request_human_input(
         question: str,
         task_id: str | None = None,
@@ -215,7 +230,7 @@ def build_mcp_server(svc) -> MCPServer:
             "expires_at": hi.expires_at.isoformat(),
         }
 
-    @server.tool()
+    @tool
     async def get_human_response(request_id: str) -> dict[str, Any]:
         """Status (pending | answered | expired) and the answer, if any."""
         try:
@@ -229,7 +244,7 @@ def build_mcp_server(svc) -> MCPServer:
             "responder": hi.responder,
         }
 
-    @server.tool()
+    @tool
     async def submit_report(
         text: str,
         task_id: str | None = None,
@@ -285,7 +300,7 @@ def build_mcp_server(svc) -> MCPServer:
             "pending_actions": rep.pending_actions,
         }
 
-    @server.tool()
+    @tool
     async def report_deployment(
         project: str,
         environment: str,
@@ -337,7 +352,7 @@ def build_mcp_server(svc) -> MCPServer:
             "channel_message_id": d.channel_message_id,
         }
 
-    @server.tool()
+    @tool
     async def generate_art(
         prompt: str,
         purpose: str,
@@ -393,7 +408,7 @@ def build_mcp_server(svc) -> MCPServer:
             "changes_requested -> follow review.next_task_id (the regenerated version); pending -> wait",
         }
 
-    @server.tool()
+    @tool
     async def get_messages(
         project: str,
         session_id: str | None = None,
@@ -432,7 +447,7 @@ def build_mcp_server(svc) -> MCPServer:
             "note": note,
         }
 
-    @server.tool()
+    @tool
     async def reply_message(
         text: str, session_id: str, message_id: str | None = None
     ) -> dict[str, Any]:
@@ -445,7 +460,7 @@ def build_mcp_server(svc) -> MCPServer:
             raise GatewayToolError(f"unknown session {session_id}: call get_messages first") from e
         return reply_result(rep)
 
-    @server.tool()
+    @tool
     async def list_agents() -> dict[str, Any]:
         """Agent sessions that are open now (any project, any agent tool): s# id, project, agent,
         mode (push/pull), whether it can take work, what it is busy with. Use before ask_agent."""
@@ -458,7 +473,7 @@ def build_mcp_server(svc) -> MCPServer:
             for s in hub.live()
         ]}  # fmt: skip
 
-    @server.tool()
+    @tool
     async def ask_agent(
         to: str, request: str, session_id: str | None = None, project: str | None = None,
         wait_s: int = 600,
@@ -478,7 +493,7 @@ def build_mcp_server(svc) -> MCPServer:
             raise GatewayToolError(str(e)) from e
         return ask_view(a)
 
-    @server.tool()
+    @tool
     async def get_ask(ask_id: str) -> dict[str, Any]:
         """State of an ask: queued | delivered | escalated (the operator is deciding) | answered (with
         the answer) | cancelled."""

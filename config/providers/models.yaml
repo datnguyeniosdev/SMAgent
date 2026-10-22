@@ -22,7 +22,7 @@ providers:
     json_mode: json_object
   - id: fal
     type: fal                    # fal.ai queue API; image/design generation
-    enabled: false               # temporarily off (generate_art refuses); true turns it back on
+    enabled: false               # starting state of generate_art; Telegram /mcp switches it live
     api_key_env: FAL_KEY
     model_env: FAL_MODEL         # e.g. fal-ai/flux/schnell (default when unset)
     capabilities: [image.generate]

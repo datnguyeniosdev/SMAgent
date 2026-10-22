@@ -156,18 +156,15 @@ def build(settings: Settings) -> Orchestrator:
                 client=client,
             ),
         ]
-    image = None
+    image, image_on = None, True
     fal = next(
-        (
-            p
-            for p in (gateway_cfg.providers.values() if gateway_cfg else [])
-            if p.type == "fal" and p.enabled
-        ),
+        (p for p in (gateway_cfg.providers.values() if gateway_cfg else []) if p.type == "fal"),
         None,
     )
     if fal is not None and os.environ.get(fal.api_key_env):
         from app.connectors.fal import FalImageProvider
 
+        image_on = fal.enabled  # only the starting state: Telegram /mcp switches it live
         image = FalImageProvider(
             os.environ[fal.api_key_env],
             fal.model
@@ -197,6 +194,7 @@ def build(settings: Settings) -> Orchestrator:
         ),
         ActionRegistry(s.action_ttl_s),
         image_provider=image,
+        image_on=image_on,
         store=store,
         gateway_cfg=gateway_cfg,
     )

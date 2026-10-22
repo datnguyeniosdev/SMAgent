@@ -125,6 +125,8 @@ uv run agw dev
 
 `dev` starts the OpenCode server (when `OPENCODE_ENABLED=true`) and the gateway on `127.0.0.1:8000`. Then send `/menu` to the bot in your Telegram group.
 
+`/mcp` in Telegram switches each tool agents call (`generate_art`, `delegate_task`, `ask_agent`, ...) on or off while the gateway runs: the next call obeys, no restart. The choice is saved and survives restarts. A switch never touched starts from the config (`generate_art`: fal's `enabled` in `config/providers/models.yaml`; the rest: on). Turning `generate_art` off also stops image generation in workflows.
+
 | Command | Purpose |
 |---|---|
 | `uv run agw setup` | secrets + global setup (`--agents LIST` other agents, `--repo PATH…` per-repo files, `--template` for template repos, `--remove`) |
