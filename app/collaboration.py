@@ -163,7 +163,9 @@ def deployment_html(d: Deployment) -> str:
         lines.append(f"Notes: {e(fmt.truncate(d.notes, 500))}")
     if d.error:
         lines.append(f"Error: {e(fmt.truncate(d.error, 800))}")
-    lines.append(f"<i>{e(d.created_at.strftime('%Y-%m-%d %H:%M UTC'))} · via {e(d.source)}</i>")
+    lines.append(
+        f"<i>{e(d.created_at.astimezone().strftime('%Y-%m-%d %H:%M %Z'))} · via {e(d.source)}</i>"
+    )
     return fmt.envelope(
         "deploy",
         "\n".join(lines),

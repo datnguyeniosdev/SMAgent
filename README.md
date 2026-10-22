@@ -47,7 +47,7 @@ claude mcp add --transport http --scope project agent-gateway http://127.0.0.1:8
 scripts/install.sh
 ```
 
-One idempotent script: Python environment, `.env` with local secrets, Claude Code global setup and a `doctor` check. Options: `--agents LIST`, `--env dev|uat`, `--no-global`, `--start`. Telegram values can be exported first (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CONTROL_CHAT_ID`, `TELEGRAM_ALLOWED_USER_IDS`); see `scripts/install.sh --help`.
+One idempotent script, only git needed beforehand: uv (installed if missing), Python 3.12 and dependencies, `.env` with local secrets, Claude Code global setup and a `doctor` check. Options: `--agents LIST`, `--env dev|uat`, `--no-global`, `--start`. Telegram values can be exported first (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CONTROL_CHAT_ID`, `TELEGRAM_ALLOWED_USER_IDS`); see `scripts/install.sh --help`.
 
 Agents that should install or connect themselves: point them to [docs/AGENT_CONNECT.md](docs/AGENT_CONNECT.md).
 

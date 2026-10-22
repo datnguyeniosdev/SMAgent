@@ -31,7 +31,12 @@ step() { printf '\n== %s\n' "$*"; }
 
 step "requirements"
 command -v git >/dev/null || { echo "git is missing: install Xcode command line tools (xcode-select --install)"; exit 1; }
-command -v uv >/dev/null || { echo "uv is missing: brew install uv (see https://docs.astral.sh/uv/)"; exit 1; }
+if ! command -v uv >/dev/null; then
+  echo "installing uv (Python and package manager)"
+  if command -v brew >/dev/null; then brew install uv
+  else curl -LsSf https://astral.sh/uv/install.sh | sh; export PATH="$HOME/.local/bin:$PATH"; fi
+  command -v uv >/dev/null || { echo "uv install failed: see https://docs.astral.sh/uv/"; exit 1; }
+fi
 command -v claude >/dev/null && echo "claude: $(claude --version 2>/dev/null | head -1)" || echo "claude CLI not found: Claude Code parts are skipped"
 uv sync --locked -q && echo "python environment ready"
 

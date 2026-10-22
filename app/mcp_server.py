@@ -17,6 +17,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from app.agent_registry import CapabilityError
 from app.collaboration import CollaborationError
 from app.intake import TaskRequest
+from app.storage import AttachmentError, load_image_paths
 from app.workflow import StepState
 
 
@@ -253,10 +254,12 @@ def build_mcp_server(svc) -> MCPServer:
         agent_status: str | None = None,
         images: list[dict] | None = None,
         handoff_id: str | None = None,
+        image_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         """Report work on a task: a short summary for Telegram, no logs or command output (title line,
         then at most 5 short bullets; logs are stripped and long text is cut).
-        images: [{"name": "shot.png", "data_base64": "..."}] (PNG/JPEG/WebP/GIF).
+        image_paths: absolute paths of local PNG/JPEG/WebP/GIF files (e.g. screenshots you saved).
+        images: [{"name": "shot.png", "data_base64": "..."}], when there is no file.
         The gateway publishes the report to Telegram and records agent status separately from verification.
         Work not started through the gateway: omit task_id and pass project; a record-only task is created
         and its task_id returned. Telegram replies to the report appear in get_task_result(task_id).feedback."""
@@ -281,6 +284,7 @@ def build_mcp_server(svc) -> MCPServer:
                 )
             except (KeyError, binascii.Error) as e:
                 raise GatewayToolError(f"image {i}: invalid base64 payload") from e
+        decoded += paths_or_error(image_paths)
         try:
             rep = await svc.collab.submit_report(
                 task_id,
@@ -449,15 +453,22 @@ def build_mcp_server(svc) -> MCPServer:
 
     @tool
     async def reply_message(
-        text: str, session_id: str, message_id: str | None = None
+        text: str,
+        session_id: str,
+        message_id: str | None = None,
+        image_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         """Pull mode: answer the operator on Telegram with a short summary, no logs (first line =
         title, then at most 5 short bullets: what changed, what was validated, what was not).
+        image_paths: absolute paths of local PNG/JPEG/WebP/GIF files to attach (e.g. screenshots).
         Their Telegram reply comes back through get_messages."""
+        images = paths_or_error(image_paths)
         try:
-            rep = await svc.channel.reply(session_id, text, message_id)
+            rep = await svc.channel.reply(session_id, text, message_id, images)
         except KeyError as e:
             raise GatewayToolError(f"unknown session {session_id}: call get_messages first") from e
+        except CollaborationError as e:
+            raise GatewayToolError(str(e)) from e
         return reply_result(rep)
 
     @tool
@@ -503,6 +514,13 @@ def build_mcp_server(svc) -> MCPServer:
         return ask_view(a)
 
     return server
+
+
+def paths_or_error(paths: list[str] | None) -> list[tuple[str, bytes]]:
+    try:
+        return load_image_paths(paths)
+    except AttachmentError as e:
+        raise GatewayToolError(str(e)) from e
 
 
 def reply_result(rep) -> dict[str, Any]:

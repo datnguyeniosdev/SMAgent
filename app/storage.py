@@ -63,6 +63,25 @@ def _inside(root: Path, path: Path) -> Path:
     return resolved
 
 
+IMAGE_MAX_BYTES = 20 * 1024 * 1024
+
+
+def load_image_paths(paths: list[str] | None) -> list[tuple[str, bytes]]:
+    """Agents on this machine send images by path; the gateway reads them (still checked as images later)."""
+    out = []
+    for p in paths or []:
+        path = Path(p).expanduser()
+        if not path.is_absolute():
+            raise AttachmentError(f"{p}: pass an absolute path")
+        try:
+            if path.stat().st_size > IMAGE_MAX_BYTES:
+                raise AttachmentError(f"{p}: larger than {IMAGE_MAX_BYTES // (1024 * 1024)} MB")
+            out.append((path.name[:100], path.read_bytes()))
+        except OSError as e:
+            raise AttachmentError(f"{p}: {e.strerror or e}") from e
+    return out
+
+
 class AttachmentStore:
     def __init__(self, root: Path, max_bytes: int, store=None):
         self.root = root

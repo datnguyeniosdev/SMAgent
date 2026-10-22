@@ -170,8 +170,8 @@ class AskService:
             ]
             seen = int((now() - target.last_seen).total_seconds() // 60)
             doing = f"; still busy with m{busy[0].get('num')}" if busy else ""
-            since = a["sent_at"][11:16]
-            return f"s{target.num} has had it since {since} UTC, no answer (last seen {seen} min ago{doing})"
+            since = datetime.fromisoformat(a["sent_at"]).astimezone().strftime("%H:%M")
+            return f"s{target.num} has had it since {since}, no answer (last seen {seen} min ago{doing})"
         best = hub.session_for(a["to_project"])
         if best is not None:  # someone can take it now (e.g. a session opened): deliver there
             if a["state"] == "queued" or target is None or not target.deliverable:

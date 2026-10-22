@@ -391,6 +391,10 @@ def test_session_start_hook_and_loop_prompt(tmp_path):
         and "hook-session-start --project '2048 Shooter (K05)'" in hooks[0]["hooks"][0]["command"]
     )
     assert "get_messages" in loop_prompt(PROJECT) and "busy" in loop_prompt(PROJECT)
+    from app.repo_setup import health_prompt, session_start_hint
+
+    hint = session_start_hint(PROJECT)
+    assert "*/10 * * * *" in hint and health_prompt() in hint and "/agw dev >>" in health_prompt()
     assert main(["hook-session-start", "--project", PROJECT]) == 0
 
 
@@ -496,3 +500,60 @@ def test_mcp_is_stateless_so_restarts_break_no_client(tmp_path, monkeypatch, cfg
             assert r.status_code == 200 and '"enabled":true' in r.text.replace(" ", "")
     finally:
         get_settings.cache_clear()
+
+
+async def test_restart_requeues_and_lease_expiry_redelivers_then_drops(settings, cfg_dir):
+    from datetime import timedelta
+
+    from app.channel import LEASE, ChannelHub
+    from app.models import now
+    from tests.test_config_gateway import make
+
+    orch, _ = make(settings, cfg_dir, [])
+    hub = orch.channel
+    s, _, _ = hub.pull(PROJECT, None)
+    m1, _ = hub.send(PROJECT, "first")
+    m2, _ = hub.send(PROJECT, "second")
+    _, got, _ = hub.pull(PROJECT, s.session_id)
+    assert [m["message_id"] for m in got] == [m1["message_id"]]
+
+    # gateway restart: the in-memory queue holding m2 is gone; m2 must not stay "queued" forever
+    hub = orch.channel = ChannelHub(orch)
+    assert orch.store.get("channel_msg", m2["message_id"])["state"] == "pending"
+
+    def age(mid):  # pretend the lease ran out
+        msg = orch.store.get("channel_msg", mid)
+        msg["delivered_at"] = (now() - LEASE - timedelta(minutes=1)).isoformat()
+        orch.store.put("channel_msg", mid, msg, state=msg["state"])
+
+    age(m1["message_id"])  # m1 never answered: handed out again (m1 is older, so first)
+    _, got, _ = hub.pull(PROJECT, s.session_id)
+    assert [m["message_id"] for m in got] == [m1["message_id"]] and got[0]["deliveries"] == 2
+
+    age(m1["message_id"])  # still unanswered after its second delivery: expired, m2 is next
+    _, got, _ = hub.pull(PROJECT, s.session_id)
+    assert orch.store.get("channel_msg", m1["message_id"])["state"] == "expired"
+    assert [m["message_id"] for m in got] == [m2["message_id"]]
+
+
+async def test_reply_and_report_attach_images_by_path(settings, cfg_dir, tmp_path):
+    import pytest as _pytest
+
+    from app.storage import AttachmentError, load_image_paths
+    from tests.test_config_gateway import make
+
+    shot = tmp_path / "shot.png"
+    shot.write_bytes(make_png(20, 10))
+    with _pytest.raises(AttachmentError, match="absolute"):
+        load_image_paths(["shot.png"])
+    with _pytest.raises(AttachmentError):
+        load_image_paths([str(tmp_path / "missing.png")])
+
+    orch, _ = make(settings, cfg_dir, [])
+    hub = orch.channel
+    s, _, _ = hub.pull(PROJECT, None)
+    m, _ = hub.send(PROJECT, "show me")
+    hub.pull(PROJECT, s.session_id)
+    rep = await hub.reply(s.session_id, "done", m["message_id"], load_image_paths([str(shot)]))
+    assert len(rep.artifact_ids) == 1
+    assert orch.artifacts.get(rep.artifact_ids[0]).filename == "shot.png"

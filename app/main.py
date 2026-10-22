@@ -200,6 +200,7 @@ def build(settings: Settings) -> Orchestrator:
     )
 
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
@@ -811,17 +812,23 @@ class ChannelReplyIn(BaseModel):
     session_id: str = Field(min_length=1, max_length=64)
     text: str = Field(min_length=1, max_length=8000)
     message_id: str | None = Field(None, max_length=40)
+    image_paths: list[str] = Field(default_factory=list, max_length=10)
 
 
 @app.post("/api/v1/channel/reply", include_in_schema=False)
 async def channel_reply(request: Request, body: ChannelReplyIn):
     _local_only(request)
+    from app.collaboration import CollaborationError
+    from app.storage import AttachmentError, load_image_paths
+
     try:
         rep = await request.app.state.orch.channel.reply(
-            body.session_id, body.text, body.message_id
+            body.session_id, body.text, body.message_id, load_image_paths(body.image_paths)
         )
     except KeyError as e:
         raise HTTPException(404, "unknown session") from e
+    except (AttachmentError, CollaborationError) as e:
+        raise HTTPException(422, str(e)) from e
     from app.mcp_server import reply_result
 
     return reply_result(rep)

@@ -47,6 +47,11 @@ REPLY_TOOL = {
                 "type": "string",
                 "description": "message_id of the channel event answered",
             },
+            "image_paths": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "absolute paths of local PNG/JPEG/WebP/GIF files to attach (screenshots)",
+            },
         },
         "required": ["text"],
         "additionalProperties": False,
@@ -126,7 +131,8 @@ class Shim:
         if not self.enabled:
             return "Not a live channel session (start it with `agw session`); nothing was sent."
         body = json.dumps({"session_id": self.session_id, "text": args.get("text", ""),
-                           "message_id": args.get("message_id")}).encode()  # fmt: skip
+                           "message_id": args.get("message_id"),
+                           "image_paths": args.get("image_paths") or []}).encode()  # fmt: skip
         url = f"{self.gateway}/api/v1/channel/reply"
         req = urllib.request.Request(url, body, {"Content-Type": "application/json"})  # noqa: S310
         with urllib.request.urlopen(req, timeout=30) as r:  # noqa: S310 - scheme checked

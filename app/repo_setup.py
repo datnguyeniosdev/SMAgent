@@ -144,13 +144,35 @@ def loop_prompt(project: str) -> str:
     )
 
 
+def health_prompt() -> str:
+    """Every 10 minutes: is the gateway (behind both local MCP servers) up, and does this session see it?"""
+    root = Path(__file__).resolve().parents[1]
+    agw = Path(sys.executable).parent / "agw"
+    start = (
+        f"cd {shlex.quote(str(root))} && mkdir -p var && "
+        f"nohup {shlex.quote(str(agw))} dev >> var/agw-autostart.log 2>&1 &"
+    )
+    return (
+        "Check the two local MCP servers, agent-gateway and agent-gateway-channel. Run "
+        "`curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/health`. If it is not 200, the gateway "
+        f"behind both is down: start it in the background with `{start}` (it starts nothing when a gateway "
+        "already runs), then poll /health for up to 30 seconds. Then call the agent-gateway tool list_agents. "
+        "The channel shim reconnects to the gateway by itself every 3 seconds. If list_agents is missing or "
+        "fails while /health is 200, a session cannot reconnect its own MCP servers: tell the user in one line "
+        "to run /mcp and reconnect agent-gateway. If all is fine, do nothing and say nothing."
+    )
+
+
 def session_start_hint(project: str) -> str:
-    """SessionStart hook output (added to Claude's context): start the pull loop once per session."""
+    """SessionStart hook output (added to Claude's context): start the pull loop and the health check
+    once per session."""
     return (
         f"agent-gateway: this project ({project}) takes work from Telegram. Before anything else in "
         "this session, call CronList. If no job's prompt mentions get_messages, create exactly one with "
         "CronCreate, recurring every minute ('*/1 * * * *'), with this prompt: "
-        f"{loop_prompt(project)} Never create a second one. Then continue with the user's request."
+        f"{loop_prompt(project)} If no job's prompt mentions /health, create exactly one with CronCreate, "
+        f"recurring every 10 minutes ('*/10 * * * *'), with this prompt: {health_prompt()} "
+        "Never create a second one of either. Then continue with the user's request."
     )
 
 

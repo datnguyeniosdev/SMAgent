@@ -34,7 +34,8 @@ scripts/install.sh
 ```
 
 What it does, idempotently:
-- checks git and uv (`brew install uv` if missing), installs the Python environment
+- checks git, installs uv if missing (Homebrew, else the official installer), then Python 3.12
+  and the locked dependencies
 - creates `.env` with generated local secrets (`MCP_REQUIRE_TOKEN=false`: local agents connect
   without a token)
 - installs the Claude Code global setup: user MCP `agent-gateway` + `agent-gateway-channel`, the
@@ -98,10 +99,12 @@ folder name. Claude Code gets it from the session-start hook. Use the same name 
 - **Take work from Telegram:** call `get_messages(project, agent="<your tool>", session_id=<the id it
   returned before>)`. Do each request, then `reply_message(session_id, message_id, text)`. Messages
   with `meta.kind == "answer"` answer your own `ask_agent`: use them, no reply. Claude Code polls
-  every minute with a recurring job (the hook asks for it); other agents call it when the user says
+  every minute with a recurring job (the hook asks for it), plus a 10-minute health check that
+  starts the gateway if `/health` is down and asks for `/mcp` if the tools are gone; other agents call it when the user says
   to check Telegram.
 - **Finish a task:** `submit_report(project, text, agent_status)`: a title line plus at most 5 short
-  bullets (changed / validated / not done), no logs.
+  bullets (changed / validated / not done), no logs. Screenshots: pass `image_paths` (absolute paths of
+  PNG/JPEG/WebP/GIF files); `reply_message` and the channel `reply` tool take them too.
 - **Ask another agent:** `ask_agent(to=s#|project, request, session_id)`, then `get_ask`. If nobody
   answers, the operator gets buttons on Telegram.
 - **Ask the operator:** `request_human_input(question, project)`, then `get_human_response`.

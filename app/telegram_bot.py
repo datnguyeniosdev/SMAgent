@@ -117,7 +117,7 @@ def session_line(s) -> str:
     state = "🚫 blocked (org policy)" if s.blocked else ("🟢 on" if s.enabled else "⏸ off")
     folder = escape(s.cwd.rstrip("/").rsplit("/", 1)[-1]) if s.cwd else "-"
     return (f"<b>s{s.num}</b> · {state} · {mode} · {escape(s.project)} · {folder}"
-            f" · since {s.connected_at:%H:%M} · <code>{escape(s.session_id)}</code>")  # fmt: skip
+            f" · since {s.connected_at.astimezone():%H:%M} · <code>{escape(s.session_id)}</code>")  # fmt: skip
 
 
 def templates(text: str = "") -> str:

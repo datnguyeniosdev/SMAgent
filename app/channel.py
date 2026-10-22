@@ -28,6 +28,7 @@ from app.models import new_id, now
 log = logging.getLogger(__name__)
 PULL_TTL = timedelta(minutes=5)  # a pull session is open while it polled this recently (/loop 1m)
 LEASE = timedelta(minutes=60)  # an unanswered handed-over message keeps its session busy this long
+MAX_DELIVERIES = 2  # an unanswered message is handed out again once after its lease, then expires
 OPEN_STATES = ("pending", "queued", "delivered")  # waiting, assigned to a session, in progress
 
 
@@ -80,6 +81,9 @@ class ChannelHub:
         self._stopping: set[str] = (
             set()
         )  # closed pull sessions: tell their loop to stop if it polls again
+        # session queues live in memory: what they held when the last process stopped waits again
+        for msg in svc.store.list("channel_msg", states=["queued"]):
+            self._set(msg, "pending")
 
     # ---- sessions ----
 
@@ -109,6 +113,7 @@ class ChannelHub:
         self.project_num(project)
         self._save(s)
         self.sessions[session_id] = s
+        self._expire()
         self._flush_pending(project)
         self.svc.store.event("channel.connected", task_id=task.task_id, session=session_id,
                              project=project, mode=mode, blocked=blocked)  # fmt: skip
@@ -263,7 +268,8 @@ class ChannelHub:
         target = self.session_for(project)
         if target is None:
             return
-        for msg in self.svc.store.list("channel_msg", states=["pending"]):
+        waiting = self.svc.store.list("channel_msg", states=["pending"])
+        for msg in sorted(waiting, key=lambda m: m.get("created_at", "")):  # oldest first
             if _norm(msg["project"]) == _norm(project):
                 target.queue.put_nowait(msg)
                 self._set(msg, "queued")
@@ -319,6 +325,38 @@ class ChannelHub:
             if m.get("session_id") == session_id and datetime.fromisoformat(m["delivered_at"]) > cutoff
         ]  # fmt: skip
 
+    def _expire(self) -> None:
+        """Delivered but unanswered past LEASE (the session lost it or died): back to the inbox,
+        or after MAX_DELIVERIES expired with a note to the operator instead of lingering silently."""
+        # ponytail: runs on pull rounds and connects only; a push-only gateway expires on reconnect
+        cutoff, projects = now() - LEASE, set()
+        for msg in self.svc.store.list("channel_msg", states=["delivered"]):
+            if datetime.fromisoformat(msg["delivered_at"]) > cutoff:
+                continue
+            msg["deliveries"] = msg.get("deliveries", 1) + 1
+            if msg["deliveries"] <= MAX_DELIVERIES:
+                self._set(msg, "pending")
+                projects.add(msg["project"])
+            else:
+                self._set(msg, "expired")
+                self._tell_expired(msg)
+            self.svc.store.event("channel.lease_expired", message_id=msg["message_id"],
+                                 session=msg.get("session_id"), state=msg["state"])  # fmt: skip
+        for project in projects:
+            self._flush_pending(project)
+
+    def _tell_expired(self, msg: dict) -> None:
+        rec = self.svc.store.get("channel_session", msg.get("session_id", "")) or {}
+        task = self.svc.tasks.get(rec.get("task_id", ""))
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if task is not None:
+            html = (f"⌛ m{msg.get('num')} was never answered after {MAX_DELIVERIES} deliveries; "
+                    "dropped. Send it again if it is still needed.")  # fmt: skip
+            loop.create_task(self.svc._notify(task, html, "info"))
+
     def open_messages(self) -> list[dict]:
         """/queue: everything not answered or cancelled yet, oldest first."""
         msgs = [m for st in OPEN_STATES for m in self.svc.store.list("channel_msg", states=[st])]
@@ -365,6 +403,7 @@ class ChannelHub:
             s = self.connect(sid, project, cwd, mode="pull")
         s.last_seen = now()
         s.agent = agent or s.agent
+        self._expire()
         busy = self.in_progress(s.session_id)
         out = []
         while s.enabled and not busy and not s.queue.empty() and len(out) < limit:
@@ -373,7 +412,13 @@ class ChannelHub:
             out.append(msg)
         return s, out, busy
 
-    async def reply(self, session_id: str, text: str, message_id: str | None = None):
+    async def reply(
+        self,
+        session_id: str,
+        text: str,
+        message_id: str | None = None,
+        images: list[tuple[str, bytes]] = (),
+    ):
         """Claude's answer from a session -> a Telegram report on the session's task."""
         rec = self.svc.store.get("channel_session", session_id)
         if rec is None:
@@ -399,5 +444,5 @@ class ChannelHub:
         body = text.strip() + note
         mode = rec.get("mode", "push")
         return await self.svc.collab.submit_report(
-            rec["task_id"], body, f"claude_code ({mode} session)"
+            rec["task_id"], body, f"claude_code ({mode} session)", images=images
         )
