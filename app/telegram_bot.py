@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import time
 from datetime import datetime
 from html import escape
@@ -40,7 +41,7 @@ from app.collaboration import CollaborationError
 from app.config import Settings, env_name
 from app.connectors.base import ConnectorError
 from app.intake import TaskRequest
-from app.models import TaskState, Workflow, now
+from app.models import TaskState, Workflow, new_id, now
 from app.orchestrator import Orchestrator
 from app.storage import AttachmentError, AttachmentStore
 
@@ -68,6 +69,7 @@ Reply to any gateway message (text or photos) to give feedback or answer it.
 /keys — provider API keys and models (values only in a private chat with the bot)
 /providers — model providers shared by every project: add one, its models · /addmodel · /findmodel
 /plan &lt;p#&gt; — which models a project uses for each workflow role (designer, implementer, …)
+/deploy — run a project's deploy script: project → UAT/PROD → branch → dry run or real, confirmed
 
 <b>More</b> (not in the / menu)
 /task · /status · /report · /steps · /retry · /stop · /answer · /feedback · /approvals ·
@@ -96,12 +98,13 @@ MENU = [  # the "/" menu: everyday commands only; the rest still work (see /help
     ("keys", "API keys and models"),
     ("providers", "Model providers (shared)"),
     ("plan", "Models per project and role"),
+    ("deploy", "Deploy a project (UAT/PROD, branch)"),
     ("help", "All commands"),
 ]
 MENU_BUTTONS = [
     [("🖥 Sessions", "m:list"), ("🤖 Agents", "m:agents"), ("📥 Queue", "m:queue")],
     [("📂 Open project", "m:open"), ("🔑 Keys", "m:keys")],
-    [("🧩 Providers", "m:providers"), ("🗺 Plans", "m:plan")],
+    [("🧩 Providers", "m:providers"), ("🗺 Plans", "m:plan"), ("🚀 Deploy", "m:deploy")],
     [("⚙️ Setup", "m:setup"), ("🔀 Agent tools", "m:mcp"), ("🧩 Templates", "m:templates")],
     [("❓ Help", "m:help")],
 ]
@@ -232,6 +235,8 @@ class TelegramGateway:
         self._key_wait: dict[
             int, tuple[str, float]
         ] = {}  # user -> (variable, deadline): /keys entry
+        self._deploy_wait: dict[str, tuple] = {}  # token -> (repo, env, branch, dry_run): /deploy
+        self._deploy_tasks: set[asyncio.Task] = set()  # running deploys (kept referenced)
         self._album_timers: dict[str, asyncio.Task] = {}
         self._dp: Dispatcher | None = None
         self._register()
@@ -424,6 +429,7 @@ class TelegramGateway:
         r.message(Command("addmodel"))(self.on_addmodel)
         r.message(Command("findmodel"))(self.on_findmodel)
         r.message(Command("plan"))(self.on_plan)
+        r.message(Command("deploy"))(self.on_deploy)
         r.message(Command("help"))(self.on_help)
         r.message(Command("setup"))(self.on_setup)
         r.message(Command("mcp"))(self.on_mcp)
@@ -465,6 +471,7 @@ class TelegramGateway:
         r.callback_query(F.data.startswith("x:"))(self.on_keys_button)
         r.callback_query(F.data.startswith("v:"))(self.on_providers_button)
         r.callback_query(F.data.startswith("pl:"))(self.on_plan_button)
+        r.callback_query(F.data.startswith("d:"))(self.on_deploy_button)
 
     async def on_help(self, m: TgMessage):
         if self._authorized_msg(m):
@@ -509,6 +516,8 @@ class TelegramGateway:
             await self._keys_panel(answer)
         elif view == "providers":
             await self._providers_panel(answer)
+        elif view == "deploy":
+            await self._deploy_projects(answer)
         elif view == "plan":
             kb = [[InlineKeyboardButton(text=f"p{n} {name[:40]}", callback_data=f"pl:{n}")]
                   for n, name in self.orch.channel.projects()]  # fmt: skip
@@ -1343,6 +1352,166 @@ class TelegramGateway:
         catalog.set_role(self.orch.store, project, role, entries)
         log.info("plan %s/%s changed by user=%s", project, role, q.from_user.id)
         await self._plan_panel(q.message.answer, project, note)
+
+    # ---------- /deploy: a project's deploy script, by environment and branch ----------
+
+    def _deploy_repos(self) -> list[Path]:
+        from app import deploys
+        from app.projects import projects_root
+
+        return deploys.deployable(projects_root())
+
+    async def on_deploy(self, m: TgMessage):
+        if self._authorized_msg(m):
+            await self._deploy_projects(m.answer)
+
+    async def _deploy_projects(self, answer) -> None:
+        from app.projects import detect_project
+
+        repos = self._deploy_repos()
+        if not repos:
+            await answer("No project has 4_delivery/deploy/deploy.sh.")
+            return
+        kb = [[InlineKeyboardButton(text=f"🚀 {detect_project(r)[:50]}", callback_data=f"d:p:{i}")]
+              for i, r in enumerate(repos)]  # fmt: skip
+        await answer(
+            "🚀 <b>DEPLOY</b> · pick a project:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
+        )
+
+    async def on_deploy_button(self, q: CallbackQuery):
+        from app import deploys
+        from app.projects import detect_project
+
+        chat_id = q.message.chat.id if q.message else None
+        if not self.authorized(q.from_user.id, chat_id):
+            log.warning("unauthorized deploy button from user=%s chat=%s", q.from_user.id, chat_id)
+            await q.answer("Not authorized.", show_alert=True)
+            return
+        await q.answer()
+        Btn, answer = InlineKeyboardButton, q.message.answer  # noqa: N806
+        parts = q.data.split(":")
+        if parts[1] == "go":  # confirmed: the plan was fixed when the confirmation was shown
+            job = self._deploy_wait.pop(parts[2], None)
+            if job is None:
+                await answer("That confirmation expired; start again with /deploy.")
+                return
+            await self._start_deploy(answer, *job, user=q.from_user.id)
+            return
+        if parts[1] == "no":
+            self._deploy_wait.pop(parts[2] if len(parts) > 2 else "", None)
+            await answer("Deploy cancelled.")
+            return
+        repos = self._deploy_repos()
+        i = int(parts[2]) if parts[2].isdigit() else -1
+        if not 0 <= i < len(repos):
+            await answer("That project list changed; start again with /deploy.")
+            return
+        repo, name = repos[i], detect_project(repos[i])
+        if parts[1] == "p":
+            kb = [
+                [
+                    Btn(text="🧪 UAT", callback_data=f"d:e:{i}:uat"),
+                    Btn(text="🌍 PROD", callback_data=f"d:e:{i}:prod"),
+                ]
+            ]
+            await answer(
+                f"🚀 <b>{escape(name)}</b> · environment:",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
+            )
+            return
+        env = parts[3] if len(parts) > 3 and parts[3] in deploys.ENVS else None
+        if env is None:
+            await answer("Unknown environment.")
+            return
+        try:
+            names = await asyncio.to_thread(deploys.branches, repo)
+        except (RuntimeError, subprocess.TimeoutExpired) as e:
+            await answer(f"❌ cannot list branches: {escape(str(e))}")
+            return
+        if parts[1] == "e":
+            kb = [
+                [Btn(text=b[:60], callback_data=f"d:b:{i}:{env}:{j}")] for j, b in enumerate(names)
+            ]
+            await answer(f"🚀 <b>{escape(name)}</b> · {env.upper()} · branch (newest first):",
+                         reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))  # fmt: skip
+            return
+        j = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else -1
+        if not 0 <= j < len(names):
+            await answer("That branch list changed; start again with /deploy.")
+            return
+        branch = names[j]
+        if parts[1] == "b":
+            kb = [[Btn(text="🧪 Dry run (build, no upload)", callback_data=f"d:m:{i}:{env}:{j}:dry")],
+                  [Btn(text="🚀 Real deploy", callback_data=f"d:m:{i}:{env}:{j}:real")]]  # fmt: skip
+            await answer(f"🚀 <b>{escape(name)}</b> · {env.upper()} · <code>{escape(branch)}</code>",
+                         reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))  # fmt: skip
+            return
+        if parts[1] == "m":
+            dry = parts[5] == "dry" if len(parts) > 5 else True
+            token = new_id("dpl")[-8:]
+            self._deploy_wait[token] = (repo, env, branch, dry)
+            warn = (
+                "\n⚠️ <b>PRODUCTION</b>: this ships to users." if env == "prod" and not dry else ""
+            )
+            busy = (
+                "\n⏳ A deploy of this project is running; this one would be refused."
+                if deploys.busy(repo)
+                else ""
+            )
+            kb = [[Btn(text=f"✅ Yes, {'dry run' if dry else 'deploy'} {env.upper()}", callback_data=f"d:go:{token}"),
+                   Btn(text="Cancel", callback_data=f"d:no:{token}")]]  # fmt: skip
+            await answer(
+                f"Confirm: <b>{escape(name)}</b> · {env.upper()} · <code>{escape(branch)}</code> · "
+                f"{'dry run' if dry else 'real deploy'}\nRuns <code>4_delivery/deploy/deploy.sh {env}"
+                f"{' --dry-run' if dry else ''}</code> in a separate deploy copy of the repo.{warn}{busy}",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
+            )
+
+    async def _start_deploy(
+        self, answer, repo: Path, env: str, branch: str, dry: bool, user: int
+    ) -> None:
+        from app import deploys
+        from app.collaboration import Deployment
+        from app.projects import detect_project
+
+        name = detect_project(repo)
+        if deploys.busy(repo):
+            await answer(f"⏳ {escape(name)} is already deploying; wait for its result.")
+            return
+        log.info("deploy %s %s %s dry=%s by user=%s", repo.name, env, branch, dry, user)
+        notes = f"branch {branch} · started from Telegram" + (" · dry run" if dry else "")
+        await self.orch.collab.report_deployment(
+            Deployment(
+                project=name, environment=env, status="started", notes=notes, source="telegram"
+            )
+        )
+
+        async def work():
+            try:
+                r = await deploys.run(repo, env, branch, dry, self.s.data_dir / "deploys")
+            except Exception as e:  # noqa: BLE001 - reported, never lost silently
+                log.exception("deploy of %s crashed", repo.name)
+                r = {
+                    "status": "failed",
+                    "commit": "",
+                    "log": None,
+                    "error": str(e)[:300],
+                    "seconds": 0,
+                }
+            await self.orch.collab.report_deployment(Deployment(
+                project=name, environment=env, status=r["status"], commit=r["commit"] or None,
+                notes=f"{notes} · {r['seconds'] // 60} min", error=r["error"] or None, source="telegram",
+            ))  # fmt: skip
+            if r.get("log") and r["log"].exists():
+                data = r["log"].read_bytes()[-1_000_000:]  # the end of the log holds the outcome
+                await self._send(self.bot.send_document, chat_id=self.s.telegram_control_chat_id,
+                                 document=BufferedInputFile(data, r["log"].name))  # fmt: skip
+
+        self._deploy_tasks.add(t := asyncio.create_task(work()))
+        t.add_done_callback(self._deploy_tasks.discard)
+        await answer(f"🚀 Deploy started: <b>{escape(name)}</b> · {env.upper()} · <code>{escape(branch)}</code>"
+                     f"{' · dry run' if dry else ''}. The result and the log come here when it ends.")  # fmt: skip
 
     # ---------- /keys: provider keys and models, set remotely ----------
 

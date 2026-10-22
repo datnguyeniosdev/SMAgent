@@ -36,7 +36,7 @@ async def test_menu_panel_and_buttons(settings, cfg_dir):
     await gw.on_menu(tg(answers))
     text, kb = answers[-1]
     assert "0 sessions" in text and [d for _, d in buttons(kb)] == [
-        "m:list", "m:agents", "m:queue", "m:open", "m:keys", "m:providers", "m:plan", "m:setup", "m:mcp", "m:templates", "m:help"]  # fmt: skip
+        "m:list", "m:agents", "m:queue", "m:open", "m:keys", "m:providers", "m:plan", "m:deploy", "m:setup", "m:mcp", "m:templates", "m:help"]  # fmt: skip
     await gw.on_menu_button(press("m:list", answers, alerts))
     assert answers[-1][0].startswith("🖥 <b>SESSIONS</b>")
     await gw.on_menu_button(press("m:queue", answers, alerts))
