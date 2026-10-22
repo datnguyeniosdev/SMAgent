@@ -117,7 +117,7 @@ git -C ../.agw-prod merge --ff-only develop
 cd ../.agw-prod && uv sync
 ```
 
-Then restart prod there (Ctrl-C, `uv run agw dev`). To take prod down on purpose, run `uv run agw stop` there: the open sessions' 10-minute health check (which restarts a crashed gateway in the background) then leaves it down until you run `uv run agw dev` in a terminal again (`--force` starts it without a terminal). To roll back, `git -C ../.agw-prod reset --hard <previous commit>` and restart.
+Then restart prod there (Ctrl-C, `uv run agw dev`). To take prod down on purpose, run `uv run agw stop` there; start it again with `uv run agw dev` in a terminal. The sessions' 10-minute health check never starts the gateway, it only checks that the session still reaches the local MCP servers (and asks you to reconnect with /mcp if not). Sessions opened before this change may still start it in the background; `agw stop` keeps those out too.
 
 ```bash
 uv run agw dev

@@ -394,7 +394,12 @@ def test_session_start_hook_and_loop_prompt(tmp_path):
     from app.repo_setup import health_prompt, session_start_hint
 
     hint = session_start_hint(PROJECT)
-    assert "*/10 * * * *" in hint and health_prompt() in hint and "/agw dev >>" in health_prompt()
+    assert (
+        "*/10 * * * *" in hint
+        and health_prompt() in hint
+        and "never start it" in health_prompt()
+        and "agw dev" not in health_prompt()
+    )
     assert main(["hook-session-start", "--project", PROJECT]) == 0
 
 

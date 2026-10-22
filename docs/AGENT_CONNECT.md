@@ -99,8 +99,8 @@ folder name. Claude Code gets it from the session-start hook. Use the same name 
 - **Take work from Telegram:** call `get_messages(project, agent="<your tool>", client="app"|"cli", session_id=<the id it
   returned before>)`. Do each request, then `reply_message(session_id, message_id, text)`. Messages
   with `meta.kind == "answer"` answer your own `ask_agent`: use them, no reply. Claude Code polls
-  every minute with a recurring job (the hook asks for it), plus a 10-minute health check that
-  starts the gateway if `/health` is down and asks for `/mcp` if the tools are gone; other agents call it when the user says
+  every minute with a recurring job (the hook asks for it), plus a 10-minute check that the session still reaches the local MCP servers (it never starts the
+  gateway; if the tools are gone it asks for `/mcp` reconnect); other agents call it when the user says
   to check Telegram.
 - **Finish a task:** `submit_report(project, text, agent_status)`: a title line plus at most 5 short
   bullets (changed / validated / not done), no logs. Screenshots: pass `image_paths` (absolute paths of

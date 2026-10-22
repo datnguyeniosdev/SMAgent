@@ -158,22 +158,16 @@ def loop_prompt(project: str, client: str = "") -> str:
 
 
 def health_prompt() -> str:
-    """Every 10 minutes: is the gateway (behind both local MCP servers) up, and does this session see it?"""
-    root = Path(__file__).resolve().parents[1]
-    agw = Path(sys.executable).parent / "agw"
-    start = (
-        f"cd {shlex.quote(str(root))} && mkdir -p var && "
-        f"nohup {shlex.quote(str(agw))} dev >> var/agw-autostart.log 2>&1 &"
-    )
+    """Every 10 minutes: does this session still reach the local MCP servers? It never starts the
+    gateway: running it is the operator's call (agw dev / agw stop)."""
     return (
-        "Check the two local MCP servers, agent-gateway and agent-gateway-channel. Run "
-        "`curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/health`. If it is not 200, the gateway "
-        f"behind both is down: start it in the background with `{start}` (it starts nothing when a gateway "
-        "already runs, or when the operator stopped it with `agw stop`: then say nothing), then poll /health "
-        "for up to 30 seconds. Then call the agent-gateway tool list_agents. "
-        "The channel shim reconnects to the gateway by itself every 3 seconds. If list_agents is missing or "
-        "fails while /health is 200, a session cannot reconnect its own MCP servers: tell the user in one line "
-        "to run /mcp and reconnect agent-gateway. If all is fine, do nothing and say nothing."
+        "Check that this session still reaches the local MCP servers agent-gateway and agent-gateway-channel. "
+        "Run `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/health`. If it is not 200, the "
+        "gateway is not running: do nothing and say nothing (never start it; the operator does). If it is 200, "
+        "call the agent-gateway tool list_agents. The channel shim reconnects by itself every 3 seconds. If "
+        "list_agents is missing or fails, this session lost the gateway MCP server and cannot reconnect it "
+        "by itself: tell the user in one line to run /mcp and reconnect agent-gateway. If all is fine, do "
+        "nothing and say nothing."
     )
 
 
