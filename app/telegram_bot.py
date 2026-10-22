@@ -66,6 +66,8 @@ Reply to any gateway message (text or photos) to give feedback or answer it.
 /setup — status, install or remove the global setup
 /mcp — switch the tools agents call on or off (no restart)
 /keys — provider API keys and models (values only in a private chat with the bot)
+/providers — model providers shared by every project: add one, its models · /addmodel · /findmodel
+/plan &lt;p#&gt; — which models a project uses for each workflow role (designer, implementer, …)
 
 <b>More</b> (not in the / menu)
 /task · /status · /report · /steps · /retry · /stop · /answer · /feedback · /approvals ·
@@ -92,11 +94,14 @@ MENU = [  # the "/" menu: everyday commands only; the rest still work (see /help
     ("setup", "Status and global setup"),
     ("mcp", "Agent tools on/off"),
     ("keys", "API keys and models"),
+    ("providers", "Model providers (shared)"),
+    ("plan", "Models per project and role"),
     ("help", "All commands"),
 ]
 MENU_BUTTONS = [
     [("🖥 Sessions", "m:list"), ("🤖 Agents", "m:agents"), ("📥 Queue", "m:queue")],
     [("📂 Open project", "m:open"), ("🔑 Keys", "m:keys")],
+    [("🧩 Providers", "m:providers"), ("🗺 Plans", "m:plan")],
     [("⚙️ Setup", "m:setup"), ("🔀 Agent tools", "m:mcp"), ("🧩 Templates", "m:templates")],
     [("❓ Help", "m:help")],
 ]
@@ -415,6 +420,10 @@ class TelegramGateway:
         )  # first: secrets never reach others
         r.message(Command("start", "menu"))(self.on_menu)
         r.message(Command("keys"))(self.on_keys)
+        r.message(Command("providers"))(self.on_providers)
+        r.message(Command("addmodel"))(self.on_addmodel)
+        r.message(Command("findmodel"))(self.on_findmodel)
+        r.message(Command("plan"))(self.on_plan)
         r.message(Command("help"))(self.on_help)
         r.message(Command("setup"))(self.on_setup)
         r.message(Command("mcp"))(self.on_mcp)
@@ -454,6 +463,8 @@ class TelegramGateway:
         r.callback_query(F.data.startswith("t:"))(self.on_mcp_button)
         r.callback_query(F.data.startswith("y:"))(self.on_agents_button)
         r.callback_query(F.data.startswith("x:"))(self.on_keys_button)
+        r.callback_query(F.data.startswith("v:"))(self.on_providers_button)
+        r.callback_query(F.data.startswith("pl:"))(self.on_plan_button)
 
     async def on_help(self, m: TgMessage):
         if self._authorized_msg(m):
@@ -496,6 +507,12 @@ class TelegramGateway:
             await self._agents_panel(answer)
         elif view == "keys":
             await self._keys_panel(answer)
+        elif view == "providers":
+            await self._providers_panel(answer)
+        elif view == "plan":
+            kb = [[InlineKeyboardButton(text=f"p{n} {name[:40]}", callback_data=f"pl:{n}")]
+                  for n, name in self.orch.channel.projects()]  # fmt: skip
+            await answer("🗺 Pick a project:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
         elif view == "templates":
             await answer(templates(""))
         else:
@@ -1031,6 +1048,301 @@ class TelegramGateway:
             what = await asyncio.to_thread(hub.close, s)
             await q.answer(f"s{s.num} closed")
             await self._agents_panel(q.message.answer, f"🔌 s{s.num} closed · {escape(what)}")
+
+    # ---------- /providers, /addmodel, /findmodel: model providers shared by every project ----------
+
+    async def on_providers(self, m: TgMessage):
+        if self._authorized_msg(m):
+            await self._providers_panel(m.answer)
+
+    async def _providers_panel(self, answer, note: str = "") -> None:
+        from app import catalog, keys
+
+        cfg = self.orch.gateway_cfg
+        if cfg is None:
+            await answer("No gateway configuration loaded.")
+            return
+        Btn = InlineKeyboardButton  # noqa: N806
+        lines = [
+            "🧩 <b>PROVIDERS</b> (set up once, every project can use them)"
+            + (f"\n{note}" if note else ""),
+            "",
+        ]
+        rows, mine = [], {d.id for d in catalog.added(self.orch.store)}
+        for pid, d in cfg.providers.items():
+            key = os.environ.get(d.api_key_env)
+            default = d.model or (os.environ.get(d.model_env) if d.model_env else None)
+            extra = catalog.models(self.orch.store, pid)
+            icon = "🟢" if key and (default or extra) else ("🟡" if key else "⚪")
+            lines.append(
+                f"{icon} <b>{escape(pid)}</b>{' (added)' if pid in mine else ''} · {d.type}"
+                f" · key {escape(keys.mask(key, True))}"
+                f" · default {escape(default or 'none')}"
+                + (f" · models: {escape(', '.join(extra))}" if extra else "")
+            )
+            rows.append([Btn(text=f"⚙️ {pid}", callback_data=f"v:p:{pid}")])
+        lines += ["", "Keys: /keys · add a model: <code>/addmodel provider model-id</code> · "
+                  "find one: <code>/findmodel provider [text]</code> · use per project: /plan"]  # fmt: skip
+        rows.append([Btn(text="➕ Add provider", callback_data="v:add")])
+        await answer("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+    async def _provider_detail(self, answer, pid: str, note: str = "") -> None:
+        from app import catalog
+
+        d = self.orch.gateway_cfg.providers[pid]
+        Btn = InlineKeyboardButton  # noqa: N806
+        models = catalog.models(self.orch.store, pid)
+        lines = [f"⚙️ <b>{escape(pid)}</b> · {escape(d.base_url or d.type)}" + (f"\n{note}" if note else ""),
+                 f"Key: <code>{d.api_key_env}</code> (set it with /keys)",
+                 f"Default model: <code>{escape(d.model or d.model_env or '-')}</code>",
+                 "Models: " + (escape(", ".join(models)) if models else "none added")]  # fmt: skip
+        rows = [
+            [Btn(text=f"🗑 {mdl[:40]}", callback_data=f"v:rm:{pid}:{i}")]
+            for i, mdl in enumerate(models)
+        ]
+        rows.append([Btn(text="🔎 Provider's model list", callback_data=f"v:find:{pid}")])
+        if pid in {x.id for x in catalog.added(self.orch.store)}:
+            rows.append([Btn(text=f"🗑 Remove {pid}", callback_data=f"v:del:{pid}")])
+        lines.append(f"Add: <code>/addmodel {escape(pid)} model-id</code>")
+        await answer("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+    async def on_providers_button(self, q: CallbackQuery):
+        from app import catalog
+
+        chat_id = q.message.chat.id if q.message else None
+        if not self.authorized(q.from_user.id, chat_id):
+            await q.answer("Not authorized.", show_alert=True)
+            return
+        cfg, store = self.orch.gateway_cfg, self.orch.store
+        verb, _, arg = q.data[2:].partition(":")
+        await q.answer()
+        answer = q.message.answer
+        try:
+            if verb == "add":
+                free = [k for k in catalog.PRESETS if k not in cfg.providers]
+                kb = [[InlineKeyboardButton(text=catalog.PRESETS[k]["label"], callback_data=f"v:new:{k}")]
+                      for k in free]  # fmt: skip
+                await answer(
+                    "Pick a provider (OpenAI-compatible API):",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
+                )
+            elif verb == "new":
+                d = catalog.add_provider(store, cfg, arg)
+                await self._reload_providers()
+                log.info("provider %s added by user=%s", arg, q.from_user.id)
+                await self._provider_detail(
+                    answer, arg, f"✅ added. Next: /keys → ✏️ {d.api_key_env}, then a model."
+                )
+            elif verb == "p" and arg in cfg.providers:
+                await self._provider_detail(answer, arg)
+            elif verb == "find" and arg in cfg.providers:
+                await answer(await self._find_models(arg, ""))
+            elif verb == "rm":
+                pid, _, idx = arg.rpartition(":")
+                models = catalog.models(store, pid)
+                if idx.isdigit() and int(idx) < len(models):
+                    catalog.remove_model(store, pid, models[int(idx)])
+                    await self._provider_detail(
+                        answer, pid, f"🗑 {escape(models[int(idx)])} removed"
+                    )
+            elif verb == "del":
+                kb = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text=f"Yes, remove {arg}", callback_data=f"v:delyes:{arg}"),
+                    InlineKeyboardButton(text="Keep it", callback_data=f"v:p:{arg}")]])  # fmt: skip
+                await answer(
+                    f"Remove provider <b>{escape(arg)}</b>? Plans using it skip it.",
+                    reply_markup=kb,
+                )
+            elif verb == "delyes":
+                catalog.remove_provider(store, cfg, arg)
+                await self._reload_providers()
+                await self._providers_panel(answer, f"🗑 {escape(arg)} removed")
+        except ValueError as e:
+            await answer(f"❌ {escape(str(e))}")
+
+    def _http(self):
+        import httpx
+
+        return getattr(self.orch, "http_client", None) or httpx.AsyncClient(timeout=15)
+
+    async def _find_models(self, pid: str, text: str) -> str:
+        from app import catalog
+
+        d = self.orch.gateway_cfg.providers[pid]
+        found = await catalog.remote_models(d, os.environ.get(d.api_key_env), self._http())
+        if not found:
+            return (f"{escape(pid)}: no model list (key missing, provider down or not OpenAI-compatible). "
+                    f"Type the id: <code>/addmodel {escape(pid)} model-id</code>")  # fmt: skip
+        hits = [x for x in found if text.lower() in x.lower()]
+        shown = "\n".join(f"<code>/addmodel {escape(pid)} {escape(x)}</code>" for x in hits[:40])
+        more = (
+            f"\n… {len(hits) - 40} more: narrow it with <code>/findmodel {escape(pid)} text</code>"
+            if len(hits) > 40
+            else ""
+        )
+        return f"🔎 {escape(pid)}: {len(hits)} of {len(found)} models (tap to copy)\n{shown}{more}"
+
+    async def on_findmodel(self, m: TgMessage, command: CommandObject):
+        if not self._authorized_msg(m):
+            return
+        pid, _, text = (command.args or "").strip().partition(" ")
+        if pid not in (self.orch.gateway_cfg.providers if self.orch.gateway_cfg else {}):
+            await m.answer("Usage: /findmodel &lt;provider&gt; [text] (providers: /providers)")
+            return
+        await m.answer(await self._find_models(pid, text.strip()))
+
+    async def on_addmodel(self, m: TgMessage, command: CommandObject):
+        from app import catalog
+
+        if not self._authorized_msg(m):
+            return
+        pid, _, model = (command.args or "").strip().partition(" ")
+        model = model.strip()
+        cfg = self.orch.gateway_cfg
+        if not cfg or pid not in cfg.providers or not re.fullmatch(r"[\w.:/@+\-]{1,200}", model):
+            await m.answer(
+                "Usage: /addmodel &lt;provider&gt; &lt;model-id&gt; (find ids: /findmodel provider)"
+            )
+            return
+        d = cfg.providers[pid]
+        known = await catalog.remote_models(
+            d,
+            os.environ.get(d.api_key_env),
+            self._http(),
+        )
+        catalog.add_model(self.orch.store, pid, model)
+        warn = (
+            ""
+            if not known or model in known
+            else f"\n⚠️ {escape(model)} is not in {escape(pid)}'s model list; check the id."
+        )
+        await self._provider_detail(m.answer, pid, f"✅ {escape(model)} added" + warn)
+
+    # ---------- /plan: which models each project uses, per workflow role ----------
+
+    def _plan_roles(self) -> dict[str, tuple[bool, set[str]]]:
+        """role -> (can use providers, runtimes it can use), from the capabilities it handles."""
+        cfg, out = self.orch.gateway_cfg, {}
+        for a in cfg.agents.values():
+            caps = [cfg.capabilities[c] for c in a.capabilities if c in cfg.capabilities]
+            prov = any(s.type == "provider" for c in caps for s in c.executors)
+            rts = {
+                s.ref
+                for c in caps
+                for s in c.executors
+                if s.type == "runtime" and s.operation != "return_to_caller"
+            }
+            if prov or rts:
+                out[a.id] = (prov, rts)
+        return out
+
+    def _plan_choices(self, role: str) -> list[str]:
+        from app import catalog
+
+        prov, rts = self._plan_roles()[role]
+        every = catalog.choices(self.orch.store, self.orch.gateway_cfg, sorted(rts))
+        return [
+            e for e in every if (e.startswith("provider:") and prov) or e.startswith("runtime:")
+        ]
+
+    async def on_plan(self, m: TgMessage, command: CommandObject):
+        if not self._authorized_msg(m):
+            return
+        ref = (command.args or "").strip()
+        if not ref:
+            kb = [[InlineKeyboardButton(text=f"p{n} {name[:40]}", callback_data=f"pl:{n}")]
+                  for n, name in self.orch.channel.projects()]  # fmt: skip
+            await m.answer(
+                "🗺 Pick a project (or /plan p#):",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
+            )
+            return
+        project = self.orch.channel.resolve_project(ref)
+        if project is None:
+            await m.answer("Unknown project: /plan p# (numbers in /list)")
+            return
+        await self._plan_panel(m.answer, project)
+
+    async def _plan_panel(self, answer, project: str, note: str = "") -> None:
+        from app import catalog
+
+        if self.orch.gateway_cfg is None:
+            await answer("No gateway configuration loaded.")
+            return
+        num = self.orch.channel.project_num(project)
+        plan = catalog.plan(self.orch.store, project)
+        Btn = InlineKeyboardButton  # noqa: N806
+        lines = [f"🗺 <b>MODELS</b> · p{num} {escape(project)}" + (f"\n{note}" if note else ""),
+                 "Per workflow role, tried in order before the defaults; a failing or switched-off "
+                 "model falls through to the next.", ""]  # fmt: skip
+        rows = []
+        for role in self._plan_roles():
+            entries = plan.get(role, [])
+            lines.append(
+                f"<b>{role}</b>: "
+                + (" → ".join(escape(catalog.label(e)) for e in entries) or "defaults")
+            )
+            row = [Btn(text=f"➕ {role}", callback_data=f"pl:{num}:{role}:add")]
+            row += [
+                Btn(text=f"🗑 {i + 1}", callback_data=f"pl:{num}:{role}:-:{i}")
+                for i in range(len(entries))
+            ]
+            row += [
+                Btn(text=f"⬆ {i + 1}", callback_data=f"pl:{num}:{role}:^:{i}")
+                for i in range(1, len(entries))
+            ]
+            rows += [row[i : i + 4] for i in range(0, len(row), 4)]
+        await answer("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+    async def on_plan_button(self, q: CallbackQuery):
+        from app import catalog
+
+        chat_id = q.message.chat.id if q.message else None
+        if not self.authorized(q.from_user.id, chat_id):
+            await q.answer("Not authorized.", show_alert=True)
+            return
+        parts = q.data.split(":")
+        num = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else -1
+        project = next((name for n, name in self.orch.channel.projects() if n == num), None)
+        await q.answer()
+        if project is None:
+            await q.message.answer("That project is gone from /list.")
+            return
+        if len(parts) == 2:
+            await self._plan_panel(q.message.answer, project)
+            return
+        role, verb = parts[2], parts[3] if len(parts) > 3 else ""
+        if role not in self._plan_roles():
+            await q.message.answer("Unknown role.")
+            return
+        entries = catalog.plan(self.orch.store, project).get(role, [])
+        choices = self._plan_choices(role)
+        idx = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else -1
+        if verb == "add":
+            kb = [[InlineKeyboardButton(text=catalog.label(c)[:60], callback_data=f"pl:{num}:{role}:+:{i}")]
+                  for i, c in enumerate(choices) if c not in entries]  # fmt: skip
+            text = (
+                f"Add to <b>{role}</b> of p{num}:"
+                if kb
+                else "Nothing left to add: add models in /providers."
+            )
+            await q.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+            return
+        if verb == "+" and 0 <= idx < len(choices):
+            entries = [*entries, choices[idx]]
+            note = f"➕ {escape(catalog.label(choices[idx]))} → {role}"
+        elif verb == "-" and 0 <= idx < len(entries):
+            note = f"🗑 {escape(catalog.label(entries[idx]))} removed from {role}"
+            entries = entries[:idx] + entries[idx + 1 :]
+        elif verb == "^" and 0 < idx < len(entries):
+            entries[idx - 1], entries[idx] = entries[idx], entries[idx - 1]
+            note = f"⬆ {escape(catalog.label(entries[idx - 1]))} moved up in {role}"
+        else:
+            await q.message.answer("That list changed; open /plan again.")
+            return
+        catalog.set_role(self.orch.store, project, role, entries)
+        log.info("plan %s/%s changed by user=%s", project, role, q.from_user.id)
+        await self._plan_panel(q.message.answer, project, note)
 
     # ---------- /keys: provider keys and models, set remotely ----------
 

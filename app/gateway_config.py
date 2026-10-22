@@ -48,6 +48,7 @@ class ExecutorSpec(BaseModel):
     requires_env: list[str] = []
     permissions: list[str] = []
     options: dict[str, Any] = {}
+    model: str | None = None  # provider: run on this model instead of the provider's default
 
 
 class CapabilityDef(BaseModel):

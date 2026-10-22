@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
-from app import keys
+from app import catalog, keys
 from app.actions import ActionError, ActionRegistry
 from app.config import Settings, env_file, get_settings
 from app.connectors.base import Cap, ConnectorError
@@ -134,6 +134,8 @@ def build(settings: Settings) -> Orchestrator:
     client = httpx.AsyncClient(timeout=s.http_timeout_s)
     key = lambda v: v.get_secret_value() if v else None  # noqa: E731
     gateway_cfg = load_gateway_config(s)
+    if gateway_cfg is not None:
+        catalog.merge(store, gateway_cfg)  # providers added from Telegram (/providers)
     claude = ClaudeCodeConnector(
         s.claude_code_bin,
         s.claude_code_model,
@@ -221,8 +223,10 @@ def reload_providers(orch) -> None:
     if cfg is None:
         return
     client = getattr(orch, "http_client", None) or httpx.AsyncClient(timeout=orch.s.http_timeout_s)
+    catalog.merge(orch.store, cfg)
     keep = {n: c for n, c in orch.router.connectors.items() if n in ("claude_code", "opencode")}
     orch.router.connectors = {**keep, **{c.name: c for c in build_providers(cfg, client)}}
+    orch.register_connectors()
     # ponytail: OpenAI images read Settings (loaded at start); only fal picks up a new key live
     orch.image_provider, _ = build_image(cfg, orch.s, client)
 

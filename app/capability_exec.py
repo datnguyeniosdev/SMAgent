@@ -8,6 +8,7 @@ falls back to the next eligible executor only for availability/transport failure
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 
@@ -58,7 +59,9 @@ async def exec_capability(svc, task, run, step: StepDef, inputs: dict) -> StepOu
     last: StepError | None = None
     for _ in range(MAX_EXECUTOR_TRIES):
         try:
-            choice = reg.select(step.ref, step.agent, exclude=excluded)
+            choice = reg.select(
+                step.ref, step.agent, exclude=excluded, plan=svc.plan_for(task, step.agent)
+            )
         except CapabilityError as e:
             if last is not None:
                 break
@@ -146,6 +149,11 @@ async def exec_provider(svc, task, step, cap, spec, inputs) -> StepOutput:
     conn = svc.router.connectors.get(spec.ref)
     if conn is None:
         raise StepError(f"provider {spec.ref} is not loaded", "unavailable")
+    if spec.model and spec.model != getattr(
+        conn, "model", None
+    ):  # same provider and key, other model
+        conn = copy.copy(conn)
+        conn.model, conn.available = spec.model, bool(getattr(conn, "api_key", None))
     template = spec.options.get("prompt_template")
     data_inputs = {k: v for k, v in inputs.items() if k != "image_artifact_ids"}
     prompt = (
@@ -161,7 +169,7 @@ async def exec_provider(svc, task, step, cap, spec, inputs) -> StepOutput:
         attachments=_image_inputs(svc, task, inputs.get("image_artifact_ids", [])),
         json_schema=(cap.output_schema or {"type": "object"}) if structured else None,
     )
-    holder = svc._child(task, cap.id, f"{cap.id} via {spec.ref}")
+    holder = svc._child(task, cap.id, f"{cap.id} via {executor_id(spec)}")
     try:
         result = await svc._call(holder, conn, req, cap.id)
     except ConnectorError as e:

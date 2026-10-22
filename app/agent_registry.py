@@ -57,7 +57,8 @@ class ExecutorCheck:
 
 def executor_id(spec: ExecutorSpec) -> str:
     suffix = f".{spec.operation}" if spec.operation and spec.type == "runtime" else ""
-    return f"{spec.type}:{spec.ref}{suffix}"
+    model = f"@{spec.model}" if spec.model else ""
+    return f"{spec.type}:{spec.ref}{model}{suffix}"
 
 
 class AgentCapabilityRegistry:
@@ -126,8 +127,15 @@ class AgentCapabilityRegistry:
                 return ExecutorCheck(
                     spec, False, f"{pdef.api_key_env} is not set", "missing_credentials"
                 )
+            if not svc.router.on(spec.ref):
+                return ExecutorCheck(
+                    spec,
+                    False,
+                    f"provider {spec.ref} is switched off (/agents)",
+                    "capability_unavailable",
+                )
             m = svc.caps.get(f"provider:{spec.ref}")
-            if m is None or m.status not in ROUTABLE:
+            if spec.model is None and (m is None or m.status not in ROUTABLE):
                 return ExecutorCheck(
                     spec,
                     False,
@@ -158,7 +166,10 @@ class AgentCapabilityRegistry:
             )
         return ExecutorCheck(spec, True, "eligible")
 
-    def candidates(self, capability_id: str, agent_id: str | None = None) -> list[ExecutorCheck]:
+    def candidates(
+        self, capability_id: str, agent_id: str | None = None, plan: list[str] = ()
+    ) -> list[ExecutorCheck]:
+        """plan: the project's executors for this role (catalog.plan), tried before everything else."""
         cap = self._capability(capability_id)
         agent = self._agent(agent_id, capability_id) if agent_id else None
         pref = agent.executor_preference if agent else []
@@ -167,13 +178,33 @@ class AgentCapabilityRegistry:
             eid = f"{spec.type}:{spec.ref}"
             return (pref.index(eid) if eid in pref else len(pref), spec.priority)
 
-        return [self.check(s) for s in sorted(cap.executors, key=key)]
+        planned = [s for e in plan if (s := self._planned(cap, e)) is not None]
+        rest = [
+            s
+            for s in sorted(cap.executors, key=key)
+            if executor_id(s) not in {executor_id(p) for p in planned}
+        ]
+        return [self.check(s) for s in planned + rest]
+
+    def _planned(self, cap: CapabilityDef, entry: str) -> ExecutorSpec | None:
+        """A plan entry as an executor of this capability. A provider (any model) borrows the
+        capability's own provider executor (operation, prompts); a runtime must already be one of
+        its executors. None when the capability cannot use it."""
+        kind, _, ref = entry.partition(":")
+        pid, _, model = ref.partition("@")
+        if kind == "provider":
+            base = next((s for s in cap.executors if s.type == "provider"), None)
+            return base.model_copy(update={"ref": pid, "model": model or None}) if base else None
+        return next((s for s in cap.executors if s.type == kind and s.ref == pid), None)
 
     def select(
-        self, capability_id: str, agent_id: str | None = None, exclude: set[str] = frozenset()
-    ) -> ExecutorCheck:
+        self, capability_id: str, agent_id: str | None = None, exclude: set[str] = frozenset(),
+        plan: list[str] = (),
+    ) -> ExecutorCheck:  # fmt: skip
         checks = [
-            c for c in self.candidates(capability_id, agent_id) if c.executor_id not in exclude
+            c
+            for c in self.candidates(capability_id, agent_id, plan)
+            if c.executor_id not in exclude
         ]
         for c in checks:
             if c.ok:

@@ -279,7 +279,13 @@ class Orchestrator:
     def image_provider(self, provider: ImageGenerationProvider | None) -> None:
         self._image_provider = provider
 
-    def _register_capabilities(self) -> None:
+    def plan_for(self, task: Task, role: str | None) -> list[str]:
+        """The project's executors for this workflow role (Telegram /plan), tried first."""
+        from app import catalog
+
+        return catalog.plan(self.store, self.project_of(task)).get(role, []) if role else []
+
+    def register_connectors(self) -> None:
         for c in self.router.connectors.values():
             provides = [k for k, v in CAP_NAMES.items() if v in c.caps]
             self.caps.register(
@@ -297,6 +303,9 @@ class Orchestrator:
                 ),
                 health=getattr(c, "health_status", None),
             )
+
+    def _register_capabilities(self) -> None:
+        self.register_connectors()
         for t in self.tools.list():
             self.register_tool_capability(t)
         for lp in self.plugins.loaded.values():

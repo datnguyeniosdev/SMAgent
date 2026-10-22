@@ -131,6 +131,12 @@ uv run agw dev
 
 `/keys` shows the provider keys and models that `config/providers/models.yaml` names (`api_key_env`, `model_env`): missing, or set (last 4 characters) and whether the value is saved or comes from `.env`. ✏️ asks for the value in a private chat with the bot (open it once with /start). The bot deletes that message at once, saves the value in the gateway database encrypted with `AGW_SECRET_KEY` from `.env`, and reloads the model and image providers without a restart. Saved values win over `.env` and are loaded again at every start. 🗑 clears a saved value (asks first); `.env` applies again. `uv run agw setup` adds `AGW_SECRET_KEY` when missing. Keep it: without it the saved values cannot be read (re-enter them), and a copy of the database alone reveals nothing. Only allowlisted users; values are never logged or shown back. Telegram keeps chats on its servers, so prefer keys you can rotate.
 
+**Models per project.** Providers are set up once and shared; each project picks which models its workflow roles use.
+
+1. `/providers` lists every provider (from `config/providers/models.yaml` plus ones added in Telegram). ➕ adds an OpenAI-compatible preset (OpenRouter, Groq, Mistral, xAI, Together, Fireworks, Qwen/DashScope, Moonshot, Zhipu, Z.AI, Ollama, LM Studio), kept in the database; no YAML edit, no restart. Set its key with `/keys`. (Preset URLs are the providers' documented OpenAI-compatible endpoints; check them against the provider if a call fails.)
+2. A provider can run several models: `/findmodel openrouter qwen` lists the provider's own model ids (tap to copy), `/addmodel openrouter qwen/qwen3-coder` adds one.
+3. `/plan p#` sets, per workflow role (designer, implementer, assistant, ...), an ordered list of models and runtimes for that project. A step for that role tries them first, then the role's defaults; a model that fails or is switched off in `/agents` falls through to the next. A project without a plan keeps the defaults.
+
 | Command | Purpose |
 |---|---|
 | `uv run agw setup` | secrets + global setup (`--agents LIST` other agents, `--repo PATH…` per-repo files, `--template` for template repos, `--remove`) |
