@@ -175,11 +175,79 @@ def _port_open(host: str, port: int) -> bool:
         return sock.connect_ex((host, port)) == 0
 
 
+def stop_mark() -> Path:
+    """Written by `agw stop`: the gateway is down on purpose, so background starts (the sessions'
+    10-minute health check) leave it down. A start from a terminal, or --force, removes it."""
+    return Path(_settings().data_dir) / "agw.stopped"
+
+
+def _listener(port: int) -> int | None:
+    r = subprocess.run(
+        ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"], capture_output=True, text=True
+    )
+    pids = [int(x) for x in r.stdout.split()]
+    return pids[0] if pids else None
+
+
+def _cwd(pid: int) -> str:
+    r = subprocess.run(
+        ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"], capture_output=True, text=True
+    )
+    return next((ln[1:] for ln in r.stdout.splitlines() if ln.startswith("n")), "")
+
+
+def cmd_stop(args) -> int:
+    """Stop this folder's gateway on this environment's port and keep background starts off."""
+    mark = stop_mark()
+    mark.parent.mkdir(parents=True, exist_ok=True)
+    mark.write_text(f"stopped with `agw stop` at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+    pid = _listener(args.port)
+    if pid is None:
+        print(f"nothing listens on port {args.port}; background starts stay off until `agw dev`")
+        return 0
+    if Path(_cwd(pid)).resolve() != Path.cwd().resolve():
+        print(
+            f"port {args.port} belongs to another folder ({_cwd(pid) or 'unknown'}); not stopping it"
+        )
+        return 1
+    parent = int(
+        subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)], capture_output=True, text=True).stdout
+        or 0
+    )
+    os.kill(pid, signal.SIGTERM)  # uvicorn shuts down; its `agw dev` parent then stops OpenCode
+    for _ in range(20):
+        time.sleep(0.5)
+        if _listener(args.port) is None:
+            break
+    else:
+        os.kill(pid, signal.SIGKILL)
+        time.sleep(1)
+    try:
+        if parent > 1 and "agw" in subprocess.run(["ps", "-o", "command=", "-p", str(parent)],
+                                                  capture_output=True, text=True).stdout:  # fmt: skip
+            os.kill(parent, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    print(
+        f"gateway on port {args.port} stopped; background starts stay off until you run `agw dev` in a terminal"
+    )
+    return 0
+
+
 def cmd_dev(args) -> int:
     s = _settings()
+    mark = stop_mark()
+    if mark.exists():
+        if not (args.force or sys.stdin.isatty()):  # a health check starting it in the background
+            print(
+                f"not starting: stopped on purpose ({mark}); run `agw dev` in a terminal to start it"
+            )
+            return 0
+        mark.unlink()
     if _port_open(args.host, args.port):
         print(
-            f"gateway already running on {_gateway_url(args.host, args.port)} (port in use); not starting another"
+            f"gateway already running on {_gateway_url(args.host, args.port)} (port in use); not starting another. "
+            "To run it here instead: `agw stop`, then `agw dev`"
         )
         return 0
     procs = []
@@ -566,7 +634,13 @@ def main(argv: list[str] | None = None) -> int:
     sp.set_defaults(fn=cmd_setup)
     sp = sub.add_parser("dev", help="start OpenCode (if enabled) + the gateway")
     hp(sp)
+    sp.add_argument(
+        "--force", action="store_true", help="start even after `agw stop` without a terminal"
+    )
     sp.set_defaults(fn=cmd_dev)
+    sp = sub.add_parser("stop", help="stop the gateway; background health checks leave it stopped")
+    hp(sp)
+    sp.set_defaults(fn=cmd_stop)
     sp = sub.add_parser("doctor", help="show what is configured and reachable")
     hp(sp)
     sp.set_defaults(fn=cmd_doctor)
