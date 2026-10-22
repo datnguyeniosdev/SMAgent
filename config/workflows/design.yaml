@@ -11,14 +11,6 @@ workflows:
         width: {type: integer, minimum: 16, maximum: 3840}
         height: {type: integer, minimum: 16, maximum: 3840}
         transparent: {type: boolean}
-    input_schema:
-      type: object
-      required: [prompt, width, height, transparent]
-      properties:
-        prompt: {type: string, minLength: 3}
-        width: {type: integer, minimum: 16, maximum: 3840}
-        height: {type: integer, minimum: 16, maximum: 3840}
-        transparent: {type: boolean}
     steps:
       - id: generate
         executor: capability

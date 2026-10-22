@@ -4,7 +4,6 @@ everything else (engine, store, tools, Telegram handler code, MCP protocol) is r
 
 import asyncio
 import base64
-import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -48,13 +47,6 @@ class Provider(FakeConnector):
 
 class Runtime(FakeConnector):
     kind = "runtime"
-
-
-@pytest.fixture
-def cfg_dir(tmp_path):
-    d = tmp_path / "config"
-    shutil.copytree(ROOT / "config", d)
-    return d
 
 
 @pytest.fixture

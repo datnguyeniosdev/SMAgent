@@ -9,7 +9,9 @@ import io
 import json
 import logging
 import re
+from datetime import datetime
 from html import escape
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -22,6 +24,7 @@ from aiogram.types import (
     BotCommandScopeChat,
     BufferedInputFile,
     CallbackQuery,
+    ForceReply,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     ReplyParameters,
@@ -32,10 +35,10 @@ from aiogram.types import Message as TgMessage
 from app import formatting as fmt
 from app.actions import Action, ActionError, ActionRegistry
 from app.collaboration import CollaborationError
-from app.config import Settings
+from app.config import Settings, env_name
 from app.connectors.base import ConnectorError
 from app.intake import TaskRequest
-from app.models import TaskState, Workflow
+from app.models import TaskState, Workflow, now
 from app.orchestrator import Orchestrator
 from app.storage import AttachmentError, AttachmentStore
 
@@ -46,45 +49,46 @@ PHOTO_LIMIT = 10 * 1024 * 1024
 ALBUM_WAIT_S = 1.5
 
 HELP = (
-    """<b>Agent Gateway</b>
-/task &lt;description&gt; — new task; attach images/files with the command as
-caption, then pick a workflow
-/status — recent tasks
-/report &lt;task_id&gt; — full task report
-/stop &lt;task_id|session_id&gt; — cancel a task
-/retry &lt;task_id&gt; — retry a failed/cancelled task
-/agents — agent roles and connectors
-/agents_status — connector availability and running calls
-/sessions — recent agent sessions
-/steps &lt;task_id&gt; — workflow steps, attempts and failures
-/answer &lt;task_id|request_id&gt; &lt;text&gt; — answer a clarification or input request
-/feedback &lt;task_id|report_id&gt; &lt;text&gt; — feedback (or reply to a gateway message); photos = screenshots
-/approvals — pending approvals
-/templates — copy-ready commands (reply to a gateway message to prefill its ids)
-/tools — registered tools · /tool &lt;name&gt; &lt;json args&gt; — run one tool
-/plugins — domain plugins · /capabilities — capability status
-/help — this message
+    """<b>Agent Gateway</b> · <code>/menu</code> for buttons
+
+<b>Sessions &amp; work</b>
+/list — agent sessions (s1, s2…) and projects (p1, p2…)
+/send &lt;s#|p#|project&gt; &lt;text&gt; — give an agent a request
+/queue — requests waiting or in progress (m1…) · /cancel &lt;m#&gt;
+/open &lt;folder|p#&gt; [new] — open a Claude session for a project (/open alone: buttons)
+/close &lt;s#&gt; · /off &lt;s#&gt; · /on &lt;s#&gt; — close a session, or stop/resume giving it work
+Reply to any gateway message (text or photos) to give feedback or answer it.
+
+<b>Setup</b>
+/setup — status, install or remove the global setup
+
+<b>More</b> (not in the / menu)
+/task · /status · /report · /steps · /retry · /stop · /answer · /feedback · /approvals ·
+/templates · /tools · /tool · /plugins · /capabilities · /agents · /agents_status · /sessions
 
 <b>Message prefixes</b>
 """
     + " · ".join(f"{i} {k}" for i, k in fmt.KINDS.values())
     + """
-First line: <code>PREFIX · #project · #task_id</code> (tap a hashtag to find every related message).
-Last lines: project, session and ref ids, then the reply template."""
+First line: <code>PREFIX · #project · #task_id</code> (tap a hashtag to find every related message)."""
 )
 
-MENU = [
-    ("task", "New task"),
-    ("status", "Recent tasks"),
-    ("templates", "Copy-ready commands (reply to a message to prefill)"),
-    ("report", "Full task report"),
-    ("steps", "Workflow steps of a task"),
-    ("answer", "Answer a question"),
-    ("feedback", "Feedback on a task or report"),
-    ("approvals", "Pending approvals"),
-    ("retry", "Retry a task"),
-    ("stop", "Cancel a task"),
-    ("help", "Commands and message prefixes"),
+MENU = [  # the "/" menu: everyday commands only; the rest still work (see /help)
+    ("menu", "Main panel with buttons"),
+    ("list", "Sessions (s#) and projects (p#)"),
+    ("send", "Send a request: /send s1|p1 <text>"),
+    ("queue", "Requests waiting / in progress (m#)"),
+    ("cancel", "Cancel a request: /cancel m1"),
+    ("open", "Open a project: /open, /open p1, /open k09"),
+    ("close", "Close a session: /close s1"),
+    ("off", "Stop giving a session work"),
+    ("on", "Resume giving a session work"),
+    ("setup", "Status and global setup"),
+    ("help", "All commands"),
+]
+MENU_BUTTONS = [
+    [("🖥 Sessions", "m:list"), ("📥 Queue", "m:queue"), ("📂 Open project", "m:open")],
+    [("⚙️ Setup", "m:setup"), ("🧩 Templates", "m:templates"), ("❓ Help", "m:help")],
 ]
 _ID = re.compile(r"\b(tsk|rep|hin|apr|dep)_[0-9a-f]{10}\b")
 
@@ -102,6 +106,15 @@ def parse_feedback(text: str) -> tuple[str | None, str]:
     while words and words[0].startswith("#"):
         words = words[1:]
     return ref, " ".join(words)
+
+
+def session_line(s) -> str:
+    """One /live row: mode, state, project, id, folder."""
+    mode = "⚡ push" if s.mode == "push" else "🔄 pull"
+    state = "🚫 blocked (org policy)" if s.blocked else ("🟢 on" if s.enabled else "⏸ off")
+    folder = escape(s.cwd.rstrip("/").rsplit("/", 1)[-1]) if s.cwd else "-"
+    return (f"<b>s{s.num}</b> · {state} · {mode} · {escape(s.project)} · {folder}"
+            f" · since {s.connected_at:%H:%M} · <code>{escape(s.session_id)}</code>")  # fmt: skip
 
 
 def templates(text: str = "") -> str:
@@ -378,7 +391,9 @@ class TelegramGateway:
 
     def _register(self) -> None:
         r = self.router
-        r.message(Command("start", "help"))(self.on_help)
+        r.message(Command("start", "menu"))(self.on_menu)
+        r.message(Command("help"))(self.on_help)
+        r.message(Command("setup"))(self.on_setup)
         r.message(Command("agents"))(self.on_agents)
         r.message(Command("agents_status"))(self.on_agents_status)
         r.message(Command("sessions"))(self.on_sessions)
@@ -393,6 +408,13 @@ class TelegramGateway:
         r.message(Command("answer"))(self.on_answer)
         r.message(Command("approvals"))(self.on_approvals)
         r.message(Command("templates"))(self.on_templates)
+        r.message(Command("send"))(self.on_send)
+        r.message(Command("list", "live"))(self.on_live)
+        r.message(Command("on", "off"))(self.on_switch)
+        r.message(Command("queue"))(self.on_queue)
+        r.message(Command("open"))(self.on_open)
+        r.message(Command("close"))(self.on_close)
+        r.message(Command("cancel"))(self.on_cancel)
         r.message(Command("tools"))(self.on_tools)
         r.message(Command("tool"))(self.on_tool)
         r.message(Command("plugins"))(self.on_plugins)
@@ -400,12 +422,455 @@ class TelegramGateway:
         r.message(Command("task"))(self.on_task)
         r.message(F.photo | F.document | F.video | F.audio | F.voice)(self.on_stray_media)
         r.callback_query(F.data.startswith("a:"))(self.on_callback)
+        r.callback_query(F.data.startswith("o:"))(self.on_open_button)
+        r.callback_query(F.data.startswith("k:"))(self.on_ask_button)
+        r.callback_query(F.data.startswith("m:"))(self.on_menu_button)
+        r.callback_query(F.data.startswith("g:"))(self.on_setup_button)
 
     async def on_help(self, m: TgMessage):
         if self._authorized_msg(m):
-            name = escape(m.from_user.full_name) if m.from_user else ""
-            mode = "webhook" if self.s.telegram_mode == "webhook" else "polling"
-            await m.answer(f"👋 Xin chào {name}! Bot đã sẵn sàng lắng nghe ({mode}).\n\n{HELP}")
+            await m.answer(HELP)
+
+    async def on_menu(self, m: TgMessage):
+        if not self._authorized_msg(m):
+            return
+        name = escape(m.from_user.full_name) if m.from_user else ""
+        live = self.orch.channel.live()
+        waiting = len(self.orch.channel.open_messages())
+        stuck = sum(a["state"] == "escalated" for a in self.orch.asks.open_asks())
+        text = f"👋 Xin chào {name}! Bot đã sẵn sàng lắng nghe.\n🖥 {len(live)} sessions · 📥 {waiting} requests open"
+        if stuck:
+            text += f" · 🆘 {stuck} agents waiting"
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=t, callback_data=d) for t, d in row] for row in MENU_BUTTONS
+        ])  # fmt: skip
+        await m.answer(text, reply_markup=kb)
+
+    async def on_menu_button(self, q: CallbackQuery):
+        chat_id = q.message.chat.id if q.message else None
+        if not self.authorized(q.from_user.id, chat_id):
+            await q.answer("Not authorized.", show_alert=True)
+            return
+        await q.answer()
+        view = q.data[2:]
+        answer = q.message.answer
+        if view == "list":
+            await answer(self._list_text())
+        elif view == "queue":
+            await answer(self._queue_text())
+        elif view == "open":
+            await self._open_menu(answer)
+        elif view == "setup":
+            await self._setup_panel(answer)
+        elif view == "templates":
+            await answer(templates(""))
+        else:
+            await answer(HELP)
+
+    async def on_setup(self, m: TgMessage):
+        if self._authorized_msg(m):
+            await self._setup_panel(m.answer)
+
+    async def _setup_panel(self, answer, note: str = "") -> None:
+        from app.doctor import collect
+
+        checks = await asyncio.to_thread(
+            collect, self.s, check_gateway=False
+        )  # this is the gateway
+        lines = [
+            f"{'✅' if c.ok else '⚠️'} <b>{escape(c.label)}</b>: {escape(c.detail)}" for c in checks
+        ]
+        from app import agents_setup
+
+        agent_row = [
+            InlineKeyboardButton(text=(f"🔌 Disconnect {a}" if agents_setup.configured(a) else f"🔗 Connect {a}"),
+                                 callback_data=f"g:{'agentoff' if agents_setup.configured(a) else 'agenton'}:{a}")
+            for a in agents_setup.detected()
+        ]  # fmt: skip
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Refresh", callback_data="g:refresh"),
+             InlineKeyboardButton(text="⬇️ Install / update global", callback_data="g:install")],
+            *[agent_row[i:i + 2] for i in range(0, len(agent_row), 2)],
+            [InlineKeyboardButton(text="🗑 Remove global", callback_data="g:remove")],
+        ])  # fmt: skip
+        head = "⚙️ <b>SETUP</b>" + (f"\n{note}" if note else "")
+        await answer(head + "\n\n" + "\n".join(lines), reply_markup=kb)
+
+    async def on_setup_button(self, q: CallbackQuery):
+        """Global setup from Telegram (changes ~/.claude on this Mac: allowlisted operator only)."""
+        chat_id = q.message.chat.id if q.message else None
+        if not self.authorized(q.from_user.id, chat_id):
+            log.warning("unauthorized setup button from user=%s chat=%s", q.from_user.id, chat_id)
+            await q.answer("Not authorized.", show_alert=True)
+            return
+        from app import global_setup
+
+        verb = q.data[2:]
+        if verb == "remove":  # destructive for every session's config: confirm first
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="Yes, remove", callback_data="g:remove_yes"),
+                InlineKeyboardButton(text="Keep it", callback_data="g:refresh"),
+            ]])  # fmt: skip
+            await q.answer()
+            await q.message.answer(
+                "Remove the global setup (skill, hook, permissions, channel MCP)?", reply_markup=kb
+            )
+            return
+        await q.answer("Working…" if verb != "refresh" else "")
+        note = ""
+        if verb != "refresh" and env_name() != "prod":
+            await self._setup_panel(
+                q.message.answer, f"❌ {env_name()}: agent configs are changed from prod only"
+            )
+            return
+        if verb == "install":
+            token = (
+                self.s.api_token.get_secret_value()
+                if self.s.mcp_require_token and self.s.api_token
+                else None
+            )
+            steps = await asyncio.to_thread(
+                global_setup.install, True, "http://127.0.0.1:8000/mcp", token
+            )
+            note = "Installed / updated:\n" + "\n".join(f"• {escape(x)}" for x in steps) + \
+                "\nRestart open Claude sessions to load it."  # fmt: skip
+        elif verb.startswith("agenton:") or verb.startswith("agentoff:"):
+            from app import agents_setup
+
+            action, agent = verb.split(":", 1)
+            if agent not in agents_setup.AGENTS:
+                await q.message.answer("Unknown agent.")
+                return
+            fn = agents_setup.install if action == "agenton" else agents_setup.remove
+            try:
+                note = escape(await asyncio.to_thread(fn, agent))
+            except ValueError as e:
+                note = f"❌ {escape(str(e))}"
+        elif verb == "remove_yes":
+            steps = await asyncio.to_thread(global_setup.remove)
+            note = "Removed:\n" + "\n".join(f"• {escape(x)}" for x in steps)
+        await self._setup_panel(q.message.answer, note)
+
+    def _list_text(self) -> str:
+        hub = self.orch.channel
+        live = hub.live()
+        lines = ["🖥 <b>SESSIONS</b>"]
+        lines += [session_line(x) for x in live] or [
+            "none open · terminal: <code>agw session</code> (⚡ push) · any session: /loop + get_messages (🔄 pull)"
+        ]
+        lines += ["", "📁 <b>PROJECTS</b>"]
+        for num, name in hub.projects():
+            mine = [x for x in live if x.project == name]
+            ready = sum(x.deliverable for x in mine)
+            state = (
+                f"{len(mine)} open, {ready} can take work"
+                if mine
+                else "no open session (work waits)"
+            )
+            lines.append(f"<b>p{num}</b> · {escape(name)} · {state}")
+        if not hub.projects():
+            lines.append("none yet (a project appears once a session opens for it)")
+        lines += [
+            "",
+            "<code>/send s1 &lt;text&gt;</code> · <code>/send p1 &lt;text&gt;</code> · <code>/off s1</code> · "
+            "<code>/on s1</code> · <code>/close s1</code> · <code>/open name</code>",
+        ]
+        return "\n".join(lines)
+
+    async def on_live(self, m: TgMessage):
+        if self._authorized_msg(m):
+            await m.answer(self._list_text())
+
+    def _queue_text(self) -> str:
+        hub = self.orch.channel
+        msgs = hub.open_messages()
+        if not msgs:
+            return "📥 <b>QUEUE</b>\nempty: every request was taken and answered (or cancelled)"
+        label = {"pending": "⏳ waiting", "queued": "📌 assigned", "delivered": "▶️ in progress"}
+        lines = ["📥 <b>QUEUE</b>"]
+        for x in msgs:
+            sess = hub.sessions.get(x.get("session_id") or "")
+            where = f"s{sess.num}" if sess else f"p{hub.project_num(x['project'])}"
+            age = int((now() - datetime.fromisoformat(x["created_at"])).total_seconds() // 60)
+            request = x["text"].split("\n", 1)[-1]
+            lines.append(f"<b>m{x.get('num', '?')}</b> · {label.get(x['state'], x['state'])} · {where} · "
+                         f"{escape(x['project'])} · {age}m · {escape(fmt.truncate(request, 60))}")  # fmt: skip
+        lines += ["", "<code>/cancel m1</code> cancels one (in-progress work is only marked)"]
+        return "\n".join(lines)
+
+    async def on_queue(self, m: TgMessage):
+        if self._authorized_msg(m):
+            await m.answer(self._queue_text())
+
+    async def on_cancel(self, m: TgMessage, command: CommandObject):
+        if not self._authorized_msg(m):
+            return
+        ref = (command.args or "").strip()
+        msg = self.orch.channel.cancel(ref) if ref else None
+        if msg is None:
+            await m.answer("Usage: /cancel &lt;m#&gt; (open requests: /queue)")
+            return
+        was = msg.get("cancelled_from")
+        note = ("it was already being worked on: the session is not interrupted, its answer will be "
+                "marked cancelled") if was == "delivered" else "it will not be delivered"  # fmt: skip
+        await m.answer(f"🗑 <b>m{msg.get('num')}</b> cancelled · {escape(note)}")
+
+    async def on_open(self, m: TgMessage, command: CommandObject):
+        """/open <folder|p#> [new]: start a Claude Code session for a project folder on this Mac.
+        /open alone: buttons for the known projects."""
+        if not self._authorized_msg(m):
+            return
+        words = (command.args or "").split()
+        new = bool(words) and words[-1].lower() == "new"
+        query = " ".join(words[:-1] if new else words)
+        if not query:
+            await self._open_menu(m.answer)
+            return
+        await self._open(m.answer, query, new)
+
+    async def _open_menu(self, answer) -> None:
+        hub = self.orch.channel
+        rows = [(num, name, hub.project_dir(name)) for num, name in hub.projects()]
+        rows = [r for r in rows if r[2]]
+        if not rows:
+            await answer("Usage: /open &lt;project folder&gt; [new] (e.g. <code>/open k09</code>)")
+            return
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"p{num} · {Path(d).name}", callback_data=f"o:{num}")]
+            for num, _name, d in rows[:12]
+        ])  # fmt: skip
+        await answer(
+            "🖥 <b>OPEN</b> · tap a project, or <code>/open &lt;folder name&gt;</code> for any other folder",
+            reply_markup=kb,
+        )
+
+    async def send_ask_escalation(self, a: dict) -> None:
+        """An agent is waiting for another one that cannot or does not answer: the operator decides."""
+        asks = self.orch.asks
+        asker = asks._label(a.get("from_session"), a.get("from_project"))
+        body = (
+            f"{escape(asker)} asked <b>{escape(a['to_project'])}</b>"
+            + (f" (s{target.num})" if (target := self.orch.channel.sessions.get(a.get("to_session") or "")) else "")
+            + f":\n{escape(fmt.truncate(a['request'], 700))}\n\n<b>Problem:</b> {escape(a.get('reason', ''))}"
+        )  # fmt: skip
+        k = a["ask_id"]
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔁 Resend", callback_data=f"k:resend:{k}"),
+             InlineKeyboardButton(text="➡️ Other session", callback_data=f"k:other:{k}")],
+            [InlineKeyboardButton(text="🚀 Open it", callback_data=f"k:open:{k}"),
+             InlineKeyboardButton(text="✍️ Answer myself", callback_data=f"k:answer:{k}"),
+             InlineKeyboardButton(text="❌ Cancel", callback_data=f"k:cancel:{k}")],
+        ])  # fmt: skip
+        html = fmt.envelope("ask", body, project=a["to_project"], title=f"An agent is waiting ({k})", ref=k,
+                            reply="Reply to this message to answer it yourself")  # fmt: skip
+        msg = await self._send(self.bot.send_message, chat_id=self.s.telegram_control_chat_id, text=html,
+                               reply_markup=kb)  # fmt: skip
+        if msg is not None:
+            self.orch.store.put(
+                "ask_tg", f"c:{self.s.telegram_control_chat_id}:{msg.message_id}", {"ask_id": k}
+            )
+
+    async def on_ask_button(self, q: CallbackQuery):
+        chat_id = q.message.chat.id if q.message else None
+        if not self.authorized(q.from_user.id, chat_id):
+            log.warning("unauthorized ask button from user=%s chat=%s", q.from_user.id, chat_id)
+            await q.answer("Not authorized.", show_alert=True)
+            return
+        _, verb, ask_id, *rest = q.data.split(":")
+        asks, hub = self.orch.asks, self.orch.channel
+        a = asks.get(ask_id)
+        if a is None or a["state"] in ("answered", "cancelled"):
+            await q.answer(f"Already {a['state'] if a else 'gone'}.", show_alert=True)
+            return
+        try:
+            if verb == "resend" or (verb == "to" and rest):
+                target = (
+                    next((x for x in hub.live() if x.num == int(rest[0])), None) if rest else None
+                )
+                a = asks.resend(ask_id, to_session=target.session_id if target else None)
+                where = (
+                    f"s{target.num}"
+                    if target
+                    else (a.get("delivered_to") and "the same session") or "the queue"
+                )
+                await q.answer(f"Resent to {where}.")
+            elif verb == "other":
+                options = [
+                    x for x in hub.live() if x.deliverable and x.session_id != a.get("from_session")
+                ]
+                if not options:
+                    await q.answer("No other session can take it right now.", show_alert=True)
+                    return
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text=f"s{x.num} · {x.project}"[:60], callback_data=f"k:to:{ask_id}:{x.num}")]
+                    for x in options[:10]
+                ])  # fmt: skip
+                await q.answer()
+                await q.message.answer(
+                    f"Send <code>{ask_id}</code> to which session?", reply_markup=kb
+                )
+            elif verb == "open":
+                from app.launcher import open_project
+
+                folder = hub.project_dir(a["to_project"])
+                if folder is None:
+                    await q.answer(
+                        "No folder recorded for that project; use /open <folder>.", show_alert=True
+                    )
+                    return
+                root = self.s.projects_root or Path(__file__).resolve().parents[2]
+                cwds = [x.cwd for x in hub.live()]
+                status, _ = await asyncio.to_thread(
+                    open_project, root, Path(folder).name, cwds, True, self.s.mcp_require_token
+                )
+                asks.resend(
+                    ask_id
+                )  # waits in the queue; delivered as soon as the new session connects
+                await q.answer(
+                    f"Opening {Path(folder).name} ({status}); the request follows when it connects."
+                )
+            elif verb == "answer":
+                await q.answer()
+                prompt = await q.message.answer(
+                    f"✍️ Reply to this message with the answer for <code>{ask_id}</code>.",
+                    reply_markup=ForceReply(selective=True),
+                )
+                self.orch.store.put(
+                    "ask_tg", f"c:{chat_id}:{prompt.message_id}", {"ask_id": ask_id}
+                )
+                return
+            elif verb == "cancel":
+                asks.cancel(ask_id)
+                await q.answer("Cancelled; the asking agent was told.")
+            else:
+                await q.answer("Unknown action.", show_alert=True)
+                return
+        except (ValueError, OSError, RuntimeError) as e:
+            await q.answer(fmt.truncate(str(e), 190), show_alert=True)
+            return
+        if q.message and verb != "other":
+            try:
+                await q.message.edit_reply_markup(reply_markup=None)
+            except TelegramBadRequest:
+                pass
+
+    async def on_open_button(self, q: CallbackQuery):
+        chat_id = q.message.chat.id if q.message else None
+        if not self.authorized(q.from_user.id, chat_id):
+            log.warning("unauthorized open button from user=%s chat=%s", q.from_user.id, chat_id)
+            await q.answer("Not authorized.", show_alert=True)
+            return
+        await q.answer("Opening…")
+        await self._open(q.message.answer, f"p{q.data[2:]}", False)
+
+    async def _open(self, answer, query: str, new: bool) -> None:
+        from app.launcher import open_project
+
+        root = self.s.projects_root or Path(__file__).resolve().parents[2]
+        hub = self.orch.channel
+        if re.fullmatch(r"[pP]\d+", query):  # a project from /list: open the folder it was used in
+            name = hub.resolve_project(query)
+            folder = hub.project_dir(name) if name else None
+            if folder is None:
+                await answer(
+                    f"Unknown project {escape(query)} (see /list), or no folder recorded for it."
+                )
+                return
+            if Path(folder).parent != root:
+                await answer(
+                    f"{escape(folder)} is outside {escape(str(root))}; /open only starts folders there."
+                )
+                return
+            query = Path(folder).name
+        live = hub.live()
+        try:
+            status, hits = await asyncio.to_thread(
+                open_project, root, query, [x.cwd for x in live], new, self.s.mcp_require_token
+            )
+        except Exception as e:  # osascript refused (permission), setup failed, ...
+            log.warning("open %s failed: %s", query, e)
+            await answer(f"❌ Could not open {escape(query)}: {escape(str(e)[:300])}")
+            return
+        if status == "none":
+            await answer(f"No project folder matches {escape(query)} in {escape(root.name)}/.")
+            return
+        if status == "many":
+            names = "\n".join(f"• <code>/open {escape(d.name)}</code>" for d in hits[:15])
+            await answer(f"Several folders match {escape(query)}:\n{names}")
+            return
+        repo = hits[0]
+        if status == "already_open":
+            sess = [x for x in live if x.cwd.rstrip("/") == str(repo)]
+            ids = ", ".join(f"s{x.num}" for x in sess)
+            first = ids.split(",")[0]
+            await answer(
+                f"{escape(repo.name)} is already open ({ids}). Use <code>/send {first} …</code>, "
+                f"or <code>/open {escape(repo.name)} new</code> for another session."
+            )
+            return
+        body = (
+            "Opening a Terminal window on the Mac with <code>agw session</code>; "
+            "it starts taking work by itself."
+        )
+        if status == "opened_connected":
+            body += "\nFirst time: connected the repo to the gateway (CLAUDE.md, .mcp.json; not committed)."
+        body += "\nIt shows up in /list within about a minute. A new folder may first ask to be trusted in that window."
+        await answer(fmt.envelope("open", body, project=repo.name, title=str(repo)))
+
+    async def on_close(self, m: TgMessage, command: CommandObject):
+        """/close <s#>: push -> stop its Claude Code process; pull -> stop its loop."""
+        if not self._authorized_msg(m):
+            return
+        ref = (command.args or "").strip()
+        s = self.orch.channel.find(ref) if ref else None
+        if s is None:
+            await m.answer("Usage: /close &lt;s#&gt; (ids from /list)")
+            return
+        what = await asyncio.to_thread(self.orch.channel.close, s)
+        await m.answer(f"🔌 <b>s{s.num}</b> closed ({escape(s.project)}) · {escape(what)}")
+
+    async def on_switch(self, m: TgMessage, command: CommandObject):
+        """/on <session> or /off <session>: let a session take pushed/pulled work, or not."""
+        if not self._authorized_msg(m):
+            return
+        on = (command.command or "").lower() == "on"
+        ref = (command.args or "").strip()
+        s = self.orch.channel.find(ref) if ref else None
+        if s is None:
+            await m.answer(f"Usage: /{'on' if on else 'off'} &lt;s#&gt; (ids from /list)")
+            return
+        self.orch.channel.set_enabled(s, on)
+        await m.answer(session_line(s))
+
+    async def on_send(self, m: TgMessage, command: CommandObject):
+        """Push a request into the open Claude Code session of a project (queued if none is open)."""
+        if not self._authorized_msg(m):
+            return
+        hub = getattr(self.orch, "channel", None)
+        ref, _, text = (command.args or "").strip().partition(" ")
+        if hub is None or not ref or not text.strip():
+            await m.answer(
+                "Usage: /send &lt;s#|p#|project&gt; &lt;text&gt; (e.g. <code>/send s1 fix the pause menu</code>; "
+                "ids from /list)"
+            )
+            return
+        session = hub.find(ref) if re.fullmatch(r"[sS]\d+", ref) else None
+        project = session.project if session else hub.resolve_project(ref)
+        if project is None:
+            await m.answer(f"Unknown session or project {escape(ref)}.\n\n" + self._list_text())
+            return
+        sender = m.from_user.full_name if m.from_user else ""
+        msg, target = hub.send(
+            project, f"Request from {sender} (Telegram):\n{text.strip()}", sender=sender,
+            session_id=session.session_id if session else None,
+        )  # fmt: skip
+        if target is not None:
+            how = "pushed into" if target.mode == "push" else "queued for the next get_messages of"
+            status = f"m{msg['num']} {how} session s{target.num} (<code>{escape(target.session_id)}</code>)"
+        else:
+            reason = hub.undeliverable_reason(project) or "no open session"
+            status = f"m{msg['num']} queued: {escape(reason)}; delivered when a session can take it"
+        await m.answer(fmt.envelope("feedback", status, project=project, ref=msg["message_id"]))
 
     async def on_templates(self, m: TgMessage):
         if self._authorized_msg(m):
@@ -586,6 +1051,12 @@ class TelegramGateway:
                 await self._explicit_feedback(m, text, kwargs, images)
                 return
             text = body  # no id in the caption: the replied-to message says which task
+        ask = self.orch.store.get("ask_tg", f"c:{reply.chat.id}:{reply.message_id}")
+        if ask is not None:  # a reply to an escalation (or its "answer myself" prompt): the answer
+            a = self.orch.asks.answer(ask["ask_id"], text, by="the operator")
+            who = self.orch.asks._label(a.get("from_session"), a.get("from_project"))
+            await m.reply(f"✅ Sent to {escape(who)} as the answer to {escape(a['ask_id'])}.")
+            return
         fwd = getattr(reply, "forward_origin", None)
         report = self.orch.collab.resolve_report(
             chat_id=reply.chat.id,
@@ -664,7 +1135,16 @@ class TelegramGateway:
             log.warning("feedback rejected (%s): %s", e.code, e)
             await m.reply(f"❌ {escape(str(e))}")
             return
-        if fb.follow_up_task_id and fb.route_id != "acknowledge":
+        if fb.route_id == "art_revision":
+            body = (f"Regenerating with your changes (<code>{fb.follow_up_task_id}</code>); "
+                    "the new version comes here for review")  # fmt: skip
+        elif fb.route_id == "channel":
+            body = (
+                "Pushed into the live Claude Code session"
+                if fb.delivered
+                else "Queued: no session that can receive it is open; delivered when one is"
+            )
+        elif fb.follow_up_task_id and fb.route_id != "acknowledge":
             body = f"Follow-up <code>{fb.follow_up_task_id}</code> started ({escape(fb.route_id or '')})"
         elif fb.follow_up_task_id:
             body = "Recorded"

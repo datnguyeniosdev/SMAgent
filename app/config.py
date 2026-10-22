@@ -1,4 +1,5 @@
 import json
+import os
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -32,6 +33,8 @@ class Settings(BaseSettings):
     # false: /mcp accepts token-less requests, but only from this machine (loopback client, local
     # Host header, no foreign Origin), so local Claude Code sessions connect without AGW_API_TOKEN.
     mcp_require_token: bool = True
+    # folder whose git sub-folders /open can start (default: the folder containing this gateway)
+    projects_root: Path | None = None
 
     # Storage and workspaces
     data_dir: Path = Path("var")
@@ -187,6 +190,43 @@ class Settings(BaseSettings):
         ]
 
 
+# Environments run side by side from this folder: own .env file, port and data folder (DATA_DIR in
+# .env.<env>). Agent configs (Claude Code, OpenCode, Codex, ...) always point at prod.
+ENV_PORTS = {"prod": 8000, "dev": 8001, "uat": 8002}
+
+
+def env_name() -> str:
+    env = os.environ.get("AGW_ENV", "prod").lower()
+    if env not in ENV_PORTS:
+        raise ValueError(f"AGW_ENV={env!r}: use one of {', '.join(ENV_PORTS)}")
+    return env
+
+
+def env_file() -> str:
+    return ".env" if env_name() == "prod" else f".env.{env_name()}"
+
+
+def require_prod(what: str) -> None:
+    """Agent configs belong to prod: dev/uat never rewrite them."""
+    if env_name() != "prod":
+        raise ValueError(f"{what} is prod-only; this is {env_name()} (agent configs stay on prod)")
+
+
+def load_settings() -> Settings:
+    s = Settings(_env_file=env_file())
+    if env_name() != "prod" and s.telegram_bot_token:
+        from dotenv import dotenv_values
+
+        if s.telegram_bot_token.get_secret_value() == dotenv_values(".env").get(
+            "TELEGRAM_BOT_TOKEN"
+        ):
+            # two pollers on one bot steal each other's updates: prod would go deaf
+            raise ValueError(
+                f"{env_file()} uses prod's TELEGRAM_BOT_TOKEN; give {env_name()} its own bot"
+            )
+    return s
+
+
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    return load_settings()

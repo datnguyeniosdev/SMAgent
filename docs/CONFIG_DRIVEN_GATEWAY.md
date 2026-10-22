@@ -112,6 +112,49 @@ Correlation records: `report`, `tg_msg` (message-id index), `feedback`, `telegra
 
 > Anonymous admins: a group admin with "Remain anonymous" posts as `GroupAnonymousBot` (id 1087968824), which is never on the allowlist. Turn it off for operators.
 
+### Live sessions: push work into an open Claude Code session
+
+Uses Claude Code **channels** (research preview, Claude Code ≥ 2.1.80, stdio servers only).
+
+```
+Telegram /send 2048 fix the pause menu
+   → gateway inbox (per project) ─SSE─▶ agent-gateway-channel shim (stdio, inside the session)
+   → notifications/claude/channel → the open session starts a turn
+   → Claude calls the shim's `reply` tool → report posted to Telegram
+   → you reply to that post (text + photos) → pushed into the same session
+```
+
+- **Start a session:** run `agw session` in a repo. It checks the Claude Code version and launches `claude --dangerously-load-development-channels server:agent-gateway-channel` with `AGW_CHANNEL=1`.
+- **Shim (`app/channel_shim.py`, stdlib only):**
+  - only listens when `AGW_CHANNEL=1` is set; in an ordinary session it stays idle, so nothing is routed to a session that can't receive it
+  - negotiates MCP protocol `2025-06-18` (the docs say a channel on `2026-07-28` is not registered)
+- **Gateway endpoints:** `/api/v1/channel/stream`, `/reply` and `/sessions` are **local-only, no token**: loopback client, local `Host`, no foreign `Origin`.
+- **Telegram:**
+  - `/send <project> <text>` matches the project by name, tag or a unique fragment
+  - `/live` lists open sessions
+  - with no session open, messages wait and are delivered when one opens
+- **Session record:** each session gets a record-only task. Claude's answers are its reports, and replies to them route back by `channel_session` instead of starting a workflow.
+- **Delivery is at most once:** a message read off the queue just as the shim drops is lost.
+- **Telegram stays the gate:** only allowlisted users can `/send` or reply. Channel content is otherwise treated as a request from the user, and the session still confirms commits, pushes and deploys.
+
+### Pull mode, IDs, queue and auto-start
+
+- **Pull mode (any session, including the desktop app):** a recurring job calls the MCP tool `get_messages(project)` and answers with `reply_message(session_id, message_id, text)`. Push and pull share one inbox, and push is preferred when both are open.
+- **Short IDs** (stable; shown by `/list` and `/queue`):
+  - `s#` for sessions
+  - `p#` for projects
+  - `m#` for requests
+
+  Commands that take them: `/send s1|p1 <text>`, `/off s1`, `/on s1` (persisted per session), `/queue`, `/cancel m3`.
+- **One job at a time:**
+  - a handed-over request is *in progress* until `reply_message` answers it, or for at most 60 minutes
+  - meanwhile `get_messages` returns `busy` and hands out nothing new, so a session never runs two requests in parallel, and duplicate loops in one session can't double up
+  - the default `limit` is 1
+- **Cancel:** `/cancel` on a waiting request drops it. On one already in progress it only marks it cancelled: the session isn't interrupted, and its answer is labelled cancelled.
+- **Auto-start when a project opens:**
+  - `repo-setup` installs a `SessionStart` hook (`agw hook-session-start`) in `.claude/settings.local.json`. It tells Claude to create exactly one every-minute job (checked with `CronList` first). Hooks can't wake an idle session, so in the desktop app this happens with the session's first message.
+  - `agw session` starts a fresh session with the loop as its first prompt (`--no-loop` to skip). A resumed session (`--continue` / `--resume`) restores its recurring job instead.
+
 ### Receiving updates: polling or webhook
 
 Both modes run the same handlers (aiogram `Router`, e.g. `Command("start")`, the discussion-group listener); only the transport differs.

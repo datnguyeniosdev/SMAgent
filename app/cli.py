@@ -1,18 +1,22 @@
 """`agw` command line (installed as a uv project script).
 
-uv run agw serve        start the gateway (REST + Telegram + /mcp)
-uv run agw opencode     start `opencode serve` with OPENCODE_PASSWORD / OPENCODE_URL from .env
-uv run agw dev          OpenCode server (if OPENCODE_ENABLED) + gateway together
-uv run agw validate     validate config/ (agents, capabilities, workflows, ...)
-uv run agw doctor       show what is configured and reachable
-uv run agw mcp-setup    register the gateway MCP server in Claude Code (user scope)
-uv run agw init-env     create missing local secrets (API_TOKEN, OPENCODE_PASSWORD) in .env
-uv run agw repo-setup <repo...>   standard CLAUDE.md block + .mcp.json + local settings per repo
+uv run agw setup                 set up this machine: local secrets + global setup for every repo
+uv run agw setup --repo PATH...  per-repo files instead (CLAUDE.md, .mcp.json; --template for templates)
+uv run agw setup --remove        undo the global setup
+uv run agw dev                   OpenCode server (if OPENCODE_ENABLED) + gateway together
+uv run agw doctor                show what is configured and reachable
+uv run agw open <name>           open a project folder in a Claude session (Terminal window)
+agw session                      (in a repo) Claude Code that takes work from Telegram
+uv run agw serve | opencode | validate   start one part only / check config/
+
+Older names still work: init-env, mcp-setup, global-setup, repo-setup. `channel` and
+`hook-session-start` are run by Claude Code itself.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import secrets
@@ -30,9 +34,9 @@ MCP_NAME = "agent-gateway"
 
 
 def _settings():
-    from app.config import Settings
+    from app.config import load_settings
 
-    return Settings()
+    return load_settings()
 
 
 def _gateway_url(host: str, port: int) -> str:
@@ -234,58 +238,13 @@ def cmd_validate(args) -> int:
 
 
 def cmd_doctor(args) -> int:
-    import httpx
+    from dotenv import load_dotenv
 
-    s = _settings()
-    ok = lambda b: "OK " if b else "-- "  # noqa: E731
-    print(f"{ok(shutil.which('uv'))}uv")
-    print(f"{ok(s.api_token)}API_TOKEN (needed for REST and /mcp)")
-    print(f"{ok(s.config_dir and (s.config_dir / 'app.yaml').exists())}CONFIG_DIR={s.config_dir}")
-    print(
-        f"{ok(s.workspace_root)}WORKSPACE_ROOT={s.workspace_root or '(not set: code tasks disabled)'}"
-    )
-    print(
-        f"{ok(s.telegram_bot_token)}Telegram bot token"
-        + (
-            ""
-            if s.telegram_control_chat_id not in (None, -1000000000000)
-            else "  (placeholder chat ids)"
-        )
-    )
-    hook = s.telegram_mode == "webhook"
-    print(
-        f"{ok(not hook or s.telegram_webhook_url or shutil.which('cloudflared'))}"
-        f"TELEGRAM_MODE={s.telegram_mode}"
-        + (f"  url={s.telegram_webhook_url or '(cloudflared tunnel at start)'}" if hook else "")
-    )
-    print(f"{ok(shutil.which('opencode'))}opencode binary  OPENCODE_ENABLED={s.opencode_enabled}")
-    if s.opencode_enabled and s.opencode_password:
-        try:
-            r = httpx.get(
-                s.opencode_url.rstrip("/") + "/api/info",
-                timeout=3,
-                auth=(s.opencode_username, s.opencode_password.get_secret_value()),
-            )
-            print(
-                f"{ok(r.status_code == 200)}opencode server {s.opencode_url} -> HTTP {r.status_code}"
-            )
-        except httpx.HTTPError:
-            print(f"-- opencode server {s.opencode_url} not reachable (run `uv run agw opencode`)")
-    url = _gateway_url(args.host, args.port)
-    try:
-        r = httpx.get(f"{url}/health", timeout=3)
-        print(f"{ok(r.status_code == 200)}gateway {url}/health -> {r.status_code}")
-    except httpx.HTTPError:
-        print(f"-- gateway {url} not running (run `uv run agw serve`)")
-    claude = shutil.which("claude")
-    if claude:
-        out = subprocess.run(
-            [claude, "mcp", "get", MCP_NAME], capture_output=True, text=True, env=_clean_env()
-        )
-        print(
-            f"{ok(out.returncode == 0)}Claude Code MCP '{MCP_NAME}' "
-            + ("registered" if out.returncode == 0 else "not registered")
-        )
+    from app.config import env_file
+    from app.doctor import as_text, collect
+
+    load_dotenv(env_file(), override=False)  # provider keys (FAL_KEY, ...) live in .env
+    print(as_text(collect(_settings(), _gateway_url(args.host, args.port))))
     return 0
 
 
@@ -333,8 +292,18 @@ def cmd_repo_setup(args) -> int:
             print(f"-- {repo}: not a git repository, skipped")
             continue
         r = setup_repo(
-            repo, url, args.project if len(args.repos) == 1 else None, _settings().mcp_require_token
+            repo,
+            url,
+            args.project if len(args.repos) == 1 else None,
+            _settings().mcp_require_token,
+            template=args.template,
         )
+        if args.template:
+            print(
+                f"OK {repo.name}: template, CLAUDE.md {r['claude_md']} (project {r['project']!r}; "
+                "no .mcp.json / local settings: games made from it run `agw setup --repo` themselves)"
+            )
+            continue
         ignored = (
             subprocess.run(
                 ["git", "-C", str(repo), "check-ignore", "-q", ".claude/settings.local.json"]
@@ -353,43 +322,303 @@ def cmd_repo_setup(args) -> int:
     return 0
 
 
+CHANNEL_NAME = "agent-gateway-channel"
+CHANNEL_MIN_VERSION = (2, 1, 80)  # Claude Code channels (research preview)
+
+
+def cmd_channel(args) -> int:
+    """stdio MCP shim that Claude Code spawns (from .mcp.json); see app/channel_shim.py."""
+    from app.channel_shim import main as shim_main
+
+    return shim_main(args.project)
+
+
+def _claude_version(claude: str) -> tuple[int, ...]:
+    out = subprocess.run(
+        [claude, "--version"], capture_output=True, text=True, env=_clean_env()
+    ).stdout
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", out)
+    return tuple(int(x) for x in m.groups()) if m else ()
+
+
+def cmd_session(args) -> int:
+    """Open an interactive Claude Code session in this repo that receives pushed work (channel)."""
+    claude = shutil.which("claude")
+    if claude is None:
+        raise SystemExit("claude CLI not found")
+    version = _claude_version(claude)
+    if version < CHANNEL_MIN_VERSION:
+        have = ".".join(map(str, version)) or "unknown"
+        raise SystemExit(
+            f"Claude Code {have} has no channels; need >= 2.1.80: "
+            "npm install -g @anthropic-ai/claude-code@latest"
+        )
+    from app.global_setup import installed as global_installed
+    from app.projects import project_for
+
+    mcp = json.loads(Path(".mcp.json").read_text()) if Path(".mcp.json").exists() else {}
+    local = mcp.get("mcpServers", {}).get(CHANNEL_NAME)
+    if local is None and not global_installed():
+        raise SystemExit(
+            "no channel server here: run `uv run agw setup` (all repos) or `agw setup --repo <repo>`"
+        )
+    env = {**_clean_env(), "AGW_CHANNEL": "1"}  # the shim only listens in sessions started here
+    if (
+        not args.claude_args and not args.no_loop
+    ):  # fresh session: also pull (resumed ones restore it)
+        from app.repo_setup import loop_prompt
+
+        project = (local or {}).get("args", [None])[-1] or project_for(Path.cwd())
+        if project:
+            args.claude_args = [f"/loop 1m {loop_prompt(project)}"]
+    # the channel option takes several values, so it goes last: a prompt after it would be read as a channel
+    argv = [
+        claude,
+        *args.claude_args,
+        "--dangerously-load-development-channels",
+        f"server:{CHANNEL_NAME}",
+    ]
+    os.execvpe(claude, argv, env)  # noqa: S606 - no shell on purpose; the terminal becomes the session
+
+
+def cmd_open(args) -> int:
+    """Find a project folder under PROJECTS_ROOT and open a Claude session there (Terminal window)."""
+    from app.launcher import open_project
+
+    s = _settings()
+    root = s.projects_root or Path(__file__).resolve().parents[2]
+    status, hits = open_project(root, args.query, new=True, token=s.mcp_require_token)
+    if status == "none":
+        print(f"no project folder matches {args.query!r} in {root}")
+        return 1
+    if status == "many":
+        print("several match:\n" + "\n".join(f"  {d.name}" for d in hits))
+        return 1
+    extra = " (connected it to the gateway first)" if status == "opened_connected" else ""
+    print(f"opening {hits[0]} in a Terminal window{extra}")
+    return 0
+
+
+def cmd_global_setup(args) -> int:
+    """Connect every git repo under PROJECTS_ROOT via Claude Code's user-level config (see app/global_setup.py)."""
+    from app import global_setup
+
+    if args.remove:
+        steps = global_setup.remove()
+    else:
+        settings = _settings()
+        token = (
+            settings.api_token.get_secret_value()
+            if settings.mcp_require_token and settings.api_token
+            else None
+        )
+        steps = global_setup.install(
+            gateway_url=f"{_gateway_url(args.host, args.port)}/mcp", token=token
+        )
+    for line in steps:
+        print(f"- {line}")
+    print("Restart open Claude Code sessions (/exit, then claude --continue) so they load it.")
+    return 0
+
+
+def cmd_hook_session_start(args) -> int:
+    """SessionStart hook (from .claude/settings.local.json): its stdout becomes Claude's context."""
+    from app.projects import project_for
+    from app.repo_setup import session_start_hint
+
+    project = args.project or project_for(Path.cwd())
+    if project is None:  # global hook in a folder that is not a connected repo: stay silent
+        return 0
+    print(session_start_hint(project))
+    print(
+        f"Use project '{project}' for every agent-gateway call; the agent-gateway skill has the details "
+        "(short reports, Telegram requests, reviewed art, refreshing the session after setup)."
+    )
+    return 0
+
+
+ENV_TEMPLATE = """# agw environment "{env}": runs beside prod on port {port}, own data in var/{env}.
+# Agent configs (Claude Code, OpenCode, Codex, ...) stay on prod; nothing here changes them.
+DATA_DIR=var/{env}
+MCP_REQUIRE_TOKEN=false
+OPENCODE_ENABLED=false
+# Telegram: a separate bot (@BotFather) and test group. Prod's bot token is refused here.
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CONTROL_CHAT_ID=
+TELEGRAM_REPORT_CHANNEL_ID=
+TELEGRAM_ALLOWED_USER_IDS={users}
+# Paid providers stay off until you add their keys here (FAL_KEY=..., FAL_MODEL=...).
+"""
+
+
+def cmd_env_setup(args) -> int:
+    """dev/uat: a new .env.<env> beside prod's. Agent configs and prod's files are not touched."""
+    from dotenv import dotenv_values
+
+    from app.config import env_file, env_name
+
+    env, path = env_name(), Path(env_file())
+    if args.agents or args.remove:
+        print(f"{env}: agent configs are changed from prod only (run without --env)")
+        return 1
+    if args.repo:  # a test repo connected to this environment (its .mcp.json only)
+        args.repos = args.repo
+        return cmd_repo_setup(args)
+    if not path.exists():
+        users = dotenv_values(ENV_FILE).get("TELEGRAM_ALLOWED_USER_IDS") or ""
+        path.write_text(ENV_TEMPLATE.format(env=env, port=args.port, users=users))
+        print(f"created {path}")
+    set_env_values({"API_TOKEN": secrets.token_urlsafe(32),
+                    "OPENCODE_PASSWORD": secrets.token_urlsafe(24),
+                    "TELEGRAM_WEBHOOK_SECRET": secrets.token_urlsafe(32)}, path)  # fmt: skip
+    path.chmod(0o600)
+    print(f"{env}: start it with `uv run agw --env {env} dev` ({_gateway_url(args.host, args.port)}); "
+          f"prod and agent configs unchanged. Telegram stays off until {path} has its own bot.")  # fmt: skip
+    return 0
+
+
+def cmd_setup(args) -> int:
+    """One setup command: secrets + global setup (default), --repo for per-repo files, --agents for
+    other coding agents, --remove to undo. With --env dev|uat: that environment only."""
+    from app.config import env_name
+
+    if env_name() != "prod":
+        return cmd_env_setup(args)
+    if args.agents:
+        from app import agents_setup
+
+        url = f"{_gateway_url(args.host, args.port)}/mcp"
+        for name in agents_setup.resolve(args.agents):
+            if name == "claude":
+                cmd_global_setup(args)
+            elif args.print_rules:
+                print(agents_setup.rules_text(name))
+            else:
+                print(agents_setup.remove(name) if args.remove else agents_setup.install(name, url))
+        return 0
+    if args.remove:
+        args.remove = True
+        return cmd_global_setup(args)
+    if args.repo:
+        args.repos = args.repo
+        return cmd_repo_setup(args)
+    cmd_init_env(args)
+    args.remove = False
+    rc = cmd_global_setup(args)
+    from app import agents_setup
+
+    others = [a for a in agents_setup.detected() if not agents_setup.configured(a)]
+    if others:
+        print(
+            f"Other agents found: {', '.join(others)}. Connect them with: uv run agw setup --agents detected"
+        )
+    return rc
+
+
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="agw", description="Agent Gateway commands")
-    sub = p.add_subparsers(dest="cmd", required=True)
+    p = argparse.ArgumentParser(
+        prog="agw",
+        description="Agent Gateway. Start with `uv run agw setup`, then `uv run agw dev`.",
+    )
+    p.add_argument("--env", choices=["prod", "dev", "uat"],
+                   help="environment (default $AGW_ENV or prod): own .env.<env>, port and data")  # fmt: skip
+    sub = p.add_subparsers(dest="cmd", required=True, metavar="<command>")
+    # aliases and internal commands get no help text: they work but are not listed
 
     def hp(sp):
         sp.add_argument("--host", default="127.0.0.1")
-        sp.add_argument("--port", type=int, default=8000)
+        sp.add_argument(
+            "--port", type=int, default=None, help="default: 8000 prod, 8001 dev, 8002 uat"
+        )
 
-    sp = sub.add_parser("serve", help="start the gateway")
+    def repo_args(sp, required: bool):
+        sp.add_argument("--project", help="project name (single repo only; default: from README)")
+        sp.add_argument("--template", action="store_true",
+                        help="template repo: CLAUDE.md block only, placeholder project, no machine files")  # fmt: skip
+        if required:
+            sp.add_argument("repos", nargs="+", help="repository paths")
+
+    # ---- everyday commands ----
+    sp = sub.add_parser(
+        "setup", help="set up this machine: secrets + global setup (or --repo / --remove)"
+    )
+    hp(sp)
+    sp.add_argument(
+        "--repo",
+        nargs="+",
+        metavar="PATH",
+        help="write per-repo files instead (CLAUDE.md, .mcp.json)",
+    )
+    repo_args(sp, required=False)
+    sp.add_argument("--remove", action="store_true", help="undo the global setup (or of --agents)")
+    sp.add_argument(
+        "--agents", metavar="LIST",
+        help="connect other agents: opencode,codex,antigravity,cursor | detected | all",
+    )  # fmt: skip
+    sp.add_argument(
+        "--print-rules", action="store_true", help="with --agents cursor: print rules to paste"
+    )
+    sp.set_defaults(fn=cmd_setup)
+    sp = sub.add_parser("dev", help="start OpenCode (if enabled) + the gateway")
+    hp(sp)
+    sp.set_defaults(fn=cmd_dev)
+    sp = sub.add_parser("doctor", help="show what is configured and reachable")
+    hp(sp)
+    sp.set_defaults(fn=cmd_doctor)
+    sp = sub.add_parser("open", help="open a project folder (fuzzy name) in a Claude session")
+    sp.add_argument("query")
+    sp.set_defaults(fn=cmd_open)
+    sp = sub.add_parser(
+        "session", help="(in a repo) open Claude Code that takes work from Telegram"
+    )
+    sp.add_argument("--no-loop", action="store_true", help="do not start the pull loop")
+    sp.add_argument("claude_args", nargs=argparse.REMAINDER, help="extra arguments for claude")
+    sp.set_defaults(fn=cmd_session)
+    sp = sub.add_parser("serve", help="start only the gateway")
     hp(sp)
     sp.add_argument("--reload", action="store_true")
     sp.set_defaults(fn=cmd_serve)
-    sub.add_parser("opencode", help="start opencode serve from .env settings").set_defaults(
+    sub.add_parser("opencode", help="start only `opencode serve` (from .env)").set_defaults(
         fn=cmd_opencode
     )
-    sp = sub.add_parser("dev", help="opencode (if enabled) + gateway")
-    hp(sp)
-    sp.set_defaults(fn=cmd_dev)
     sp = sub.add_parser("validate", help="validate config/")
     sp.add_argument("config_dir", nargs="?")
     sp.set_defaults(fn=cmd_validate)
-    sp = sub.add_parser("doctor", help="show configuration and reachability")
-    hp(sp)
-    sp.set_defaults(fn=cmd_doctor)
-    sp = sub.add_parser("mcp-setup", help="register the gateway MCP server in Claude Code")
+
+    # ---- aliases of `setup` (older names) ----
+    sub.add_parser("init-env").set_defaults(fn=cmd_init_env)
+    sp = sub.add_parser("mcp-setup")
     hp(sp)
     sp.add_argument("--scope", choices=["user", "project", "local"], default="user")
     sp.set_defaults(fn=cmd_mcp_setup)
-    sp = sub.add_parser("repo-setup", help="connect repos' Claude Code sessions to the gateway")
+    sp = sub.add_parser("global-setup")
     hp(sp)
-    sp.add_argument("repos", nargs="+", help="repository paths")
-    sp.add_argument("--project", help="project name (single repo only; default: from README)")
+    sp.add_argument("--remove", action="store_true")
+    sp.set_defaults(fn=cmd_global_setup)
+    sp = sub.add_parser("repo-setup")
+    hp(sp)
+    repo_args(sp, required=True)
     sp.set_defaults(fn=cmd_repo_setup)
-    sub.add_parser("init-env", help="generate missing local secrets in .env").set_defaults(
-        fn=cmd_init_env
-    )
-    args = p.parse_args(argv)
+
+    # ---- internal (run by Claude Code, not by people) ----
+    sp = sub.add_parser("channel")
+    sp.add_argument("--project")
+    sp.set_defaults(fn=cmd_channel)
+    sp = sub.add_parser("hook-session-start")
+    sp.add_argument("--project")
+    sp.set_defaults(fn=cmd_hook_session_start)
+
+    args, extra = p.parse_known_args(argv)
+    if args.cmd == "session":  # everything unknown goes to claude (e.g. --continue, --resume <id>)
+        args.claude_args = [*extra, *args.claude_args]
+    elif extra:
+        p.error(f"unrecognized arguments: {' '.join(extra)}")
+    from app.config import ENV_PORTS, env_name
+
+    if args.env:
+        os.environ["AGW_ENV"] = args.env  # also for the processes started from here
+    if getattr(args, "port", 0) is None:
+        args.port = ENV_PORTS[env_name()]
     return args.fn(args)
 
 

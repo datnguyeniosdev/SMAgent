@@ -85,6 +85,8 @@ def make_generate(provider):
             producer=f"{provider.name}:{provider.model}",
             prompt=args["prompt"],
             requested=f"{w}x{h}",
+            width=info["width"],
+            height=info["height"],
         )
         return ToolOutput(
             f"{info['format']} {info['width']}x{info['height']}",
@@ -93,6 +95,8 @@ def make_generate(provider):
                 "artifact_id": art.artifact_id,
                 "provider": provider.name,
                 "model": provider.model,
+                # False: the model only takes an aspect ratio, so the size check compares ratios
+                "exact_size": getattr(provider, "exact_size", True),
             },
             [art.artifact_id],
         )
@@ -290,6 +294,17 @@ class MediaPlugin:
         )
         findings = []
         for img in imgs:
+            img_rules = rules
+            if img.get("exact_size") is False and rules.expected_width and rules.expected_height:
+                img_rules = AssetRules(
+                    require_alpha=rules.require_alpha, max_dimension=rules.max_dimension
+                )
+                want = rules.expected_width / rules.expected_height
+                got = img["width"] / img["height"] if img.get("height") else 0
+                if not got or abs(got - want) / want > 0.12:
+                    findings.append({"severity": "high", "message": (
+                        f"{img.get('artifact_id')}: aspect {img.get('width')}x{img.get('height')} does not match "
+                        f"the requested {rules.expected_width}x{rules.expected_height}")})  # fmt: skip
             info = (
                 inspect_image(ctx.read_artifact(img["artifact_id"]))
                 if img.get("artifact_id")
@@ -303,7 +318,7 @@ class MediaPlugin:
                 )
             issues = [
                 i
-                for i in validate(info, rules)
+                for i in validate(info, img_rules)
                 if not (
                     i.startswith("format is")
                     and info.format != "unknown"

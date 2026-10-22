@@ -1,0 +1,149 @@
+"""Agent-to-agent asks: routing, answers, the watchdog and the operator's buttons."""
+
+from datetime import timedelta
+from types import SimpleNamespace
+
+from mcp.client import Client
+
+from app import asks as asks_mod
+from app.mcp_server import build_mcp_server
+from tests.test_config_gateway import CONTROL, DISCUSSION, USER, gateway, make, reply_msg
+
+A, B = "2048 Shooter (K05)", "PocketSort (ttg-002-coin_sort)"
+
+
+def call(c):
+    async def tool(name, args):
+        r = await c.call_tool(name, args)
+        assert not r.is_error, r.content[0].text
+        return r.structured_content
+
+    return tool
+
+
+async def test_agent_asks_agent_and_gets_the_answer(settings, cfg_dir):
+    orch, _ = make(settings, cfg_dir, [])
+    gateway(orch)
+    async with Client(build_mcp_server(orch)) as c:
+        t = call(c)
+        a_sid = (await t("get_messages", {"project": A, "agent": "claude_code"}))["session_id"]
+        b_sid = (await t("get_messages", {"project": B, "agent": "opencode"}))["session_id"]
+        agents = (await t("list_agents", {}))["agents"]
+        assert {x["project"]: x["agent"] for x in agents} == {A: "claude_code", B: "opencode"}
+        b_id = next(x["id"] for x in agents if x["project"] == B)
+
+        ask = await t(
+            "ask_agent",
+            {"to": b_id, "request": "Which coin sprite size do you use?", "session_id": a_sid},
+        )
+        assert ask["state"] == "delivered" and ask["delivered_to"] == b_sid
+
+        got = (await t("get_messages", {"project": B, "session_id": b_sid}))["messages"]
+        assert got[0]["meta"]["kind"] == "request" and "Which coin sprite size" in got[0]["text"]
+        assert "s1 (2048 Shooter (K05))" in got[0]["text"]  # who is asking
+        res = await t(
+            "reply_message",
+            {"session_id": b_sid, "message_id": got[0]["message_id"], "text": "128 px"},
+        )
+        assert res["answered"] and res["ask_id"] == ask["ask_id"]
+        assert (
+            orch.collab.reports_for(orch.channel.sessions[b_sid].task_id) == []
+        )  # no Telegram post
+
+        back = await t("get_messages", {"project": A, "session_id": a_sid})
+        msg = back["messages"][0]
+        assert (
+            msg["meta"]["kind"] == "answer"
+            and "128 px" in msg["text"]
+            and "needs no reply" in msg["text"]
+        )
+        assert (await t("get_messages", {"project": A, "session_id": a_sid}))[
+            "busy"
+        ] is False  # answers don't block
+        assert (await t("get_ask", {"ask_id": ask["ask_id"]}))["answer"] == "128 px"
+        bad = await c.call_tool("ask_agent", {"to": "nobody-here", "request": "x"})
+        assert bad.is_error and "unknown agent or project" in bad.content[0].text
+
+
+async def test_unreachable_agent_is_escalated_with_buttons_and_the_operator_answers(
+    settings, cfg_dir, monkeypatch
+):
+    monkeypatch.setattr(asks_mod, "UNREACHABLE", timedelta(0))
+    orch, _ = make(settings, cfg_dir, [])
+    gw = gateway(orch)
+    hub = orch.channel
+    a, _, _ = hub.pull(A, None)
+    hub.store_b = hub.connect("cc_b", B, "/w/k09")  # B was seen once, then closed
+    hub.disconnect(hub.store_b)
+
+    ask = orch.asks.create(B, "Export the coin atlas", from_session=a.session_id)
+    assert ask["state"] == "queued"
+    assert await orch.asks.check() == [ask["ask_id"]]
+    kind, kw, mid = gw.bot.sent[-1]
+    assert kw["chat_id"] == CONTROL and kw["text"].startswith("🆘 <b>AGENT WAITING</b>")
+    assert "no open session" in kw["text"] and "Export the coin atlas" in kw["text"]
+    labels = [b.text for row in kw["reply_markup"].inline_keyboard for b in row]
+    assert labels == ["🔁 Resend", "➡️ Other session", "🚀 Open it", "✍️ Answer myself", "❌ Cancel"]
+    assert await orch.asks.check() == []  # escalated once, then it waits for the operator
+
+    # the operator replies to the escalation with a description: that is the answer for A
+    target = SimpleNamespace(chat=SimpleNamespace(id=CONTROL), message_id=mid, forward_origin=None,
+                             from_user=SimpleNamespace(id=USER), text=kw["text"], caption=None)  # fmt: skip
+    orch.s.telegram_discussion_chat_id = CONTROL  # single-group mode
+    m, mkw = reply_msg("Use the 2048 atlas, 128 px tiles", target, chat=CONTROL)
+    await gw.on_discussion(m, **mkw)
+    assert "Sent to s1" in m.replies[-1]
+    done = orch.asks.get(ask["ask_id"])
+    assert done["state"] == "answered" and done["answered_by"] == "the operator"
+    _, msgs, _ = hub.pull(A, a.session_id)
+    assert "Use the 2048 atlas" in msgs[0]["text"] and msgs[0]["kind"] == "answer"
+
+
+async def test_buttons_resend_retarget_cancel_and_late_session(settings, cfg_dir, monkeypatch):
+    monkeypatch.setattr(asks_mod, "UNREACHABLE", timedelta(0))
+    orch, _ = make(settings, cfg_dir, [])
+    gw = gateway(orch)
+    hub = orch.channel
+    a, _, _ = hub.pull(A, None)
+    hub.disconnect(hub.connect("cc_b", B, "/w/k09"))
+    alerts = []
+
+    async def q_answer(text=None, show_alert=False):
+        alerts.append(text)
+
+    async def msg_answer(text, reply_markup=None):
+        alerts.append((text, reply_markup))
+        return SimpleNamespace(message_id=999)
+
+    def press(data):
+        return SimpleNamespace(data=data, from_user=SimpleNamespace(id=USER), answer=q_answer,
+                               message=SimpleNamespace(chat=SimpleNamespace(id=CONTROL), answer=msg_answer,
+                                                       edit_reply_markup=lambda reply_markup=None: _noop()))  # fmt: skip
+
+    async def _noop():
+        return None
+
+    # a session for B opens before the operator acts: the watchdog delivers there by itself
+    ask = orch.asks.create(B, "ping", from_session=a.session_id)
+    b2 = hub.connect("cc_b2", B, "/w/k09")
+    assert await orch.asks.check() == [] and orch.asks.get(ask["ask_id"])["delivered_to"] == "cc_b2"
+
+    # other session: the operator picks one from a list, the request moves there
+    other = hub.connect("cc_c", "Other game", "/w/other")
+    orch.asks.get(ask["ask_id"])
+    await orch.asks.escalate(orch.asks.get(ask["ask_id"]), "test")
+    await gw.on_ask_button(press(f"k:other:{ask['ask_id']}"))
+    text, kb = alerts[-1]
+    nums = [b.callback_data for row in kb.inline_keyboard for b in row]
+    assert f"k:to:{ask['ask_id']}:{other.num}" in nums
+    await gw.on_ask_button(press(f"k:to:{ask['ask_id']}:{other.num}"))
+    assert orch.asks.get(ask["ask_id"])["delivered_to"] == "cc_c" and "Resent to s" in alerts[-1]
+
+    # cancel: A is told, the request leaves the other session's queue
+    await gw.on_ask_button(press(f"k:cancel:{ask['ask_id']}"))
+    assert orch.asks.get(ask["ask_id"])["state"] == "cancelled" and other.queue.empty()
+    _, msgs, _ = hub.pull(A, a.session_id)
+    assert "was cancelled" in msgs[-1]["text"]
+    await gw.on_ask_button(press(f"k:resend:{ask['ask_id']}"))
+    assert alerts[-1] == "Already cancelled."
+    assert b2.num and DISCUSSION  # sessions stay listed

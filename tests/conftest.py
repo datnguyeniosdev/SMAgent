@@ -1,6 +1,7 @@
 """Shared fixtures. Everything here is mocked: no network, no paid API calls."""
 
 import asyncio
+import shutil
 import subprocess
 import zlib
 from pathlib import Path
@@ -153,3 +154,11 @@ def write_file(name: str, content: str):
         return AgentResult(f"wrote {name}", "writer", "fake-model", session_id="sess-1")
 
     return handler
+
+
+@pytest.fixture
+def cfg_dir(tmp_path):
+    """A writable copy of the repo's config/ directory."""
+    d = tmp_path / "config"
+    shutil.copytree(Path(__file__).resolve().parents[1] / "config", d)
+    return d

@@ -19,6 +19,8 @@ def fal_api(
     image_url="https://v3.fal.media/files/x.png",
     image_bytes=None,
     submit_status=200,
+    response_status=200,
+    schema=None,  # model input properties served at the public OpenAPI URL (None: 404)
 ):
     log = {"submit": None, "cancel": 0, "auth": set(), "polls": 0}
     seq = list(statuses)
@@ -51,6 +53,10 @@ def fal_api(
         if url.endswith("/cancel"):
             log["cancel"] += 1
             return httpx.Response(202, json={"status": "CANCELLATION_REQUESTED"})
+        if url == "https://queue.fal.run/fal-ai/flux/requests/r1" and response_status != 200:
+            return httpx.Response(response_status, json={
+                "detail": "API key does not have access to model: fal-ai/flux/schnell",
+                "type": "resource_restricted"})  # fmt: skip
         if url == "https://queue.fal.run/fal-ai/flux/requests/r1":
             return httpx.Response(
                 200,
@@ -61,6 +67,10 @@ def fal_api(
                     "seed": 7,
                     "has_nsfw_concepts": [False],
                 },
+            )
+        if url.startswith("https://fal.ai/api/openapi/") and schema is not None:
+            return httpx.Response(
+                200, json={"components": {"schemas": {"ModelInput": {"properties": schema}}}}
             )
         if url == image_url:
             return httpx.Response(
@@ -93,7 +103,7 @@ async def test_queue_flow_returns_validated_image():
         ({"image_url": "https://evil.example.com/x.png"}, "untrusted host"),
         ({"image_url": "http://v3.fal.media/x.png"}, "untrusted host"),
         ({"image_bytes": b"<html>not an image</html>"}, "not a recognised image"),
-        ({"submit_status": 401}, "rejected the API key"),
+        ({"submit_status": 401}, r"fal refused \(HTTP 401\): nope"),
     ],
 )
 async def test_failures_are_explicit(kw, match):
@@ -184,3 +194,236 @@ async def test_design_image_workflow_end_to_end(settings, tmp_path):
     )
     await wait_done(orch, bad)
     assert bad.state == TaskState.failed and "invalid input for workflow design.image" in bad.error
+
+
+async def test_agents_generate_art_via_mcp(settings, cfg_dir):
+    from pathlib import Path
+
+    from mcp.client import Client
+
+    from app.gateway_config import load_config
+    from app.mcp_server import build_mcp_server
+    from tests.conftest import build_orch, wait_done
+
+    client, _ = fal_api()
+    orch, _ = build_orch(settings, [], image=FalImageProvider("k", client=client, poll_s=0),
+                         gateway_cfg=load_config(cfg_dir))  # fmt: skip
+    stop = asyncio.Event()
+
+    async def approve():  # the operator taps Approve on Telegram
+        while not stop.is_set():
+            for a in orch.pending_approvals():
+                orch.decide_approval(a["approval_id"], True, "11")
+            await asyncio.sleep(0.01)
+
+    ap = asyncio.create_task(approve())
+    async with Client(build_mcp_server(orch)) as c:
+        vague = await c.call_tool(
+            "generate_art", {"prompt": "coin", "purpose": "", "requirements": "nice"}
+        )
+        assert vague.is_error and "describe the expected output" in vague.content[0].text
+        r = (await c.call_tool("generate_art", {
+            "prompt": "flat gold coin icon", "purpose": "in-game reward sprite shown at 64 px",
+            "requirements": "flat vector, gold #F5C542, dark outline, solid #1B2A49 background, no text",
+            "width": 64, "height": 32, "project": "2048 Shooter (K05)"})).structured_content  # fmt: skip
+
+        task = orch.tasks[r["task_id"]]
+        await wait_done(orch, task)
+        stop.set()
+        await ap
+        assert task.state == TaskState.succeeded, task.error
+        res = (await c.call_tool("get_task_result", {"task_id": task.task_id})).structured_content
+        assert (
+            res["review"]["state"] == "pending" and res["images"] == []
+        )  # not usable before review
+        await orch.apply_action(
+            action(orch, "art_accept", task.task_id), "11"
+        )  # ✅ Accept on Telegram
+        res = (await c.call_tool("get_task_result", {"task_id": task.task_id})).structured_content
+        assert res["review"]["state"] == "accepted" and res["review"]["by"] == "11"
+        img = res["images"][0]
+        assert (
+            Path(img["path"]).read_bytes().startswith(b"\x89PNG") and img["validation"] == "passed"
+        )
+        assert orch.project_of(task) == "2048 Shooter (K05)"  # labels the Telegram messages
+        brief = task.request["data"]["prompt"]
+        assert (
+            "Purpose: in-game reward sprite" in brief
+            and "Output requirements: flat vector" in brief
+        )
+        assert "Canvas: 64x32 px" in brief
+        approval = orch.store.list("approval", task_id=task.task_id)[0]
+        assert (
+            "Brief" in approval["text"] and "flat vector" in approval["text"]
+        )  # shown before paying
+        bad = await c.call_tool("generate_art", {"prompt": "coin", "purpose": "icon",
+                                                 "requirements": "flat vector, no text", "width": 8, "height": 8})  # fmt: skip
+        assert bad.is_error  # below the workflow's 16 px minimum
+
+
+async def test_generate_art_without_provider_says_so(settings):
+    from mcp.client import Client
+
+    from app.mcp_server import build_mcp_server
+    from tests.conftest import build_orch
+
+    orch, _ = build_orch(settings, [])
+    async with Client(build_mcp_server(orch)) as c:
+        r = await c.call_tool("generate_art", {"prompt": "coin", "purpose": "icon",
+                                               "requirements": "flat vector, no text"})  # fmt: skip
+        assert r.is_error and "FAL_KEY" in r.content[0].text
+
+
+def test_dotenv_keys_reach_providers(tmp_path, monkeypatch, cfg_dir):
+    import os
+
+    from app.config import get_settings
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("FAL_KEY=fal-test-key\n")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "var"))
+    monkeypatch.setenv("CONFIG_DIR", str(cfg_dir))
+    monkeypatch.setenv("FAL_KEY", "")
+    monkeypatch.delenv("FAL_KEY")  # recorded, so the value .env sets is removed again afterwards
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    get_settings.cache_clear()
+    from app.main import build
+
+    try:
+        orch = build(get_settings())
+        assert isinstance(orch.image_provider, FalImageProvider) and orch.image_provider.available
+    finally:
+        os.environ.pop("FAL_KEY", None)
+        get_settings.cache_clear()
+
+
+async def test_restricted_key_says_why_and_that_the_job_ran():
+    """The real failure seen live: submit accepted, result refused for a model-restricted key."""
+    client, _ = fal_api(response_status=403)
+    with pytest.raises(ConnectorError) as e:
+        await FalImageProvider("k", client=client, poll_s=0).generate("p", "64x32", False)
+    msg = str(e.value)
+    assert "generated request r1 but did not return it" in msg
+    assert "does not have access to model: fal-ai/flux/schnell" in msg
+    assert e.value.outcome == "unknown" and e.value.category == "auth"
+
+
+NANO = {  # the relevant part of fal-ai/nano-banana-pro's input schema
+    "prompt": {"type": "string"},
+    "aspect_ratio": {
+        "anyOf": [
+            {
+                "enum": [
+                    "auto",
+                    "21:9",
+                    "16:9",
+                    "3:2",
+                    "4:3",
+                    "5:4",
+                    "1:1",
+                    "4:5",
+                    "3:4",
+                    "2:3",
+                    "9:16",
+                ],
+                "type": "string",
+            },
+            {"type": "null"},
+        ]
+    },
+    "resolution": {"type": "string", "enum": ["1K", "2K", "4K"]},
+}
+
+
+def test_size_input_follows_the_model():
+    from app.connectors.fal import size_input
+
+    assert size_input({}, 64, 32) == {
+        "image_size": {"width": 64, "height": 32}
+    }  # unknown: exact size
+    assert size_input({"image_size": {}}, 64, 32) == {"image_size": {"width": 64, "height": 32}}
+    assert size_input(NANO, 512, 512) == {"aspect_ratio": "1:1", "resolution": "1K"}
+    assert size_input(NANO, 1920, 1080) == {"aspect_ratio": "16:9", "resolution": "2K"}
+    assert size_input(NANO, 1080, 1920) == {"aspect_ratio": "9:16", "resolution": "2K"}
+    assert size_input(NANO, 6000, 3000) == {
+        "aspect_ratio": "16:9",
+        "resolution": "4K",
+    }  # 2:1 -> nearest, max res
+
+
+async def test_aspect_only_model_request_and_flag():
+    client, log = fal_api(schema=NANO)
+    fal = FalImageProvider("k", model="fal-ai/flux/schnell", client=client, poll_s=0)
+    await fal.generate("coin", "512x512", False)
+    assert log["submit"]["aspect_ratio"] == "1:1" and log["submit"]["resolution"] == "1K"
+    assert "image_size" not in log["submit"] and fal.exact_size is False
+
+
+async def test_aspect_check_for_models_without_exact_size():
+    from types import SimpleNamespace
+
+    from app.plugins.media import MediaPlugin
+
+    gate = MediaPlugin().gate_image_valid
+    ctx = SimpleNamespace(read_artifact=lambda aid: make_png(1024, 1024))
+    ok = await gate(ctx, {"images": [{"artifact_id": "a", "exact_size": False, "width": 1024, "height": 1024}],
+                          "rules": {"width": 512, "height": 512}})  # fmt: skip
+    assert ok.status == "passed"  # 1024x1024 for a 512x512 request: same aspect, accepted
+    ctx = SimpleNamespace(read_artifact=lambda aid: make_png(1024, 576))
+    bad = await gate(ctx, {"images": [{"artifact_id": "a", "exact_size": False, "width": 1024, "height": 576}],
+                           "rules": {"width": 512, "height": 512}})  # fmt: skip
+    assert (
+        bad.status == "failed"
+        and "does not match the requested 512x512" in bad.findings[0]["message"]
+    )
+    exact = await gate(ctx, {"images": [{"artifact_id": "a", "width": 1024, "height": 576}],
+                             "rules": {"width": 512, "height": 512}})  # fmt: skip
+    assert exact.status == "failed"  # exact-size models are still held to the exact size
+
+
+def action(orch, kind, task_id):
+    return next(
+        t for t, a in orch.actions._actions.items() if a.kind == kind and a.task_id == task_id
+    )
+
+
+async def test_art_feedback_regenerates_without_a_second_cost_approval(settings, cfg_dir):
+    from app.gateway_config import load_config
+    from tests.conftest import build_orch, wait_done
+
+    client, log = fal_api()
+    orch, _ = build_orch(settings, [], image=FalImageProvider("k", client=client, poll_s=0),
+                         gateway_cfg=load_config(cfg_dir))  # fmt: skip
+    first = await orch.submit_request(TaskRequest(objective="coin", task_type="design_image", data={
+        "prompt": "gold coin\n\nPurpose: icon", "width": 64, "height": 32, "transparent": False}))  # fmt: skip
+    await wait_done(orch, first)
+    report = orch.collab.reports_for(first.task_id)[-1]
+    assert "what to change" in str(
+        await orch.apply_action(action(orch, "art_feedback", first.task_id), "11")
+    )
+
+    fb = await orch.collab.submit_feedback(text="make the outline thicker", user_id="11", source="telegram",
+                                           report_id=report.report_id)  # fmt: skip
+    assert fb.route_id == "art_revision"
+    second = orch.tasks[fb.follow_up_task_id]
+    await wait_done(orch, second)
+    gen = lambda t: orch.load_steps(t.run_id)["generate"].approved_by  # noqa: E731
+    assert second.state == TaskState.succeeded and gen(first) == "1"  # the operator's Approve tap
+    assert (
+        gen(second) == "operator (asked for this revision on Telegram)"
+    )  # no second cost approval
+    assert (
+        "make the outline thicker" in log["submit"]["prompt"]
+        and "gold coin" in log["submit"]["prompt"]
+    )
+    assert orch.art_review(first.task_id) == {**orch.art_review(first.task_id), "state": "changes_requested",
+                                              "next_task_id": second.task_id}  # fmt: skip
+    assert orch.art_review(second.task_id)["state"] == "pending"  # the new version is reviewed too
+
+
+def test_reports_on_telegram_are_summaries():
+    from app.formatting import summary_only
+
+    text = "- Buttons realigned\n```\n$ dotnet test\nPassed 69\n```\n2026-10-21 23:00:01 INFO build ok\n- Tests: 69/69"
+    assert summary_only(text) == "- Buttons realigned\n\n- Tests: 69/69"
+    assert len(summary_only("x" * 5000)) == 700

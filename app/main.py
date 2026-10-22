@@ -10,13 +10,14 @@ from contextlib import asynccontextmanager
 from typing import Annotated
 
 import httpx
+from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 from app.actions import ActionError, ActionRegistry
-from app.config import Settings, get_settings
+from app.config import Settings, env_file, get_settings
 from app.connectors.base import Cap, ConnectorError
 from app.connectors.claude_code import ClaudeCodeConnector
 from app.connectors.http_providers import ChatCompletionsProvider, OpenAIImageProvider
@@ -94,6 +95,9 @@ def load_gateway_config(s: Settings):
 
 def build(settings: Settings) -> Orchestrator:
     s = settings
+    # Providers name their key by env var (api_key_env: FAL_KEY, GEMINI_API_KEY, ...). Settings reads
+    # .env for its own fields only, so export .env too; variables already set in the shell win.
+    load_dotenv(env_file(), override=False)
     client = httpx.AsyncClient(timeout=s.http_timeout_s)
     key = lambda v: v.get_secret_value() if v else None  # noqa: E731
     gateway_cfg = load_gateway_config(s)
@@ -210,7 +214,9 @@ async def lifespan(app: FastAPI):
     from app.mcp_server import build_mcp_server
 
     mcp = build_mcp_server(orch)
-    app.state.mcp_asgi = mcp.streamable_http_app(streamable_http_path="/mcp")
+    # Stateless: no MCP session lives in this process, so a gateway restart does not break connected
+    # agents (their next call just works; no tool here needs server->client session state).
+    app.state.mcp_asgi = mcp.streamable_http_app(streamable_http_path="/mcp", stateless_http=True)
     # The session manager's task group must be entered and exited by the same task.
     mcp_ready, mcp_stop = asyncio.Event(), asyncio.Event()
 
@@ -245,7 +251,19 @@ async def lifespan(app: FastAPI):
                 log.error("telegram webhook registration failed: %s", type(e).__name__)
     else:
         log.warning("TELEGRAM_BOT_TOKEN not set: Telegram disabled, reports go to the log")
+
+    async def ask_watchdog():  # agents waiting on agents: escalate to the operator when stuck
+        while True:
+            await asyncio.sleep(30)
+            try:
+                await orch.asks.check()
+            except Exception:
+                log.exception("ask watchdog round failed")
+
+    watchdog = asyncio.create_task(ask_watchdog())
     yield
+    watchdog.cancel()
+    await asyncio.gather(watchdog, return_exceptions=True)
     if poller:
         poller.cancel()
         await asyncio.gather(poller, return_exceptions=True)
@@ -746,6 +764,79 @@ async def report_deployment(body: dict, actor: Auth, o: Orch):
 @app.get("/api/v1/deployments")
 async def list_deployments(_: Auth, o: Orch, limit: int = 50):
     return [d.model_dump(mode="json") for d in o.collab.deployments(limit)]
+
+
+# ---------- live Claude Code sessions (channel shim): local requests only, no token ----------
+
+
+def _local_only(request: Request) -> None:
+    headers = {k.lower().encode(): v.encode() for k, v in request.headers.items()}
+    if not _local_request(request.scope, headers):
+        raise HTTPException(403, "local requests only")
+
+
+@app.get("/api/v1/channel/stream", include_in_schema=False)
+async def channel_stream(
+    request: Request,
+    project: str,
+    session_id: str,
+    cwd: str = "",
+    blocked: bool = False,
+    pid: int = 0,
+):
+    """SSE stream held by the shim inside a Claude Code session; each event is one message."""
+    _local_only(request)
+    if not (1 <= len(project) <= 120 and 1 <= len(session_id) <= 64):
+        raise HTTPException(422, "project and session_id are required")
+    hub = request.app.state.orch.channel
+    sess = hub.connect(session_id, project, cwd[:500], blocked, pid=pid)
+
+    async def events():
+        try:
+            yield ": connected\n\n"
+            while not await request.is_disconnected():
+                try:
+                    msg = await asyncio.wait_for(sess.queue.get(), 15)
+                except TimeoutError:
+                    yield ": ping\n\n"  # keeps the shim's read timeout from firing
+                    continue
+                yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
+                # ponytail: at-most-once; a message read off the queue just before the shim drops is lost
+                hub.delivered(msg, sess.session_id)
+        finally:
+            hub.disconnect(sess)
+
+    return StreamingResponse(events(), media_type="text/event-stream")
+
+
+class ChannelReplyIn(BaseModel):
+    session_id: str = Field(min_length=1, max_length=64)
+    text: str = Field(min_length=1, max_length=8000)
+    message_id: str | None = Field(None, max_length=40)
+
+
+@app.post("/api/v1/channel/reply", include_in_schema=False)
+async def channel_reply(request: Request, body: ChannelReplyIn):
+    _local_only(request)
+    try:
+        rep = await request.app.state.orch.channel.reply(
+            body.session_id, body.text, body.message_id
+        )
+    except KeyError as e:
+        raise HTTPException(404, "unknown session") from e
+    from app.mcp_server import reply_result
+
+    return reply_result(rep)
+
+
+@app.get("/api/v1/channel/sessions", include_in_schema=False)
+async def channel_sessions(request: Request):
+    _local_only(request)
+    return [
+        {"session_id": s.session_id, "project": s.project, "cwd": s.cwd, "task_id": s.task_id,
+         "blocked": s.blocked, "connected_at": s.connected_at.isoformat()}
+        for s in request.app.state.orch.channel.live()
+    ]  # fmt: skip
 
 
 @app.post(WEBHOOK_PATH, include_in_schema=False)

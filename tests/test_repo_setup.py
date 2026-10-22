@@ -1,5 +1,6 @@
 import json
 
+from app.mcp_server import TOOL_NAMES
 from app.repo_setup import END, START, setup_repo
 
 URL = "http://127.0.0.1:8000/mcp"
@@ -34,8 +35,16 @@ def test_repo_setup_is_idempotent_and_replaces_legacy(tmp_path):
         and mcp["agent-gateway"]["headers"]["Authorization"] == "Bearer ${AGW_API_TOKEN}"
     )
     local = json.loads((repo / ".claude/settings.local.json").read_text())
-    assert local["enabledMcpjsonServers"] == ["agent-gateway"]
-    assert len(local["permissions"]["allow"]) == len(set(local["permissions"]["allow"])) == 10
+    assert local["enabledMcpjsonServers"] == ["agent-gateway", "agent-gateway-channel"]
+    assert (
+        len(local["permissions"]["allow"])
+        == len(set(local["permissions"]["allow"]))
+        == len(TOOL_NAMES) + 1
+    )
+    assert "mcp__agent-gateway-channel__reply" in local["permissions"]["allow"]
+    shim = mcp["agent-gateway-channel"]
+    assert shim["type"] == "stdio" and shim["command"].endswith("/agw")
+    assert shim["args"] == ["channel", "--project", "2048 Shooter (K05)"]
 
 
 def test_repo_setup_creates_claude_md_importing_agents(tmp_path):
@@ -70,3 +79,45 @@ def test_detect_project_ignores_notes_after_the_name(tmp_path):
     assert detect_project(tmp_path) == "Coinlets: Stack & Merge (TCN)"
     (tmp_path / "README.md").write_text("# T\n\n| Game name | `<GAME NAME>` |\n")
     assert detect_project(tmp_path) == "T"  # placeholder -> README title
+
+
+def test_agw_session_passes_claude_flags_through(monkeypatch):
+    from app import cli
+
+    seen = {}
+    monkeypatch.setattr(
+        cli, "cmd_session", lambda args: seen.setdefault("a", args.claude_args) and 0
+    )
+    cli.main(["session", "--continue"])
+    assert seen["a"] == ["--continue"]
+    seen.clear()
+    cli.main(["session", "--resume", "abc"])
+    assert seen["a"] == ["--resume", "abc"]
+
+
+def test_template_mode_writes_no_machine_files_and_games_fill_in_their_name(tmp_path):
+    from app.repo_setup import START
+
+    repo = tmp_path / "game-engine-template"
+    repo.mkdir()
+    (repo / "AGENTS.md").write_text("# rules\n")
+    (repo / "CLAUDE.md").write_text("# CLAUDE.md\n\n@AGENTS.md\n")
+    (repo / "README.md").write_text(
+        "# T\n\n| Game code | `TEMPLATE` |\n| Game name | `<GAME NAME>` |\n"
+    )
+    r = setup_repo(repo, URL, template=True)
+    text = (repo / "CLAUDE.md").read_text()
+    assert r["project"] == "<GAME NAME> (<GAME CODE>)" and "skipped" in r["mcp_json"]
+    assert (
+        not (repo / ".mcp.json").exists() and not (repo / ".claude").exists()
+    )  # nothing machine-specific
+    assert "First install: refresh the session" in text and "agw session --continue" in text
+    assert "@AGENTS.md" in text and text.count(START) == 1
+
+    # a game made from the template fills Game Identity, then runs normal setup once
+    (repo / "README.md").write_text("# T\n\n| Game code | `K10` |\n| Game name | `Coin Rush` |\n")
+    r = setup_repo(repo, URL, token=False)
+    text = (repo / "CLAUDE.md").read_text()
+    assert r["project"] == "Coin Rush (K10)" and text.count(START) == 1
+    assert "Project name for every gateway call: `Coin Rush (K10)`" in text
+    assert (repo / ".mcp.json").exists() and (repo / ".claude/settings.local.json").exists()

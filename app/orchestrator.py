@@ -234,6 +234,12 @@ class Orchestrator:
         from app.collaboration import CollaborationService
 
         self.collab = CollaborationService(self)
+        from app.channel import ChannelHub
+
+        self.channel = ChannelHub(self)  # work pushed/pulled into open Claude Code sessions
+        from app.asks import AskService
+
+        self.asks = AskService(self)  # agent-to-agent requests, operator as fallback
         self.registry = AgentCapabilityRegistry(gateway_cfg, self) if gateway_cfg else None
         self.planner = Planner(
             self.plugins,
@@ -542,6 +548,44 @@ class Orchestrator:
             self._set_state(task, state)
         return task
 
+    # ---------- generated-art review ----------
+
+    def art_review(self, task_id: str) -> dict | None:
+        """pending -> accepted | changes_requested (then next_task_id is the regenerated version)."""
+        return self.store.get("art_review", task_id)
+
+    def _set_review(self, task_id: str, **kw) -> dict:
+        rec = {**(self.art_review(task_id) or {"task_id": task_id}), **kw, "at": now().isoformat()}
+        self.store.put("art_review", task_id, rec, task_id=task_id, state=rec["state"])
+        self.store.event("art.review", task_id=task_id, state=rec["state"])
+        return rec
+
+    async def regenerate_art(self, src: Task, feedback: str, user_id: str) -> Task:
+        """The operator's Feedback on generated art: same brief plus the requested changes."""
+        data = dict((src.request or {}).get("data") or {})
+        base = data.setdefault("base_prompt", data.get("prompt", ""))
+        revisions = [*data.get("revisions", []), feedback.strip()[:500]]
+        data["revisions"] = revisions
+        data["prompt"] = fmt.truncate(
+            f"{base.rstrip()}\n\nRevision requests from the operator (apply all, newest last; keep "
+            "everything else the same):\n- " + "\n- ".join(revisions[-5:]),
+            3900,
+        )
+        data.update(revision_of=src.task_id, operator_requested=True)
+        new = await self.submit_request(
+            TaskRequest(
+                objective=f"Art revision: {feedback.strip()[:120]}",
+                task_type="design_image",
+                data=data,
+                user_id=user_id,
+                parent_task_id=src.task_id,
+                correlation_id=src.correlation_id,
+            )  # fmt: skip
+        )
+        self._set_review(src.task_id, state="changes_requested", next_task_id=new.task_id,
+                         feedback=feedback.strip()[:500])  # fmt: skip
+        return new
+
     def _find_task_by_key(self, key: str) -> Task | None:
         rec = self.store.get("idem", key)
         return self.tasks.get(rec["task_id"]) if rec else None
@@ -630,6 +674,13 @@ class Orchestrator:
         if a.kind == "retry":
             new = await self.retry(task.task_id)
             return f"Retrying as {new.task_id}"
+        if a.kind == "art_accept":
+            self._set_review(task.task_id, state="accepted", by=str(actor))
+            return "Accepted: the agent can use this image"
+        if a.kind == "art_feedback":
+            return (
+                "Reply to the image post with what to change; the new version comes back for review"
+            )
         if a.kind == "view_report":
             body, files = self._report_message(task)
             await self._notify(task, body, fmt.STATE_KIND.get(task.state, "info"), files)
@@ -880,6 +931,16 @@ class Orchestrator:
             task.task_id, "envelope", "result.json", env.model_dump_json(indent=2), producer="core"
         )
         photos = self._final_photos(task)
+        reply = "Reply to this post to send feedback"
+        if task.task_type == "design_image" and task.state == TaskState.succeeded and photos:
+            acts += [  # the operator reviews generated art before an agent may use it
+                self.actions.create("art_accept", task.task_id, "✅ Accept", TERMINAL),
+                self.actions.create("art_feedback", task.task_id, "✏️ Feedback", TERMINAL),
+            ]
+            self._set_review(task.task_id, state="pending")
+            reply = (
+                "✅ Accept, or reply to this post with what to change (a new version is generated)"
+            )
         run = self.load_run(task.run_id) if task.run_id else None
         if (
             run is not None
@@ -896,7 +957,7 @@ class Orchestrator:
             task,
             self._final_body(task, len(photos)),
             title=task.title,
-            reply="Reply to this post to send feedback",
+            reply=reply,
         )
         html, overflow = fmt.fit(body)
         files = [(f"{task.task_id}_report.txt", overflow.encode())] if overflow else []
@@ -1225,6 +1286,10 @@ class Orchestrator:
         await self._notify(task, f"{icon} <code>{rec.tool}</code> {rec.status}: {detail}", "tool")
 
     async def request_approval(self, task, run, step: StepDef, rec: StepRecord) -> bool:
+        data = (task.request or {}).get("data") or {}
+        if task.task_type == "design_image" and data.get("operator_requested"):
+            rec.approved_by = "operator (asked for this revision on Telegram)"
+            return True
         desc = {
             "tool": f"run tool <code>{step.ref}</code>",
             "agent": "let an agent modify a workspace",
@@ -1236,6 +1301,9 @@ class Orchestrator:
             f"Approve to {desc.get(step.executor, step.executor)} (step <code>{step.id}</code>)"
             + (f"\n{fmt.escape(str(msg))}" if msg else "")
         )
+        brief = ((task.request or {}).get("data") or {}).get("prompt")
+        if brief:  # paid generation: show exactly what will be generated before approval
+            html += "\n\n<b>Brief</b>\n" + fmt.escape(fmt.truncate(str(brief), 900))
         try:
             approved, actor = await self._approval_wait(
                 task, html, run_id=run.run_id, step_id=step.id

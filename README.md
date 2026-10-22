@@ -48,32 +48,73 @@ uv sync
 ```
 
 ```bash
-uv run agw init-env
+uv run agw setup
 ```
 
-`init-env` creates `.env` if needed and fills only missing secrets (`API_TOKEN`, `OPENCODE_PASSWORD`).
+`setup` sets up this machine in one go:
+- creates `.env` if needed and fills only missing local secrets
+- registers the gateway's MCP servers in Claude Code (user level)
+- installs the `agent-gateway` skill, plus the permissions and the session hook that connect every git repo in the projects folder (`~/Working` by default)
+
+`uv run agw setup --remove` undoes the global part.
+
+Other coding agents connect the same way, with each agent's own global MCP config and instructions file:
+
+```bash
+uv run agw setup --agents detected
+```
+
+| Agent | MCP config | Instructions |
+|---|---|---|
+| `opencode` | `~/.config/opencode/opencode.json` (`mcp.agent-gateway`, remote) | `~/.config/opencode/AGENTS.md` |
+| `codex` | `~/.codex/config.toml` (marked `[mcp_servers.agent-gateway]` block) | `~/.codex/AGENTS.md` |
+| `antigravity` (alias `gemini`) | `~/.gemini/config/mcp_config.json` (`serverUrl`) | `~/.gemini/GEMINI.md` |
+| `cursor` | `~/.cursor/mcp.json` | paste `agw setup --agents cursor --print-rules` into Cursor > Settings > Rules |
+
+`--agents` takes names, `all` or `detected`. Each file is backed up once (`*.agw-backup`). Add `--remove` to take the gateway entries out again. Telegram `/setup` has the same on/off buttons per agent. Restart the agent afterwards.
+
+### Environments (prod, dev, uat)
+
+Each environment runs beside the others from this folder, with its own settings file, port and data:
+
+| Env | Settings | Port | Data |
+|---|---|---|---|
+| prod (default) | `.env` | 8000 | `var/` |
+| dev | `.env.dev` | 8001 | `var/dev/` |
+| uat | `.env.uat` | 8002 | `var/uat/` |
+
+```bash
+uv run agw --env dev setup
+```
+
+```bash
+uv run agw --env dev dev
+```
+
+- Agent configs (Claude Code, OpenCode, Codex, Antigravity, Cursor) always point at prod. In dev/uat, `setup --agents`, the global setup and the matching Telegram `/setup` buttons are refused.
+- `uv run agw --env dev setup --repo PATH` connects one test repo to dev (its `.mcp.json` only).
+- Telegram is off in dev/uat until their file has their own bot (and test group). Prod's bot token is refused there, because two gateways polling one bot would steal prod's messages.
+- Paid providers (fal, ...) are off in dev/uat until you add their keys to that file.
+- `AGW_ENV=dev` works too, in place of `--env dev`.
 
 ```bash
 uv run agw dev
 ```
 
-`dev` starts the OpenCode server (when `OPENCODE_ENABLED=true`) and the gateway on `127.0.0.1:8000`.
-
-```bash
-uv run agw mcp-setup
-```
-
-`mcp-setup` registers the gateway's MCP server (`agent-gateway`) in Claude Code at user scope. Check it with `claude mcp list`.
+`dev` starts the OpenCode server (when `OPENCODE_ENABLED=true`) and the gateway on `127.0.0.1:8000`. Then send `/menu` to the bot in your Telegram group.
 
 | Command | Purpose |
 |---|---|
+| `uv run agw setup` | secrets + global setup (`--agents LIST` other agents, `--repo PATH…` per-repo files, `--template` for template repos, `--remove`) |
+| `uv run agw dev` | OpenCode + gateway together |
+| `uv run agw doctor` | what is configured and reachable (also on Telegram: `/setup`) |
+| `uv run agw open <name>` | open a project folder in a Claude session (Telegram: `/open`) |
+| `agw session` | in a repo: Claude Code that takes work from Telegram (push + pull) |
 | `uv run agw serve [--port 8000] [--reload]` | gateway only (REST, Telegram, `/mcp`) |
 | `uv run agw opencode` | `opencode serve` with `OPENCODE_PASSWORD`/`OPENCODE_URL` from `.env` |
-| `uv run agw dev` | OpenCode + gateway together |
 | `uv run agw validate` | validate `config/` |
-| `uv run agw doctor` | what is configured and reachable (gateway, OpenCode, Telegram, Claude MCP) |
-| `uv run agw mcp-setup [--scope user\|project\|local]` | (re)register the MCP server in Claude Code |
-| `uv run agw init-env` | generate missing local secrets |
+
+Older names still work: `init-env`, `mcp-setup`, `global-setup`, `repo-setup`.
 
 ## Setup
 

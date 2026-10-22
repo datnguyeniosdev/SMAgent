@@ -64,6 +64,8 @@ class Feedback(BaseModel):
     route_id: str | None = None
     follow_up_task_id: str | None = None
     artifact_ids: list[str] = []  # screenshots attached to the feedback itself
+    live_message_id: str | None = None  # pushed into a live Claude Code session
+    delivered: bool | None = None  # live session was open when it was pushed (else it waits)
     created_at: datetime = Field(default_factory=now)
 
 
@@ -133,6 +135,10 @@ class Deployment(BaseModel):
     delivery_error: str | None = None
     channel_message_id: int | None = None
     created_at: datetime = Field(default_factory=now)
+
+
+def task_data_project(task) -> str:
+    return str(((task.request or {}).get("data") or {}).get("project") or "gateway")
 
 
 def deployment_html(d: Deployment) -> str:
@@ -449,7 +455,7 @@ class CollaborationService:
             meta.insert(1, f"agent: {fmt.escape(report.agent_status)}")
         if report.artifact_ids:
             meta.append(f"📎 {len(report.artifact_ids)}")
-        body = fmt.escape(fmt.truncate(rest.strip(), 2500))
+        body = fmt.escape(fmt.summary_only(rest))
         if report.pending_actions:
             body += "\n\n⚠️ " + fmt.escape("; ".join(report.pending_actions))
         html = self.svc.msg(
@@ -607,8 +613,25 @@ class CollaborationService:
             telegram_update_id=update_id,
             telegram_message_id=message_id,
         )
-        route = self._feedback_route(fb, report)
-        fb.route_id = route.id if route else None
+        live = ((self.svc.tasks[task_id].request or {}).get("data") or {}).get("channel_session")
+        hub = getattr(self.svc, "channel", None)
+        if live and hub is not None:  # a live Claude Code session's report: push the reply into it
+            route, fb.route_id = None, "channel"
+            text_for_session = f"Telegram reply from the operator:\n{fb.text}"
+            for aid in shot_ids:
+                text_for_session += f"\nScreenshot: {self.svc.artifacts.get(aid).path}"
+            _msg, target = hub.send(
+                task_data_project(self.svc.tasks[task_id]), text_for_session,
+                session_id=live, sender=user_id,
+            )  # fmt: skip
+            fb.follow_up_task_id = None
+            fb.live_message_id, fb.delivered = _msg["message_id"], target is not None
+        elif (src := self.svc.tasks[task_id]).task_type == "design_image" and src.done:
+            route, fb.route_id = None, "art_revision"  # Feedback on generated art: regenerate it
+            fb.follow_up_task_id = (await self.svc.regenerate_art(src, fb.text, user_id)).task_id
+        else:
+            route = self._feedback_route(fb, report)
+            fb.route_id = route.id if route else None
         self.store.put("feedback", fb.feedback_id, fb, task_id=task_id)
         self.store.event(
             "feedback.received",

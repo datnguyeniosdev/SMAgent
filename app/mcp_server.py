@@ -11,6 +11,7 @@ import binascii
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 from app.agent_registry import CapabilityError
 from app.collaboration import CollaborationError
@@ -18,8 +19,27 @@ from app.intake import TaskRequest
 from app.workflow import StepState
 
 
-class GatewayToolError(Exception):
-    pass
+class GatewayToolError(ToolError):
+    """Raised by tools for caller mistakes; ToolError makes the SDK show the message to the agent
+    (any other exception is reported only as "Error executing tool <name>")."""
+
+
+def art_brief(
+    subject: str, purpose: str, requirements: str, w: int, h: int, transparent: bool
+) -> str:
+    """One complete brief for the image model: what, what for, the exact output, the canvas."""
+    background = (
+        "transparent background (alpha channel)"
+        if transparent
+        else "background as the requirements say"
+    )
+    return (
+        f"{subject.strip()}\n\n"
+        f"Purpose: {purpose.strip()}\n"
+        f"Output requirements: {requirements.strip()}\n"
+        f"Canvas: {w}x{h} px, {background}. Deliver one finished image; no borders, frames, "
+        "watermarks or text unless the requirements ask for them."
+    )
 
 
 def build_mcp_server(svc) -> MCPServer:
@@ -102,6 +122,20 @@ def build_mcp_server(svc) -> MCPServer:
         env["reports"] = [
             r.model_dump(mode="json", exclude={"telegram"}) for r in svc.collab.reports_for(task_id)
         ]
+        env["images"] = [  # local files, so a caller can copy the result into its repo
+            {"artifact_id": a.artifact_id, "path": str(a.path), "filename": a.filename,
+             "width": a.meta.get("width"), "height": a.meta.get("height"),
+             "validation": a.validation_status}
+            for a in svc._all_artifacts(task)
+            if (a.mime_type or "").startswith("image/") and a.validation_status != "failed"
+        ]  # fmt: skip
+        if (
+            task.task_type == "design_image"
+        ):  # generated art: only usable once the operator accepts it
+            review = svc.art_review(task_id) or {"state": "pending" if task.done else "generating"}
+            env["review"] = review
+            if review.get("state") != "accepted":
+                env["images"] = []
         env["feedback"] = [
             {"feedback_id": f.feedback_id, "report_id": f.report_id, "text": f.text,
              "user_id": f.user_id, "created_at": f.created_at.isoformat()}
@@ -205,7 +239,9 @@ def build_mcp_server(svc) -> MCPServer:
         images: list[dict] | None = None,
         handoff_id: str | None = None,
     ) -> dict[str, Any]:
-        """Report work on a task. images: [{"name": "shot.png", "data_base64": "..."}] (PNG/JPEG/WebP/GIF).
+        """Report work on a task: a short summary for Telegram, no logs or command output (title line,
+        then at most 5 short bullets; logs are stripped and long text is cut).
+        images: [{"name": "shot.png", "data_base64": "..."}] (PNG/JPEG/WebP/GIF).
         The gateway publishes the report to Telegram and records agent status separately from verification.
         Work not started through the gateway: omit task_id and pass project; a record-only task is created
         and its task_id returned. Telegram replies to the report appear in get_task_result(task_id).feedback."""
@@ -301,7 +337,173 @@ def build_mcp_server(svc) -> MCPServer:
             "channel_message_id": d.channel_message_id,
         }
 
+    @server.tool()
+    async def generate_art(
+        prompt: str,
+        purpose: str,
+        requirements: str,
+        width: int = 1024,
+        height: int = 1024,
+        transparent: bool = False,
+        project: str | None = None,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Generate game art / a design image with the configured image provider (fal.ai): icons,
+        sprites, backgrounds, UI mockups, banners. Paid: the operator approves each one on Telegram.
+        Describe the expected output precisely, the model only knows what you write:
+        prompt = the subject; purpose = what the image is for (e.g. "in-game coin sprite, shown at
+        64 px"); requirements = the exact output: style, palette, view/composition, background,
+        what must or must not appear (e.g. "flat vector, gold #F5C542 with dark outline, front view,
+        centered with 10% margin, solid #1B2A49 background, no text, no shadow").
+        Returns a task_id at once; poll get_task_status, then get_task_result -> images[].path is the
+        PNG to copy into the repo. width/height 16-3840; transparent=true also requires an alpha
+        channel (flux models produce opaque images, so the check fails for them)."""
+        if len(prompt.strip()) < 3 or not (16 <= width <= 3840 and 16 <= height <= 3840):
+            raise GatewayToolError("prompt needs 3+ characters; width and height must be 16-3840")
+        if len(purpose.strip()) < 3 or len(requirements.strip()) < 10:
+            raise GatewayToolError(
+                "describe the expected output: purpose (what the image is for) and requirements "
+                "(style, palette, view/composition, background, what must or must not appear)"
+            )
+        prompt = art_brief(prompt, purpose, requirements, width, height, transparent)
+        image = svc.image_provider
+        if image is None or not getattr(image, "available", True):
+            raise GatewayToolError(
+                "no image provider is configured: set FAL_KEY in the gateway's .env"
+            )
+        data = {"prompt": prompt, "width": width, "height": height, "transparent": transparent}
+        data.update({k: v for k, v in (("project", project), ("session_id", session_id)) if v})
+        try:
+            task = await svc.submit_request(
+                TaskRequest(
+                    objective=f"Art: {prompt[:200]}",
+                    task_type="design_image",
+                    data=data,
+                    user_id="mcp",
+                    source="mcp",
+                )  # fmt: skip
+            )
+        except ValueError as e:
+            raise GatewayToolError(str(e)) from e
+        return {
+            "task_id": task.task_id,
+            "state": task.state.value,
+            "note": "the operator approves the cost, then reviews the image on Telegram. Poll "
+            "get_task_result every ~30 s: review.state accepted -> images[0].path is yours; "
+            "changes_requested -> follow review.next_task_id (the regenerated version); pending -> wait",
+        }
+
+    @server.tool()
+    async def get_messages(
+        project: str,
+        session_id: str | None = None,
+        cwd: str | None = None,
+        limit: int = 1,
+        agent: str | None = None,
+    ) -> dict[str, Any]:
+        """Pull mode: fetch requests for this project: from the operator (Telegram /send, replies) and
+        from other agents (ask_agent; meta.kind "request" -> answer with reply_message) plus answers to
+        your own asks (meta.kind "answer" -> use them, no reply). agent: your tool, e.g. "claude_code".
+        Call it from `/loop 1m` in any session. Each message: message_id, text (the request), meta.
+        Do each request, then answer it with reply_message(message_id=..., session_id=...).
+        The session stays registered while it polls (5 min); the operator can switch it off (/off)."""
+        sess, msgs, busy = svc.channel.pull(
+            project, session_id, cwd or "", max(1, min(limit, 20)), agent or ""
+        )
+        if sess.closing:
+            note = ("closed by the operator: delete the recurring get_messages job of this session "
+                    "(CronList, then CronDelete) and stop polling")  # fmt: skip
+        elif not sess.enabled:
+            note = "this session is switched off by the operator (/on to resume); do nothing"
+        elif busy:
+            note = ("busy: finish the in-progress request(s) and answer them with reply_message first; "
+                    "no new work is handed out until then, so do nothing this round")  # fmt: skip
+        else:
+            note = "" if msgs else "no new requests; do nothing"
+        return {
+            "session_id": sess.session_id,
+            "enabled": sess.enabled,
+            "closed": sess.closing,
+            "busy": bool(busy),
+            "in_progress": [m["message_id"] for m in busy],
+            "messages": [
+                {"message_id": m["message_id"], "text": m["text"], "meta": m["meta"]} for m in msgs
+            ],
+            "note": note,
+        }
+
+    @server.tool()
+    async def reply_message(
+        text: str, session_id: str, message_id: str | None = None
+    ) -> dict[str, Any]:
+        """Pull mode: answer the operator on Telegram with a short summary, no logs (first line =
+        title, then at most 5 short bullets: what changed, what was validated, what was not).
+        Their Telegram reply comes back through get_messages."""
+        try:
+            rep = await svc.channel.reply(session_id, text, message_id)
+        except KeyError as e:
+            raise GatewayToolError(f"unknown session {session_id}: call get_messages first") from e
+        return reply_result(rep)
+
+    @server.tool()
+    async def list_agents() -> dict[str, Any]:
+        """Agent sessions that are open now (any project, any agent tool): s# id, project, agent,
+        mode (push/pull), whether it can take work, what it is busy with. Use before ask_agent."""
+        hub = svc.channel
+        return {"agents": [
+            {"id": f"s{s.num}", "session_id": s.session_id, "project": s.project, "agent": s.agent or None,
+             "mode": s.mode, "can_take_work": s.deliverable, "enabled": s.enabled, "blocked": s.blocked,
+             "busy_with": [f"m{m.get('num')}" for m in hub.in_progress(s.session_id)],
+             "folder": s.cwd.rstrip("/").rsplit("/", 1)[-1], "last_seen": s.last_seen.isoformat()}
+            for s in hub.live()
+        ]}  # fmt: skip
+
+    @server.tool()
+    async def ask_agent(
+        to: str, request: str, session_id: str | None = None, project: str | None = None,
+        wait_s: int = 600,
+    ) -> dict[str, Any]:  # fmt: skip
+        """Ask another agent to do something, or for information: to = s# (that session, see
+        list_agents) or a project (p#, name, fragment: its best session). Pass your own session_id
+        (from get_messages) so the answer reaches your inbox; it arrives there as an "answer"
+        message (no reply needed), and get_ask(ask_id) shows it too. Write the request so it stands
+        alone: what you need, why, and what the answer must contain. If the other agent cannot take
+        it or does not answer within wait_s, the operator is asked on Telegram (resend, another
+        session, open it, answer it themself, or cancel); keep doing other work meanwhile."""
+        try:
+            a = svc.asks.create(
+                to, request, from_session=session_id, from_project=project, wait_s=wait_s
+            )
+        except ValueError as e:
+            raise GatewayToolError(str(e)) from e
+        return ask_view(a)
+
+    @server.tool()
+    async def get_ask(ask_id: str) -> dict[str, Any]:
+        """State of an ask: queued | delivered | escalated (the operator is deciding) | answered (with
+        the answer) | cancelled."""
+        a = svc.asks.get(ask_id)
+        if a is None:
+            raise GatewayToolError(f"unknown ask {ask_id}")
+        return ask_view(a)
+
     return server
+
+
+def reply_result(rep) -> dict[str, Any]:
+    if isinstance(rep, dict):  # routed back to another agent (ask), or nothing to do
+        if "ask" in rep:
+            a = rep["ask"]
+            return {"ask_id": a["ask_id"], "answered": a["state"] == "answered",
+                    "note": "your answer went back to the agent that asked"}  # fmt: skip
+        return rep
+    return {"report_id": rep.report_id, "task_id": rep.task_id}
+
+
+def ask_view(a: dict) -> dict[str, Any]:
+    keys = ("ask_id", "state", "to_project", "to_session", "delivered_to", "deadline", "answer",
+            "answered_by", "reason", "cancelled_by")  # fmt: skip
+    return {k: a.get(k) for k in keys if a.get(k) is not None}
 
 
 TOOL_NAMES = [
@@ -315,4 +517,10 @@ TOOL_NAMES = [
     "request_human_input",
     "get_human_response",
     "submit_report",
+    "get_messages",
+    "reply_message",
+    "generate_art",
+    "list_agents",
+    "ask_agent",
+    "get_ask",
 ]

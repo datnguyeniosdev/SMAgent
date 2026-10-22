@@ -15,6 +15,7 @@ dimensions/alpha are not assumed - the media gate validates them afterwards.
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from urllib.parse import urlparse
 
@@ -24,7 +25,52 @@ from app.assets import inspect_image
 from app.connectors.base import ConnectorError
 
 QUEUE = "https://queue.fal.run"
+SCHEMA_URL = (
+    "https://fal.ai/api/openapi/queue/openapi.json"  # public per-model OpenAPI (input shape)
+)
 RESULT_HOSTS = ("fal.media", "fal.run", "fal.ai")  # allowed download hosts (and subdomains)
+
+
+def _detail(r: httpx.Response) -> str:
+    """fal's own explanation (JSON `detail`), never the request headers (they hold the key)."""
+    try:
+        detail = r.json().get("detail")
+    except ValueError:
+        detail = None
+    return str(detail or r.text or "no reason given")[:300]
+
+
+_RESOLUTIONS = {"1K": 1024, "2K": 2048, "4K": 4096}
+
+
+def _enum(prop: dict) -> list[str]:
+    for branch in [prop, *prop.get("anyOf", [])]:
+        if isinstance(branch, dict) and branch.get("enum"):
+            return [str(v) for v in branch["enum"]]
+    return []
+
+
+def size_input(schema: dict, w: int, h: int) -> dict:
+    """How to ask this model for w x h: exact `image_size`, or the nearest `aspect_ratio` plus the
+    smallest `resolution` covering the longer side (models such as nano-banana-pro)."""
+    if "image_size" in schema or "aspect_ratio" not in schema:
+        return {"image_size": {"width": w, "height": h}}
+    ratios = [r for r in _enum(schema["aspect_ratio"]) if ":" in r]
+    out = {}
+    if ratios:
+
+        def dist(r: str) -> float:
+            a, b = (float(x) for x in r.split(":"))
+            return abs(math.log((a / b) / (w / h)))
+
+        out["aspect_ratio"] = min(ratios, key=dist)
+    sizes = [r for r in _enum(schema.get("resolution", {})) if r in _RESOLUTIONS]
+    if sizes:
+        fits = [r for r in sizes if _RESOLUTIONS[r] >= max(w, h)]
+        out["resolution"] = (
+            min(fits, key=_RESOLUTIONS.get) if fits else max(sizes, key=_RESOLUTIONS.get)
+        )
+    return out
 
 
 def _host_ok(url: str) -> bool:
@@ -48,6 +94,8 @@ class FalImageProvider:
     ):
         self.api_key = api_key
         self.model = model
+        self._schema: dict | None = None
+        self.exact_size = True  # False when the model only takes an aspect ratio (last request)
         self.timeout_s = timeout_s
         self.poll_s = poll_s
         self.extra_input = extra_input or {}
@@ -67,13 +115,33 @@ class FalImageProvider:
             raise ConnectorError(
                 f"fal: network error {type(e).__name__}", "network", retryable=True
             ) from e
-        if r.status_code in (401, 403):
-            raise ConnectorError(f"fal rejected the API key (HTTP {r.status_code})", "auth")
+        if r.status_code in (401, 403):  # e.g. a key restricted to other models: say what fal said
+            raise ConnectorError(f"fal refused (HTTP {r.status_code}): {_detail(r)}", "auth")
         if r.status_code == 429:
             raise ConnectorError("fal rate limit", "rate_limit", retryable=True)
         if r.status_code >= 400:
             raise ConnectorError(f"fal HTTP {r.status_code}: {r.text[:200]}", "provider")
         return r
+
+    async def input_schema(self) -> dict:
+        """The model's input properties from fal's public OpenAPI description (no key, no cost),
+        so the size is sent the way this model takes it. Cached; {} if it cannot be read."""
+        if self._schema is None:
+            self._schema = {}
+            try:
+                r = await self.client.get(
+                    SCHEMA_URL, params={"endpoint_id": self.model}, timeout=20
+                )
+                schemas = (
+                    r.json().get("components", {}).get("schemas", {})
+                    if r.status_code == 200
+                    else {}
+                )
+                inputs = [v for k, v in schemas.items() if k.endswith("Input")]
+                self._schema = inputs[0].get("properties", {}) if inputs else {}
+            except (httpx.HTTPError, ValueError, AttributeError):
+                pass  # unknown model shape: fall back to image_size
+        return self._schema
 
     async def health_status(self) -> tuple[str, str]:
         if not self.available:
@@ -84,9 +152,11 @@ class FalImageProvider:
         if not self.available:
             raise ConnectorError("fal is not configured (FAL_KEY)", "unavailable")
         w, _, h = size.partition("x")
-        body = {"prompt": prompt, "num_images": 1, "output_format": "png", **self.extra_input}
+        body = {"prompt": prompt, "num_images": 1, "output_format": "png"}
         if w.isdigit() and h.isdigit():
-            body["image_size"] = {"width": int(w), "height": int(h)}
+            body.update(size_input(await self.input_schema(), int(w), int(h)))
+        self.exact_size = "image_size" in body or not (w.isdigit() and h.isdigit())
+        body.update(self.extra_input)
         sub = (await self._call("POST", f"{QUEUE}/{self.model}", json=body)).json()
         status_url, response_url, cancel_url = (
             sub.get("status_url"),
@@ -113,7 +183,16 @@ class FalImageProvider:
         except asyncio.CancelledError:
             await self._cancel(cancel_url)
             raise
-        out = (await self._call("GET", response_url)).json()
+        try:
+            out = (await self._call("GET", response_url)).json()
+        except (
+            ConnectorError
+        ) as e:  # the job ran on fal (and may be billed) but its result is withheld
+            raise ConnectorError(
+                f"fal generated request {self.last.get('request_id')} but did not return it: {e}",
+                e.category,
+                outcome="unknown",
+            ) from e
         images = out.get("images") or []
         if not images or not images[0].get("url"):
             raise ConnectorError("fal: result contains no image", "provider")

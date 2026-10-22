@@ -33,6 +33,8 @@ KINDS = {
     "question": ("🙋", "QUESTION"),
     "approval": ("🔐", "APPROVAL"),
     "deploy": ("🚀", "DEPLOY"),
+    "open": ("🖥", "OPEN"),
+    "ask": ("🆘", "AGENT WAITING"),
     "step": ("⚙️", "STEP"),
     "tool": ("🔧", "TOOL"),
     "qa": ("🧪", "QA"),
@@ -103,6 +105,20 @@ def log_block(text: str, max_chars: int = 2500) -> str:
     if len(text) > max_chars:
         text = "…\n" + text[-max_chars:]
     return code(text)
+
+
+_LOG_LINE = re.compile(
+    r"^\s*(\$ |>>> |Traceback |File \"|at [\w.$]+\(|\d{4}-\d\d-\d\d[T ]\d\d:\d\d|\[?(DEBUG|INFO|WARN|WARNING|ERROR)\b)"
+)
+
+
+def summary_only(text: str, limit: int = 700) -> str:
+    """Telegram gets the summary, not the logs: drop fenced blocks and log-looking lines, cap length.
+    (The full text stays in the report record / get_task_result.)"""
+    text = re.sub(r"```.*?(```|$)", "", text, flags=re.S)
+    lines = [ln for ln in text.strip().splitlines() if not _LOG_LINE.match(ln)]
+    cut = "\n".join(lines).strip()
+    return truncate(cut, limit) if len(cut) > limit else cut
 
 
 def truncate(text: str, n: int) -> str:

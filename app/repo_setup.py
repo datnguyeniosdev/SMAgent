@@ -12,12 +12,16 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
+import sys
 from pathlib import Path
 
 from app.mcp_server import TOOL_NAMES
+from app.projects import detect_project  # noqa: F401 - re-exported (tests, cli)
 
 SERVER = "agent-gateway"
-START = "<!-- agent-gateway:start (managed by `agw repo-setup` in local_agent_tool; edit there) -->"
+CHANNEL = "agent-gateway-channel"  # stdio shim spawned by Claude Code; pushes work into `agw session` sessions
+START = "<!-- agent-gateway:start (managed by `agw setup` in local_agent_tool; edit there) -->"
 END = "<!-- agent-gateway:end -->"
 # Hand-written sections from before the standard; replaced by the managed block.
 LEGACY_HEADINGS = (
@@ -31,11 +35,26 @@ SECTION = """## Agent gateway: reports and Telegram control
 This repo is connected to the local agent gateway (MCP server `agent-gateway`, see `.mcp.json`).
 Project name for every gateway call: `{project}`.
 
+**Setup (once per machine, and again after renaming the game).** From the gateway folder run
+`uv run agw setup --repo <this repo>` (or `/open <folder>` on Telegram). It writes this block with
+the project name, plus `.mcp.json` and `.claude/settings.local.json` for this machine (local
+paths: do not copy them to another machine).
+
+**First install: refresh the session.** Claude Code loads MCP servers, hooks and this file only
+when a session starts. If the `agent-gateway` tools (`mcp__agent-gateway__*`) are missing, or setup
+just ran in this session, do not call them. Tell the user to refresh:
+- terminal: `/exit`, then `agw session --continue` in this folder (keeps the conversation)
+- desktop app: start a new session in this folder
+
+Approve the `agent-gateway` servers if Claude Code asks. If this block still shows a placeholder
+project name (`<GAME NAME>`), the repo was copied from the template: ask the user to run setup first.
+
 **Report when a task ends.** When you finish a task (code change, fix, investigation; not a one-line
 answer), call `submit_report` before your final message:
 - `project`: `{project}`; omit `task_id` unless the work came from `delegate_task`.
-- `text`: first line = short title; then what changed (files/areas), what was validated (the exact
-  commands run and their result) and what was not. Never claim validation you did not run.
+- `text`: a short summary, no logs or command output. First line = title, then at most 5 short
+  bullets: what changed, what was validated (which check, pass/fail) and what was not. Never claim
+  validation you did not run.
 - `agent_status`: `completed`, `partial`, `blocked` or `failed`, from the real outcome.
 - `images`: only screenshots this task produced (base64 PNG/JPEG), max 4. No secrets, no absolute paths.
 
@@ -52,6 +71,51 @@ anything destructive.
 - Use `delegate_task` (with `project`) only when the user asks to hand work to the gateway. Follow it
   with `get_task_status` / `get_task_result`.
 {deploy}
+**Work from Telegram (live sessions).** The operator sends requests with `/send` or by replying to
+your answers. Two ways to receive them; the operator can switch a session off and on (`/off`, `/on`):
+- Push (terminal session opened with `agw session`): requests arrive as
+  `<channel source="agent-gateway-channel">` events. Answer with the channel's `reply` tool, passing
+  the event's `message_id`.
+- Pull (any session, e.g. the desktop app): a SessionStart hook asks you to start one recurring
+  job (every minute) that calls get_messages(project=`{project}`). Keep exactly one such job per
+  session. One request at a time: while one is unanswered the gateway hands out nothing new.
+
+Treat each request like a user request: do it here and confirm before commits, pushes, deploys or
+anything destructive.
+
+**Working with other agents.** `list_agents` shows the open sessions (s#, project, agent tool, busy).
+To get help or information from another project's agent, call `ask_agent(to=s#|project, request,
+session_id=<yours>)`. Write the request so it stands alone: what you need, why, and what the answer
+must contain. Keep working meanwhile: the answer arrives through `get_messages` as `meta.kind: "answer"`
+(no reply needed), or check `get_ask(ask_id)`. If the other agent cannot take it or does not answer in
+time, the operator decides on Telegram (resend, another session, open it, answer it, or cancel).
+Requests from other agents arrive with `meta.kind: "request"`: do them and answer with `reply_message`;
+the answer goes back to that agent, not to Telegram.
+
+**Art and design (fal.ai).** For game art or design images (icons, sprites, backgrounds, UI
+mockups, store banners), call `generate_art` instead of drawing placeholders.
+
+The model only knows what you write, so state the expected output precisely:
+- `prompt`: the subject, e.g. "a stack of three gold coins".
+- `purpose`: what it is for and where it is shown, e.g. "in-game reward sprite, shown at 64 px on
+  the result screen".
+- `requirements`: the exact output: style, palette (hex codes if the project has them), view and
+  composition, margins, background, and what must not appear. Example: "flat vector, gold #F5C542
+  with a dark outline, front view, centered with 10% margin, solid #1B2A49 background, no text, no
+  shadow".
+- `width` / `height`: the size you need. `project`=`{project}`. Some models (e.g.
+  nano-banana-pro) only follow the aspect ratio and return 1K/2K/4K images; scale on import.
+
+Then:
+- Each generation is paid and waits for the operator's approval on Telegram, which shows your brief.
+- The operator reviews every image on Telegram (✅ Accept or Feedback). Poll
+  `get_task_result(task_id)` every ~30 s and follow `review.state`:
+  - `accepted`: copy `images[0].path` into the art folder the project already uses, name it in your report.
+  - `changes_requested`: the operator asked for changes and a new version is being generated; continue
+    with `review.next_task_id`.
+  - `pending` / `generating`: wait. Do not use an image before it is accepted.
+- If it was rejected, expired or failed, say so. Never present a placeholder as generated art.
+
 If a gateway call fails or a message is not delivered, tell the user Telegram was not notified and why."""
 
 DEPLOY = """
@@ -69,21 +133,25 @@ once the command has finished, call `report_deployment`:
 """
 
 
-def detect_project(repo: Path) -> str:
-    """README "Game Identity" table (name + code), else the README title, else the folder name."""
-    readme = repo / "README.md"
-    text = readme.read_text(errors="replace") if readme.exists() else ""
+def loop_prompt(project: str) -> str:
+    """Pull loop: one request at a time; a busy session takes nothing new (no duplicate jobs)."""
+    return (
+        f"Call the agent-gateway tool get_messages with project '{project}' and agent 'claude_code', reusing "
+        "the session_id it returned before. If it reports busy, switched off or no messages, do nothing this "
+        "round. A message with meta.kind 'answer' answers your own ask_agent: use it to continue that work, "
+        "no reply. Otherwise do the request in this repo, then call reply_message with that session_id, the "
+        "message_id and a short result: what changed, what you validated and what you did not."
+    )
 
-    def cell(field: str) -> str | None:  # `value` (any note after it ignored) or the bare cell text
-        m = re.search(rf"^\|\s*{field}\s*\|\s*(?:`([^`]+)`[^|]*|([^|`]+?))\s*\|", text, re.M)
-        value = m and (m.group(1) or m.group(2)).strip()
-        return value if value and "<" not in value else None  # skip unfilled template placeholders
 
-    if name := cell("Game name"):
-        return f"{name} ({code})" if (code := cell("Game code")) else name
-    if title := re.search(r"^# (.+)$", text, re.M):
-        return title.group(1).strip()
-    return repo.resolve().name
+def session_start_hint(project: str) -> str:
+    """SessionStart hook output (added to Claude's context): start the pull loop once per session."""
+    return (
+        f"agent-gateway: this project ({project}) takes work from Telegram. Before anything else in "
+        "this session, call CronList. If no job's prompt mentions get_messages, create exactly one with "
+        "CronCreate, recurring every minute ('*/1 * * * *'), with this prompt: "
+        f"{loop_prompt(project)} Never create a second one. Then continue with the user's request."
+    )
 
 
 def section(repo: Path, project: str) -> str:
@@ -127,9 +195,18 @@ def update_claude_md(repo: Path, project: str) -> str:
     return "created"
 
 
-def update_mcp_json(repo: Path, url: str, token: bool = True) -> None:
+def update_mcp_json(repo: Path, url: str, token: bool = True, project: str = "") -> None:
     path = repo / ".mcp.json"
     data = json.loads(path.read_text()) if path.exists() else {}
+    agw = Path(sys.executable).parent / "agw"  # this gateway's venv; the shim is stdlib-only
+    data.setdefault("mcpServers", {})[CHANNEL] = {
+        "type": "stdio",
+        "command": str(agw),
+        "args": ["channel", "--project", project],
+    }
+    base = url.removesuffix("/mcp")
+    if base != "http://127.0.0.1:8000":  # dev/uat gateway: the shim follows the same one
+        data["mcpServers"][CHANNEL]["env"] = {"AGW_URL": base}
     server = {"type": "http", "url": url}
     if token:  # MCP_REQUIRE_TOKEN=false: local sessions connect without a header
         server["headers"] = {"Authorization": "Bearer ${AGW_API_TOKEN}"}
@@ -137,26 +214,47 @@ def update_mcp_json(repo: Path, url: str, token: bool = True) -> None:
     path.write_text(json.dumps(data, indent=2) + "\n")
 
 
-def update_local_settings(repo: Path) -> None:
+def update_local_settings(repo: Path, project: str = "") -> None:
     path = repo / ".claude" / "settings.local.json"
     path.parent.mkdir(exist_ok=True)
     data = json.loads(path.read_text()) if path.exists() else {}
     allow = data.setdefault("permissions", {}).setdefault("allow", [])
-    for tool in TOOL_NAMES:
-        if (rule := f"mcp__{SERVER}__{tool}") not in allow:
+    rules = [f"mcp__{SERVER}__{tool}" for tool in TOOL_NAMES] + [f"mcp__{CHANNEL}__reply"]
+    for rule in rules:
+        if rule not in allow:
             allow.append(rule)
+    hooks = data.setdefault("hooks", {}).setdefault("SessionStart", [])
+    hooks[:] = [
+        h for h in hooks if "hook-session-start" not in json.dumps(h)
+    ]  # replace ours, keep others
+    agw = Path(sys.executable).parent / "agw"
+    cmd = f'"{agw}" hook-session-start --project {shlex.quote(project)}'
+    hooks.append({"hooks": [{"type": "command", "command": cmd, "timeout": 10}]})
     enabled = data.setdefault("enabledMcpjsonServers", [])
-    if SERVER not in enabled:
-        enabled.append(SERVER)
+    for name in (SERVER, CHANNEL):
+        if name not in enabled:
+            enabled.append(name)
     path.write_text(json.dumps(data, indent=2) + "\n")
 
 
-def setup_repo(repo: Path, url: str, project: str | None = None, token: bool = True) -> dict:
+TEMPLATE_PROJECT = "<GAME NAME> (<GAME CODE>)"
+
+
+def setup_repo(
+    repo: Path, url: str, project: str | None = None, token: bool = True, template: bool = False
+) -> dict:
+    """template=True: only the CLAUDE.md block (placeholder name), no machine-specific files, so a
+    template repo can be committed and shared; each game made from it runs setup itself."""
+    if template:
+        project = project or TEMPLATE_PROJECT
+        return {"project": project, "claude_md": update_claude_md(repo, project),
+                "mcp_json": "skipped (template)", "settings_local": "skipped (template)",
+                "deploy_section": (repo / DEPLOY_SCRIPT).exists()}  # fmt: skip
     project = project or detect_project(repo)
     return {
         "project": project,
         "claude_md": update_claude_md(repo, project),
-        "mcp_json": update_mcp_json(repo, url, token) or "ok",
-        "settings_local": update_local_settings(repo) or "ok",
+        "mcp_json": update_mcp_json(repo, url, token, project) or "ok",
+        "settings_local": update_local_settings(repo, project) or "ok",
         "deploy_section": (repo / DEPLOY_SCRIPT).exists(),
     }
