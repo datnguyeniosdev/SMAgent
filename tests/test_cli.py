@@ -88,3 +88,14 @@ def test_stop_keeps_background_starts_off(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "_listener", lambda port: other.pid)
     assert cli.main(["stop"]) == 1 and other.poll() is None
     other.kill()
+
+
+def test_only_agw_dev_parents_are_stopped():
+    from app.cli import is_agw_dev
+
+    assert is_agw_dev("/x/.agw-prod/.venv/bin/python /x/.agw-prod/.venv/bin/agw dev")
+    assert is_agw_dev("agw dev --port 8001")
+    assert not is_agw_dev(
+        "/x/.agw-prod/.venv/bin/python -m pytest -q"
+    )  # the old check stopped this
+    assert not is_agw_dev("/x/.agw-prod/.venv/bin/agw devices")

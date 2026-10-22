@@ -196,6 +196,11 @@ def _cwd(pid: int) -> str:
     return next((ln[1:] for ln in r.stdout.splitlines() if ln.startswith("n")), "")
 
 
+def is_agw_dev(command: str) -> bool:
+    """`.../agw dev ...`, not any command that merely contains "agw" (e.g. a path under .agw-prod)."""
+    return re.search(r"(^|[/\s])agw dev\b", command) is not None
+
+
 def cmd_stop(args) -> int:
     """Stop this folder's gateway on this environment's port and keep background starts off."""
     mark = stop_mark()
@@ -223,8 +228,10 @@ def cmd_stop(args) -> int:
         os.kill(pid, signal.SIGKILL)
         time.sleep(1)
     try:
-        if parent > 1 and "agw" in subprocess.run(["ps", "-o", "command=", "-p", str(parent)],
-                                                  capture_output=True, text=True).stdout:  # fmt: skip
+        cmd = subprocess.run(
+            ["ps", "-o", "command=", "-p", str(parent)], capture_output=True, text=True
+        ).stdout
+        if parent > 1 and is_agw_dev(cmd):  # only the `agw dev` that started it
             os.kill(parent, signal.SIGTERM)
     except ProcessLookupError:
         pass
