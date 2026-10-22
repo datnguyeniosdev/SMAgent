@@ -289,7 +289,10 @@ def test_dotenv_keys_reach_providers(tmp_path, monkeypatch, cfg_dir):
     get_settings.cache_clear()
     from app.main import build
 
+    models = cfg_dir / "providers" / "models.yaml"
     try:
+        assert build(get_settings()).image_provider is None  # fal is off in the shipped config
+        models.write_text(models.read_text().replace("enabled: false ", "enabled: true "))
         orch = build(get_settings())
         assert isinstance(orch.image_provider, FalImageProvider) and orch.image_provider.available
     finally:

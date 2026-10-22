@@ -369,7 +369,7 @@ def build_mcp_server(svc) -> MCPServer:
         image = svc.image_provider
         if image is None or not getattr(image, "available", True):
             raise GatewayToolError(
-                "no image provider is configured: set FAL_KEY in the gateway's .env"
+                "no image provider is on: fal is off in config/providers/models.yaml or FAL_KEY is unset"
             )
         data = {"prompt": prompt, "width": width, "height": height, "transparent": transparent}
         data.update({k: v for k, v in (("project", project), ("session_id", session_id)) if v})
