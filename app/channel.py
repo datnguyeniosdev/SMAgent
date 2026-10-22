@@ -335,7 +335,8 @@ class ChannelHub:
         cutoff = now() - LEASE
         return [
             m for m in self.svc.store.list("channel_msg", states=["delivered"])
-            if m.get("session_id") == session_id and datetime.fromisoformat(m["delivered_at"]) > cutoff
+            if m.get("session_id") == session_id and m.get("delivered_at")
+            and datetime.fromisoformat(m["delivered_at"]) > cutoff
         ]  # fmt: skip
 
     def _expire(self) -> None:
@@ -344,7 +345,10 @@ class ChannelHub:
         # ponytail: runs on pull rounds and connects only; a push-only gateway expires on reconnect
         cutoff, projects = now() - LEASE, set()
         for msg in self.svc.store.list("channel_msg", states=["delivered"]):
-            if datetime.fromisoformat(msg["delivered_at"]) > cutoff:
+            at = msg.get("delivered_at")
+            if at is None:  # delivered before leases existed: too old to hand out again, expire it
+                msg["deliveries"] = MAX_DELIVERIES
+            elif datetime.fromisoformat(at) > cutoff:
                 continue
             msg["deliveries"] = msg.get("deliveries", 1) + 1
             if msg["deliveries"] <= MAX_DELIVERIES:

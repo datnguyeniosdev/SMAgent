@@ -557,3 +557,22 @@ async def test_reply_and_report_attach_images_by_path(settings, cfg_dir, tmp_pat
     rep = await hub.reply(s.session_id, "done", m["message_id"], load_image_paths([str(shot)]))
     assert len(rep.artifact_ids) == 1
     assert orch.artifacts.get(rep.artifact_ids[0]).filename == "shot.png"
+
+
+async def test_old_delivered_message_without_timestamp_expires_not_redelivered(settings, cfg_dir):
+    """Messages delivered before leases existed have no delivered_at: pulling must not crash, and a
+    day-old request must not be handed to an agent again."""
+    from tests.test_config_gateway import make
+
+    orch, _ = make(settings, cfg_dir, [])
+    hub = orch.channel
+    s, _, _ = hub.pull(PROJECT, None)
+    old, _ = hub.send(PROJECT, "yesterday's request")
+    _, got, _ = hub.pull(PROJECT, s.session_id)
+    rec = orch.store.get("channel_msg", old["message_id"])
+    rec.pop("delivered_at")  # as written by the older code
+    orch.store.put("channel_msg", old["message_id"], rec, state="delivered")
+    s2, got2, busy = hub.pull(PROJECT, "pull_other")  # used to raise KeyError
+    assert got2 == [] and busy == []
+    assert orch.store.get("channel_msg", old["message_id"])["state"] == "expired"
+    assert hub.in_progress(s.session_id) == []
