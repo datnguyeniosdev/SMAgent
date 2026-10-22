@@ -205,6 +205,7 @@ class Orchestrator:
         self.actions = actions
         self._image_provider = image_provider
         self.switches = Switches(self.store, {"generate_art": image_on})
+        self.router.switches = self.switches
         self.notifier: Notifier = notifier or LogNotifier()
         self.tasks: dict[str, Task] = {}
         self.sessions: dict[str, AgentSession] = {}

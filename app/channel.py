@@ -52,6 +52,11 @@ def _norm(text: str) -> str:
     return re.sub(r"[^0-9a-z]+", "", text.lower())
 
 
+# agent tools that run as a desktop app or inside an IDE (the rest are terminal CLIs)
+APP_AGENTS = {"cursor", "windsurf", "vscode", "copilot", "cline", "roo", "kilo", "zed", "jetbrains",
+              "junie", "kiro", "trae", "claude_desktop"}  # fmt: skip
+
+
 @dataclass
 class LiveSession:
     session_id: str
@@ -68,6 +73,14 @@ class LiveSession:
     pid: int = 0  # push: the Claude Code process (the shim's parent), for /close
     agent: str = ""  # which agent tool runs the session (claude_code, opencode, codex, ...)
     closing: bool = False  # pull: /close asked its loop to stop at the next round
+    client: str = ""  # "app" (desktop app / IDE) or "cli", as the session reports it
+
+    @property
+    def kind(self) -> str:
+        """app | cli: what the session says, else known from the agent; push sessions are terminals."""
+        if self.client in ("app", "cli"):
+            return self.client
+        return "app" if self.agent in APP_AGENTS else "cli"
 
     @property
     def deliverable(self) -> bool:
@@ -389,8 +402,9 @@ class ChannelHub:
         return msg
 
     def pull(
-        self, project: str, session_id: str | None, cwd: str = "", limit: int = 1, agent: str = ""
-    ):
+        self, project: str, session_id: str | None, cwd: str = "", limit: int = 1, agent: str = "",
+        client: str = "",
+    ):  # fmt: skip
         """get_messages: register/refresh a pull session and hand over what is queued for it.
         Nothing new while it still has an unanswered message (no duplicate or parallel jobs).
         Returns (session, new messages, messages still in progress)."""
@@ -403,6 +417,7 @@ class ChannelHub:
             s = self.connect(sid, project, cwd, mode="pull")
         s.last_seen = now()
         s.agent = agent or s.agent
+        s.client = client if client in ("app", "cli") else s.client
         self._expire()
         busy = self.in_progress(s.session_id)
         out = []

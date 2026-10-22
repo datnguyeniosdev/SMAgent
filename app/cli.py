@@ -76,6 +76,8 @@ def set_env_values(values: dict[str, str], path: Path = ENV_FILE) -> list[str]:
 
 
 def cmd_init_env(args) -> int:
+    from app.keys import new_secret
+
     if not ENV_FILE.exists() and Path(".env.example").exists():
         shutil.copy(".env.example", ENV_FILE)
         print("created .env from .env.example")
@@ -84,6 +86,7 @@ def cmd_init_env(args) -> int:
             "API_TOKEN": secrets.token_urlsafe(32),
             "OPENCODE_PASSWORD": secrets.token_urlsafe(24),
             "TELEGRAM_WEBHOOK_SECRET": secrets.token_urlsafe(32),  # only used in webhook mode
+            "AGW_SECRET_KEY": new_secret(),  # encrypts the keys saved with Telegram /keys
         }
     )
     print(f"generated: {', '.join(changed)}" if changed else "local secrets already set")
@@ -370,7 +373,7 @@ def cmd_session(args) -> int:
 
         project = (local or {}).get("args", [None])[-1] or project_for(Path.cwd())
         if project:
-            args.claude_args = [f"/loop 1m {loop_prompt(project)}"]
+            args.claude_args = [f"/loop 1m {loop_prompt(project, 'cli')}"]
     # the channel option takes several values, so it goes last: a prompt after it would be read as a channel
     argv = [
         claude,
@@ -456,6 +459,7 @@ def cmd_env_setup(args) -> int:
     from dotenv import dotenv_values
 
     from app.config import env_file, env_name
+    from app.keys import new_secret
 
     env, path = env_name(), Path(env_file())
     if args.agents or args.remove:
@@ -470,7 +474,8 @@ def cmd_env_setup(args) -> int:
         print(f"created {path}")
     set_env_values({"API_TOKEN": secrets.token_urlsafe(32),
                     "OPENCODE_PASSWORD": secrets.token_urlsafe(24),
-                    "TELEGRAM_WEBHOOK_SECRET": secrets.token_urlsafe(32)}, path)  # fmt: skip
+                    "TELEGRAM_WEBHOOK_SECRET": secrets.token_urlsafe(32),
+                    "AGW_SECRET_KEY": new_secret()}, path)  # fmt: skip
     path.chmod(0o600)
     print(f"{env}: start it with `uv run agw --env {env} dev` ({_gateway_url(args.host, args.port)}); "
           f"prod and agent configs unchanged. Telegram stays off until {path} has its own bot.")  # fmt: skip

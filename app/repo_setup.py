@@ -11,6 +11,7 @@ Writes (idempotent; re-running refreshes the managed text):
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import sys
@@ -133,10 +134,20 @@ once the command has finished, call `report_deployment`:
 """
 
 
-def loop_prompt(project: str) -> str:
+def client_kind() -> str:
+    """How the Claude Code running this hook was started: "app" (desktop app, IDE extension) or "cli"."""
+    entry = os.environ.get("CLAUDE_CODE_ENTRYPOINT", "")
+    if not entry:
+        return ""
+    return "cli" if entry == "cli" or entry.startswith("sdk") else "app"
+
+
+def loop_prompt(project: str, client: str = "") -> str:
     """Pull loop: one request at a time; a busy session takes nothing new (no duplicate jobs)."""
+    kind = f", client '{client}'" if client else ""
     return (
-        f"Call the agent-gateway tool get_messages with project '{project}' and agent 'claude_code', reusing "
+        f"Call the agent-gateway tool get_messages with project '{project}', agent 'claude_code'{kind} and "
+        "cwd set to this folder, reusing "
         "the session_id it returned before. If it reports busy, switched off or no messages, do nothing this "
         "round. A message with meta.kind 'answer' answers your own ask_agent: use it to continue that work, "
         "no reply. Otherwise do the request in this repo, then call reply_message with that session_id, the "
@@ -170,7 +181,8 @@ def session_start_hint(project: str) -> str:
         f"agent-gateway: this project ({project}) takes work from Telegram. Before anything else in "
         "this session, call CronList. If no job's prompt mentions get_messages, create exactly one with "
         "CronCreate, recurring every minute ('*/1 * * * *'), with this prompt: "
-        f"{loop_prompt(project)} If no job's prompt mentions /health, create exactly one with CronCreate, "
+        f"{loop_prompt(project, client_kind())} If no job's prompt mentions /health, create exactly one "
+        "with CronCreate, "
         f"recurring every 10 minutes ('*/10 * * * *'), with this prompt: {health_prompt()} "
         "Never create a second one of either. Then continue with the user's request."
     )

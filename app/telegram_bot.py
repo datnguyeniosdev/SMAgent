@@ -8,7 +8,9 @@ import asyncio
 import io
 import json
 import logging
+import os
 import re
+import time
 from datetime import datetime
 from html import escape
 from pathlib import Path
@@ -57,15 +59,17 @@ HELP = (
 /queue — requests waiting or in progress (m1…) · /cancel &lt;m#&gt;
 /open &lt;folder|p#&gt; [new] — open a Claude session for a project (/open alone: buttons)
 /close &lt;s#&gt; · /off &lt;s#&gt; · /on &lt;s#&gt; — close a session, or stop/resume giving it work
+/agents — every agent: 🖥 app (desktop/IDE), ⌨️ CLI, ☁️ API, with on/off and close buttons
 Reply to any gateway message (text or photos) to give feedback or answer it.
 
 <b>Setup</b>
 /setup — status, install or remove the global setup
 /mcp — switch the tools agents call on or off (no restart)
+/keys — provider API keys and models (values only in a private chat with the bot)
 
 <b>More</b> (not in the / menu)
 /task · /status · /report · /steps · /retry · /stop · /answer · /feedback · /approvals ·
-/templates · /tools · /tool · /plugins · /capabilities · /agents · /agents_status · /sessions
+/templates · /tools · /tool · /plugins · /capabilities · /roles · /agents_status · /sessions
 
 <b>Message prefixes</b>
 """
@@ -77,6 +81,7 @@ First line: <code>PREFIX · #project · #task_id</code> (tap a hashtag to find e
 MENU = [  # the "/" menu: everyday commands only; the rest still work (see /help)
     ("menu", "Main panel with buttons"),
     ("list", "Sessions (s#) and projects (p#)"),
+    ("agents", "Agents: app / CLI / API, on/off"),
     ("send", "Send a request: /send s1|p1 <text>"),
     ("queue", "Requests waiting / in progress (m#)"),
     ("cancel", "Cancel a request: /cancel m1"),
@@ -86,10 +91,12 @@ MENU = [  # the "/" menu: everyday commands only; the rest still work (see /help
     ("on", "Resume giving a session work"),
     ("setup", "Status and global setup"),
     ("mcp", "Agent tools on/off"),
+    ("keys", "API keys and models"),
     ("help", "All commands"),
 ]
 MENU_BUTTONS = [
-    [("🖥 Sessions", "m:list"), ("📥 Queue", "m:queue"), ("📂 Open project", "m:open")],
+    [("🖥 Sessions", "m:list"), ("🤖 Agents", "m:agents"), ("📥 Queue", "m:queue")],
+    [("📂 Open project", "m:open"), ("🔑 Keys", "m:keys")],
     [("⚙️ Setup", "m:setup"), ("🔀 Agent tools", "m:mcp"), ("🧩 Templates", "m:templates")],
     [("❓ Help", "m:help")],
 ]
@@ -111,12 +118,18 @@ def parse_feedback(text: str) -> tuple[str | None, str]:
     return ref, " ".join(words)
 
 
+KIND_ICON = {"app": "🖥", "cli": "⌨️"}
+
+
 def session_line(s) -> str:
     """One /live row: mode, state, project, id, folder."""
     mode = "⚡ push" if s.mode == "push" else "🔄 pull"
+    who = (
+        f"{KIND_ICON[s.kind]} {escape(s.agent or ('claude_code' if s.mode == 'push' else 'agent'))}"
+    )
     state = "🚫 blocked (org policy)" if s.blocked else ("🟢 on" if s.enabled else "⏸ off")
     folder = escape(s.cwd.rstrip("/").rsplit("/", 1)[-1]) if s.cwd else "-"
-    return (f"<b>s{s.num}</b> · {state} · {mode} · {escape(s.project)} · {folder}"
+    return (f"<b>s{s.num}</b> · {who} · {state} · {mode} · {escape(s.project)} · {folder}"
             f" · since {s.connected_at.astimezone():%H:%M} · <code>{escape(s.session_id)}</code>")  # fmt: skip
 
 
@@ -211,6 +224,9 @@ class TelegramGateway:
         )
         self.router = Router()
         self._albums: dict[str, list[TgMessage]] = {}
+        self._key_wait: dict[
+            int, tuple[str, float]
+        ] = {}  # user -> (variable, deadline): /keys entry
         self._album_timers: dict[str, asyncio.Task] = {}
         self._dp: Dispatcher | None = None
         self._register()
@@ -394,11 +410,16 @@ class TelegramGateway:
 
     def _register(self) -> None:
         r = self.router
+        r.message(F.chat.type == "private", F.text)(
+            self.on_key_value
+        )  # first: secrets never reach others
         r.message(Command("start", "menu"))(self.on_menu)
+        r.message(Command("keys"))(self.on_keys)
         r.message(Command("help"))(self.on_help)
         r.message(Command("setup"))(self.on_setup)
         r.message(Command("mcp"))(self.on_mcp)
         r.message(Command("agents"))(self.on_agents)
+        r.message(Command("roles"))(self.on_roles)
         r.message(Command("agents_status"))(self.on_agents_status)
         r.message(Command("sessions"))(self.on_sessions)
         r.message(Command("status"))(self.on_status)
@@ -431,6 +452,8 @@ class TelegramGateway:
         r.callback_query(F.data.startswith("m:"))(self.on_menu_button)
         r.callback_query(F.data.startswith("g:"))(self.on_setup_button)
         r.callback_query(F.data.startswith("t:"))(self.on_mcp_button)
+        r.callback_query(F.data.startswith("y:"))(self.on_agents_button)
+        r.callback_query(F.data.startswith("x:"))(self.on_keys_button)
 
     async def on_help(self, m: TgMessage):
         if self._authorized_msg(m):
@@ -469,6 +492,10 @@ class TelegramGateway:
             await self._setup_panel(answer)
         elif view == "mcp":
             await self._mcp_panel(answer)
+        elif view == "agents":
+            await self._agents_panel(answer)
+        elif view == "keys":
+            await self._keys_panel(answer)
         elif view == "templates":
             await answer(templates(""))
         else:
@@ -924,6 +951,236 @@ class TelegramGateway:
             await m.answer(templates((src.text or src.caption or "") if src else ""))
 
     async def on_agents(self, m: TgMessage):
+        if self._authorized_msg(m):
+            await self._agents_panel(m.answer)
+
+    async def _agents_panel(self, answer, note: str = "") -> None:
+        """Every agent the operator can steer: open sessions by kind (app / CLI) and the API agents."""
+        Btn = InlineKeyboardButton  # noqa: N806
+        live = self.orch.channel.live()
+        lines, rows = ["🤖 <b>AGENTS</b>" + (f"\n{note}" if note else "")], []
+        for kind, title in (
+            ("app", "🖥 <b>App</b> (desktop / IDE)"),
+            ("cli", "⌨️ <b>CLI</b> (terminal)"),
+        ):
+            mine = [x for x in live if x.kind == kind]
+            lines += ["", title] + ([session_line(x) for x in mine] or ["none open"])
+            rows += [[Btn(text=f"{'⏸ Pause' if x.enabled else '▶️ Resume'} s{x.num}",
+                          callback_data=f"y:{'off' if x.enabled else 'on'}:s{x.num}"),
+                      Btn(text=f"✖ Close s{x.num}", callback_data=f"y:close:s{x.num}")] for x in mine]  # fmt: skip
+        lines += ["", "☁️ <b>API</b> (the gateway calls them for tasks)"]
+        api = [
+            (c["name"], c["available"], c["on"], f"api:{c['name']}")
+            for c in self.orch.router.describe()
+        ]
+        img = self.orch._image_provider
+        if img is not None:
+            api.append((f"{img.name} (images)", getattr(img, "available", True),
+                        self.orch.switches.on("generate_art"), "generate_art"))  # fmt: skip
+        api_buttons = []
+        for name, ready, on, key in api:
+            icon = ("🟢" if on else "⏸") if ready else "⚪"
+            state = ("on" if on else "off") if ready else "not configured"
+            lines.append(f"{icon} <b>{escape(name)}</b> · {state}")
+            if ready:
+                api_buttons.append(
+                    Btn(text=f"{'⏸' if on else '▶️'} {name}", callback_data=f"y:sw:{key}")
+                )
+        rows += [api_buttons[i : i + 2] for i in range(0, len(api_buttons), 2)]
+        lines += ["", "Give work: /send s# &lt;text&gt; · connect more agents: /setup"]
+        await answer("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+    async def on_agents_button(self, q: CallbackQuery):
+        chat_id = q.message.chat.id if q.message else None
+        if not self.authorized(q.from_user.id, chat_id):
+            log.warning("unauthorized agents button from user=%s chat=%s", q.from_user.id, chat_id)
+            await q.answer("Not authorized.", show_alert=True)
+            return
+        verb, _, ref = q.data[2:].partition(":")
+        hub = self.orch.channel
+        if verb == "sw":  # an API agent, or image generation
+            known = {f"api:{c['name']}" for c in self.orch.router.describe()} | {"generate_art"}
+            if ref not in known:
+                await q.answer("Unknown agent.")
+                return
+            on = not self.orch.switches.on(ref)
+            self.orch.switches.set(ref, on)
+            log.info("%s switched %s by user=%s", ref, "on" if on else "off", q.from_user.id)
+            await q.answer(f"{ref}: {'on' if on else 'off'}")
+            await self._agents_panel(
+                q.message.answer,
+                f"{'▶️' if on else '⏸'} {escape(ref)} is now {'on' if on else 'off'}",
+            )
+            return
+        s = hub.find(ref)
+        if s is None:
+            await q.answer("That session is no longer open.", show_alert=True)
+            return
+        if verb in ("on", "off"):
+            hub.set_enabled(s, verb == "on")
+            await q.answer(f"s{s.num}: {verb}")
+            await self._agents_panel(q.message.answer)
+        elif verb == "close":  # stops a terminal session's Claude process: confirm first
+            await q.answer()
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text=f"Yes, close s{s.num}", callback_data=f"y:closeyes:s{s.num}"),
+                InlineKeyboardButton(text="Keep it", callback_data="y:keep:"),
+            ]])  # fmt: skip
+            await q.message.answer(f"Close {session_line(s)}?", reply_markup=kb)
+        elif verb == "closeyes":
+            what = await asyncio.to_thread(hub.close, s)
+            await q.answer(f"s{s.num} closed")
+            await self._agents_panel(q.message.answer, f"🔌 s{s.num} closed · {escape(what)}")
+
+    # ---------- /keys: provider keys and models, set remotely ----------
+
+    def _key_user(self, user_id: int | None, chat) -> bool:
+        """Allowlisted operator, in the control group or in a private chat with the bot."""
+        if user_id is None or user_id not in self.s.telegram_allowed_user_ids:
+            return False
+        return chat.id == self.s.telegram_control_chat_id or (
+            chat.type == "private" and chat.id == user_id
+        )
+
+    async def on_keys(self, m: TgMessage):
+        if self._key_user(m.from_user and m.from_user.id, m.chat):
+            await self._keys_panel(m.answer)
+        else:
+            log.warning(
+                "unauthorized /keys from user=%s chat=%s", m.from_user and m.from_user.id, m.chat.id
+            )
+
+    async def _keys_panel(self, answer, note: str = "") -> None:
+        from app import keys
+        from app.config import env_file
+
+        Btn = InlineKeyboardButton  # noqa: N806
+        head = f"🔑 <b>KEYS</b> (saved: encrypted in the database; else {escape(env_file())})"
+        lines = [head + (f"\n{note}" if note else ""), ""]
+        rows, saved = [], keys.saved(self.orch.store)
+        for name, secret in keys.names(self.orch.gateway_cfg):
+            value = os.environ.get(name)
+            where = " · saved" if name in saved else (" · .env" if value else "")
+            lines.append(
+                f"{'🔑' if secret else '🧠'} <b>{name}</b> · {escape(keys.mask(value, secret))}{where}"
+            )
+            row = [Btn(text=f"✏️ {name}", callback_data=f"x:set:{name}")]
+            if name in saved:
+                row.append(Btn(text=f"🗑 {name}", callback_data=f"x:clear:{name}"))
+            rows.append(row)
+        lines += ["", "Values go only in a private chat with the bot; it deletes your message at once. "
+                  "Providers reload without a restart."]  # fmt: skip
+        await answer("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+    async def on_keys_button(self, q: CallbackQuery):
+        from app import keys
+        from app.config import env_file
+
+        if not q.message or not self._key_user(q.from_user.id, q.message.chat):
+            await q.answer("Not authorized.", show_alert=True)
+            return
+        verb, _, name = q.data[2:].partition(":")
+        if name not in dict(keys.names(self.orch.gateway_cfg)):
+            await q.answer("Unknown variable.")
+            return
+        if verb == "set":
+            self._key_wait[q.from_user.id] = (name, time.monotonic() + 300)
+            me = await self.bot.get_me()
+            await q.answer()
+            await q.message.answer(
+                f"Send the value of <b>{name}</b> to me in a private chat within 5 minutes: "
+                f"https://t.me/{me.username}\nI delete your message as soon as I read it. Send /cancel there to stop."
+            )
+        elif verb == "clear":
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text=f"Yes, clear {name}", callback_data=f"x:clearyes:{name}"),
+                InlineKeyboardButton(text="Keep it", callback_data="x:keep:" + name),
+            ]])  # fmt: skip
+            await q.answer()
+            await q.message.answer(
+                f"Clear the saved <b>{name}</b>? Its provider falls back to .env, or stops.",
+                reply_markup=kb,
+            )
+        elif verb == "clearyes":
+            from dotenv import dotenv_values
+
+            keys.clear(self.orch.store, name, dotenv_values(env_file()).get(name))
+            await self._reload_providers()
+            log.info("%s cleared by user=%s", name, q.from_user.id)
+            await q.answer(f"{name} cleared")
+            await self._keys_panel(q.message.answer, f"🗑 {name} cleared")
+        else:
+            await q.answer()
+
+    async def on_key_value(self, m: TgMessage):
+        """Private chat: the value for a pending /keys entry. Deleted at once, never logged or echoed."""
+        from app import keys
+
+        user = m.from_user.id if m.from_user else None
+        wait = self._key_wait.get(user) if user is not None else None
+        text = (m.text or "").strip()
+        if wait is None or user not in self.s.telegram_allowed_user_ids:
+            raise SkipHandler()
+        name, deadline = wait
+        if text.startswith("/"):
+            if text.split()[0].lower() in ("/cancel", "/cancelkey"):
+                self._key_wait.pop(user, None)
+                await m.answer(f"Stopped: {name} unchanged.")
+                return
+            raise SkipHandler()
+        self._key_wait.pop(user, None)
+        try:
+            await m.delete()
+            gone = ""
+        except TelegramBadRequest:
+            gone = "\n⚠️ I could not delete your message: delete it yourself."
+        if time.monotonic() > deadline:
+            await m.answer(f"Too late for {name} (5 minutes): press ✏️ in /keys again." + gone)
+            return
+        try:
+            value = keys.check(text)
+        except ValueError as e:
+            await m.answer(f"❌ {name} not saved: {escape(str(e))}." + gone)
+            return
+        try:
+            keys.save(self.orch.store, name, value)
+        except ValueError as e:  # AGW_SECRET_KEY missing or invalid
+            await m.answer(f"❌ {name} not saved: {escape(str(e))}." + gone)
+            return
+        await self._reload_providers()
+        log.info("%s set by user=%s", name, user)
+        secret = dict(keys.names(self.orch.gateway_cfg)).get(name, True)
+        await m.answer(f"✅ <b>{name}</b> saved: {escape(keys.mask(value, secret))}. "
+                       f"{await self._provider_state(name)}" + gone)  # fmt: skip
+
+    async def _reload_providers(self) -> None:
+        from app.main import reload_providers
+
+        reload_providers(self.orch)
+
+    async def _provider_state(self, name: str) -> str:
+        """Free health check of the providers that use this variable."""
+        cfg = self.orch.gateway_cfg
+        ids = (
+            [p.id for p in cfg.providers.values() if name in (p.api_key_env, p.model_env)]
+            if cfg
+            else []
+        )
+        conns = [self.orch.router.connectors.get(i) for i in ids]
+        img = self.orch._image_provider
+        conns += [img] if img is not None and img.name in ids else []
+        out = []
+        for c in filter(None, conns):
+            try:
+                state, detail = await asyncio.wait_for(c.health_status(), 20)
+            except Exception as e:  # noqa: BLE001 - shown to the operator, not raised
+                state, detail = "error", type(e).__name__
+            out.append(
+                f"{c.name}: {escape(state)}" + (f" ({escape(str(detail)[:120])})" if detail else "")
+            )
+        return " · ".join(out) or "No provider uses it yet."
+
+    async def on_roles(self, m: TgMessage):
         if not self._authorized_msg(m):
             return
         lines = [

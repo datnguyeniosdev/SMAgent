@@ -127,6 +127,10 @@ uv run agw dev
 
 `/mcp` in Telegram switches each tool agents call (`generate_art`, `delegate_task`, `ask_agent`, ...) on or off while the gateway runs: the next call obeys, no restart. The choice is saved and survives restarts. A switch never touched starts from the config (`generate_art`: fal's `enabled` in `config/providers/models.yaml`; the rest: on). Turning `generate_art` off also stops image generation in workflows.
 
+`/agents` lists every agent in three groups: 🖥 app (desktop app or IDE, e.g. Claude desktop, Cursor), ⌨️ CLI (terminal: `agw session`, Codex, OpenCode, ...) and ☁️ API (connectors the gateway calls for tasks: OpenAI, Gemini, DeepSeek, Claude Code headless, OpenCode server, image generation). Sessions get pause/resume and close buttons (close asks first); API agents switch on/off live, like `/mcp`. Claude Code sessions report app or CLI by themselves (from `CLAUDE_CODE_ENTRYPOINT`); other agents are grouped by name. The old role list is `/roles`.
+
+`/keys` shows the provider keys and models that `config/providers/models.yaml` names (`api_key_env`, `model_env`): missing, or set (last 4 characters) and whether the value is saved or comes from `.env`. ✏️ asks for the value in a private chat with the bot (open it once with /start). The bot deletes that message at once, saves the value in the gateway database encrypted with `AGW_SECRET_KEY` from `.env`, and reloads the model and image providers without a restart. Saved values win over `.env` and are loaded again at every start. 🗑 clears a saved value (asks first); `.env` applies again. `uv run agw setup` adds `AGW_SECRET_KEY` when missing. Keep it: without it the saved values cannot be read (re-enter them), and a copy of the database alone reveals nothing. Only allowlisted users; values are never logged or shown back. Telegram keeps chats on its servers, so prefer keys you can rotate.
+
 | Command | Purpose |
 |---|---|
 | `uv run agw setup` | secrets + global setup (`--agents LIST` other agents, `--repo PATH…` per-repo files, `--template` for template repos, `--remove`) |

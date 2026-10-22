@@ -6,6 +6,10 @@ from app.connectors.base import AgentConnector, Cap, UnsupportedCapability
 class Router:
     def __init__(self, connectors: list[AgentConnector]):
         self.connectors = {c.name: c for c in connectors}
+        self.switches = None  # the orchestrator's: the operator turns API agents on/off (/agents)
+
+    def on(self, name: str) -> bool:
+        return self.switches is None or self.switches.on(f"api:{name}")
 
     def route(
         self,
@@ -20,6 +24,8 @@ class Router:
                 raise UnsupportedCapability(f"unknown agent {explicit!r}")
             if not c.available:
                 raise UnsupportedCapability(f"agent {explicit!r} is not configured")
+            if not self.on(explicit):
+                raise UnsupportedCapability(f"agent {explicit!r} is switched off by the operator")
             missing = required - c.caps
             if missing:
                 raise UnsupportedCapability(
@@ -33,7 +39,7 @@ class Router:
                 continue
             seen.add(name)
             c = self.connectors[name]
-            if c.available and required <= c.caps:
+            if c.available and self.on(name) and required <= c.caps:
                 return c
         raise UnsupportedCapability(f"no available agent supports: {', '.join(sorted(required))}")
 
@@ -42,6 +48,7 @@ class Router:
             {
                 "name": c.name,
                 "available": c.available,
+                "on": self.on(c.name),
                 "verification": c.verification,
                 "capabilities": sorted(c.caps),
             }

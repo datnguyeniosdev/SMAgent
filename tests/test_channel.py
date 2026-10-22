@@ -305,8 +305,8 @@ async def test_list_ids_and_send_by_id(settings, cfg_dir):
     assert hub.find("s9") is None and hub.resolve_project("p9") is None
 
     text = gw._list_text()
-    assert "<b>s1</b> · 🟢 on · ⚡ push · 2048 Shooter (K05) · MiniGame2048" in text
-    assert "<b>s2</b> · 🟢 on · 🔄 pull" in text and "<b>p2</b> · Coinlets" in text
+    assert "<b>s1</b> · ⌨️ claude_code · 🟢 on · ⚡ push · 2048 Shooter (K05) · MiniGame2048" in text
+    assert "<b>s2</b> · ⌨️ agent · 🟢 on · 🔄 pull" in text and "<b>p2</b> · Coinlets" in text
 
     answers = []
 

@@ -96,7 +96,7 @@ Per-repo instead of global (one repo only): `uv run agw setup --repo /path/to/re
 Project name: the README "Game Identity" line as `Name (CODE)`, else the README title, else the
 folder name. Claude Code gets it from the session-start hook. Use the same name in every call.
 
-- **Take work from Telegram:** call `get_messages(project, agent="<your tool>", session_id=<the id it
+- **Take work from Telegram:** call `get_messages(project, agent="<your tool>", client="app"|"cli", session_id=<the id it
   returned before>)`. Do each request, then `reply_message(session_id, message_id, text)`. Messages
   with `meta.kind == "answer"` answer your own `ask_agent`: use them, no reply. Claude Code polls
   every minute with a recurring job (the hook asks for it), plus a 10-minute health check that

@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from app import agents_setup, doctor, global_setup
 from tests.test_config_gateway import CONTROL, STRANGER, USER, gateway, make
 
@@ -34,7 +36,7 @@ async def test_menu_panel_and_buttons(settings, cfg_dir):
     await gw.on_menu(tg(answers))
     text, kb = answers[-1]
     assert "0 sessions" in text and [d for _, d in buttons(kb)] == [
-        "m:list", "m:queue", "m:open", "m:setup", "m:mcp", "m:templates", "m:help"]  # fmt: skip
+        "m:list", "m:agents", "m:queue", "m:open", "m:keys", "m:setup", "m:mcp", "m:templates", "m:help"]  # fmt: skip
     await gw.on_menu_button(press("m:list", answers, alerts))
     assert answers[-1][0].startswith("🖥 <b>SESSIONS</b>")
     await gw.on_menu_button(press("m:queue", answers, alerts))
@@ -113,3 +115,55 @@ def test_config_enabled_is_only_the_starting_state(settings, cfg_dir):
     assert not sw.on("generate_art") and sw.on("ask_agent")
     sw.set("generate_art", True)
     assert Switches(store, {"generate_art": False}).on("generate_art")  # the saved choice wins
+
+
+async def test_agents_panel_groups_and_controls(settings, cfg_dir, monkeypatch):
+    from app.connectors.base import AgentResult, UnsupportedCapability
+    from app.repo_setup import client_kind
+    from tests.test_config_gateway import VISION, Provider
+
+    orch, _ = make(
+        settings, cfg_dir, [Provider("openai", VISION, lambda r: AgentResult("ok", "openai", "m"))]
+    )
+    hub, gw = orch.channel, gateway(orch)
+    hub.pull("Proj A", "pull_desk", "/w/a", agent="claude_code", client="app")
+    hub.pull("Proj B", "pull_term", "/w/b", agent="codex")  # no client: known CLI
+    hub.pull("Proj C", "pull_cur", "/w/c", agent="cursor")  # no client: known app
+    answers, alerts = [], []
+    await gw.on_agents(tg(answers))
+    text, kb = answers[-1]
+    app_part, cli_part = text.split("⌨️ <b>CLI</b>")[0], text.split("⌨️ <b>CLI</b>")[1].split("☁️")[0]
+    assert "claude_code" in app_part and "cursor" in app_part and "codex" in cli_part
+    assert "🟢 <b>openai</b> · on" in text and "y:sw:api:openai" in [d for _, d in buttons(kb)]
+
+    await gw.on_agents_button(
+        press("y:sw:api:openai", answers, alerts)
+    )  # API agent off: no routing
+    assert "⏸ <b>openai</b> · off" in answers[-1][0] and not orch.router.describe()[0]["on"]
+    with pytest.raises(UnsupportedCapability, match="switched off"):
+        orch.router.route(VISION, explicit="openai")
+    with pytest.raises(UnsupportedCapability):
+        orch.router.route(VISION)
+    await gw.on_agents_button(press("y:sw:api:openai", answers, alerts))
+    assert orch.router.route(VISION).name == "openai"
+
+    s = hub.find("Proj B")
+    await gw.on_agents_button(press(f"y:off:s{s.num}", answers, alerts))
+    assert not s.enabled
+    await gw.on_agents_button(press(f"y:close:s{s.num}", answers, alerts))  # asks first
+    assert s in hub.live() and [d for _, d in buttons(answers[-1][1])][0] == f"y:closeyes:s{s.num}"
+    await gw.on_agents_button(press(f"y:closeyes:s{s.num}", answers, alerts))
+    assert s not in hub.live() and "closed" in answers[-1][0]
+    await gw.on_agents_button(press("y:sw:api:openai", answers, alerts, user=STRANGER))
+    assert alerts[-1] == "Not authorized." and orch.router.on("openai")
+
+    for entry, kind in (
+        ("claude-desktop", "app"),
+        ("claude-vscode", "app"),
+        ("cli", "cli"),
+        ("sdk-py", "cli"),
+    ):
+        monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", entry)
+        assert client_kind() == kind
+    monkeypatch.delenv("CLAUDE_CODE_ENTRYPOINT")
+    assert client_kind() == ""

@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
+from app import keys
 from app.actions import ActionError, ActionRegistry
 from app.config import Settings, env_file, get_settings
 from app.connectors.base import Cap, ConnectorError
@@ -93,11 +94,43 @@ def load_gateway_config(s: Settings):
     return cfg
 
 
+def build_image(gateway_cfg, s: Settings, client) -> tuple:
+    """-> (image provider or None, starting state of the generate_art switch)."""
+    key = lambda v: v.get_secret_value() if v else None  # noqa: E731
+    image, image_on = None, True
+    fal = next(
+        (p for p in (gateway_cfg.providers.values() if gateway_cfg else []) if p.type == "fal"),
+        None,
+    )
+    if fal is not None and os.environ.get(fal.api_key_env):
+        from app.connectors.fal import FalImageProvider
+
+        image_on = fal.enabled  # only the starting state: Telegram /mcp switches it live
+        image = FalImageProvider(
+            os.environ[fal.api_key_env],
+            fal.model
+            or (os.environ.get(fal.model_env) if fal.model_env else None)
+            or "fal-ai/flux/schnell",
+            timeout_s=fal.timeout_s,
+            extra_input=fal.options,
+        )
+    elif s.openai_api_key and s.openai_image_model:
+        image = OpenAIImageProvider(
+            key(s.openai_api_key), s.openai_image_model, s.openai_base_url, client
+        )
+    return image, image_on
+
+
 def build(settings: Settings) -> Orchestrator:
     s = settings
     # Providers name their key by env var (api_key_env: FAL_KEY, GEMINI_API_KEY, ...). Settings reads
     # .env for its own fields only, so export .env too; variables already set in the shell win.
     load_dotenv(env_file(), override=False)
+    store = Store(s.state_db if s.state_db == ":memory:" else s.data_dir / s.state_db)
+    if bad := keys.load(store):  # /keys values (encrypted in the database) win over .env
+        log.warning(
+            "saved settings not loaded, AGW_SECRET_KEY missing or changed: %s", ", ".join(bad)
+        )
     client = httpx.AsyncClient(timeout=s.http_timeout_s)
     key = lambda v: v.get_secret_value() if v else None  # noqa: E731
     gateway_cfg = load_gateway_config(s)
@@ -156,29 +189,8 @@ def build(settings: Settings) -> Orchestrator:
                 client=client,
             ),
         ]
-    image, image_on = None, True
-    fal = next(
-        (p for p in (gateway_cfg.providers.values() if gateway_cfg else []) if p.type == "fal"),
-        None,
-    )
-    if fal is not None and os.environ.get(fal.api_key_env):
-        from app.connectors.fal import FalImageProvider
-
-        image_on = fal.enabled  # only the starting state: Telegram /mcp switches it live
-        image = FalImageProvider(
-            os.environ[fal.api_key_env],
-            fal.model
-            or (os.environ.get(fal.model_env) if fal.model_env else None)
-            or "fal-ai/flux/schnell",
-            timeout_s=fal.timeout_s,
-            extra_input=fal.options,
-        )
-    elif s.openai_api_key and s.openai_image_model:
-        image = OpenAIImageProvider(
-            key(s.openai_api_key), s.openai_image_model, s.openai_base_url, client
-        )
-    store = Store(s.state_db if s.state_db == ":memory:" else s.data_dir / s.state_db)
-    return Orchestrator(
+    image, image_on = build_image(gateway_cfg, s, client)
+    orch = Orchestrator(
         s,
         Router(connectors),
         WorkspaceManager(s.workspace_root, s.data_dir / "worktrees"),
@@ -198,7 +210,21 @@ def build(settings: Settings) -> Orchestrator:
         store=store,
         gateway_cfg=gateway_cfg,
     )
+    orch.http_client = client  # reused by reload_providers
+    return orch
 
+
+def reload_providers(orch) -> None:
+    """After /keys changed a key or model: rebuild the model and image providers from the environment,
+    no restart. The Claude Code / OpenCode runtimes are kept as they are."""
+    cfg = orch.gateway_cfg
+    if cfg is None:
+        return
+    client = getattr(orch, "http_client", None) or httpx.AsyncClient(timeout=orch.s.http_timeout_s)
+    keep = {n: c for n, c in orch.router.connectors.items() if n in ("claude_code", "opencode")}
+    orch.router.connectors = {**keep, **{c.name: c for c in build_providers(cfg, client)}}
+    # ponytail: OpenAI images read Settings (loaded at start); only fal picks up a new key live
+    orch.image_provider, _ = build_image(cfg, orch.s, client)
 
 
 @asynccontextmanager
