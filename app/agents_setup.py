@@ -144,8 +144,15 @@ def configured(agent: str) -> bool:
     return (TOML_START in text) if agent == "codex" else (f'"{SERVER}"' in text)
 
 
-def install(agent: str, url: str = "http://127.0.0.1:8000/mcp") -> str:
+def install(agent: str, url: str = "http://127.0.0.1:8000/mcp", token: bool | None = None) -> str:
+    """token (default: MCP_REQUIRE_TOKEN): send `Authorization: Bearer $AGW_API_TOKEN`. The files name
+    the variable, never the secret; the agent needs AGW_API_TOKEN in its environment."""
     require_prod("agent setup")
+    if token is None:
+        from app.config import get_settings
+
+        token = get_settings().mcp_require_token
+    # ponytail: env-reference syntax from each tool's docs, checked only for opencode on this Mac
     p = paths(agent)
     mcp = p["mcp"]
     _backup(mcp)
@@ -153,6 +160,8 @@ def install(agent: str, url: str = "http://127.0.0.1:8000/mcp") -> str:
         data = _json(mcp)
         data.setdefault("$schema", "https://opencode.ai/config.json")
         data.setdefault("mcp", {})[SERVER] = {"type": "remote", "url": url, "enabled": True}
+        if token:
+            data["mcp"][SERVER]["headers"] = {"Authorization": "Bearer {env:AGW_API_TOKEN}"}
         _write_json(mcp, data)
     elif agent == "codex":
         old = mcp.read_text() if mcp.exists() else ""
@@ -161,7 +170,8 @@ def install(agent: str, url: str = "http://127.0.0.1:8000/mcp") -> str:
             return (
                 f"{mcp}: [mcp_servers.{SERVER}] already exists (not managed here); left unchanged"
             )
-        _block(mcp, f'[mcp_servers.{SERVER}]\nurl = "{url}"\nstartup_timeout_sec = 10\ntool_timeout_sec = 120',
+        auth = '\nbearer_token_env_var = "AGW_API_TOKEN"' if token else ""
+        _block(mcp, f'[mcp_servers.{SERVER}]\nurl = "{url}"\nstartup_timeout_sec = 10\ntool_timeout_sec = 120{auth}',
                TOML_START, TOML_END)  # fmt: skip
         try:
             tomllib.loads(mcp.read_text())
@@ -171,10 +181,14 @@ def install(agent: str, url: str = "http://127.0.0.1:8000/mcp") -> str:
     elif agent == "antigravity":
         data = _json(mcp)
         data.setdefault("mcpServers", {})[SERVER] = {"serverUrl": url}
+        if token:
+            data["mcpServers"][SERVER]["headers"] = {"Authorization": "Bearer ${AGW_API_TOKEN}"}
         _write_json(mcp, data)
     elif agent == "cursor":
         data = _json(mcp)
         data.setdefault("mcpServers", {})[SERVER] = {"url": url}
+        if token:
+            data["mcpServers"][SERVER]["headers"] = {"Authorization": "Bearer ${env:AGW_API_TOKEN}"}
         _write_json(mcp, data)
     rules = p["rules"]
     if rules is not None:

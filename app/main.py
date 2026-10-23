@@ -853,7 +853,8 @@ async def channel_stream(
                 except TimeoutError:
                     yield ": ping\n\n"  # keeps the shim's read timeout from firing
                     continue
-                yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
+                pushed = {**msg, "meta": {**(msg.get("meta") or {}), "session_id": sess.session_id}}
+                yield f"data: {json.dumps(pushed, ensure_ascii=False)}\n\n"
                 # ponytail: at-most-once; a message read off the queue just before the shim drops is lost
                 hub.delivered(msg, sess.session_id)
         finally:

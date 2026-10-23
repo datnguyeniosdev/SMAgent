@@ -58,7 +58,9 @@ HELP = (
 /list — agent sessions (s1, s2…) and projects (p1, p2…)
 /send &lt;s#|p#|project&gt; &lt;text&gt; — give an agent a request
 /queue — requests waiting or in progress (m1…) · /cancel &lt;m#&gt;
-/open &lt;folder|p#&gt; [new] — open a Claude session for a project (/open alone: buttons)
+/asks — open requests between agents (every one is also copied here as 🤝)
+/open &lt;folder|p#&gt; [opencode|codex|antigravity] [new] — open an agent session (default Claude;
+  /open alone: buttons)
 /close &lt;s#&gt; · /off &lt;s#&gt; · /on &lt;s#&gt; — close a session, or stop/resume giving it work
 /agents — every agent: 🖥 app (desktop/IDE), ⌨️ CLI, ☁️ API, with on/off and close buttons
 Reply to any gateway message (text or photos) to give feedback or answer it.
@@ -89,6 +91,7 @@ MENU = [  # the "/" menu: everyday commands only; the rest still work (see /help
     ("send", "Send a request: /send s1|p1 <text>"),
     ("queue", "Requests waiting / in progress (m#)"),
     ("cancel", "Cancel a request: /cancel m1"),
+    ("asks", "Open requests between agents"),
     ("open", "Open a project: /open, /open p1, /open k09"),
     ("close", "Close a session: /close s1"),
     ("off", "Stop giving a session work"),
@@ -452,6 +455,7 @@ class TelegramGateway:
         r.message(Command("list", "live"))(self.on_live)
         r.message(Command("on", "off"))(self.on_switch)
         r.message(Command("queue"))(self.on_queue)
+        r.message(Command("asks"))(self.on_asks)
         r.message(Command("open"))(self.on_open)
         r.message(Command("close"))(self.on_close)
         r.message(Command("cancel"))(self.on_cancel)
@@ -464,6 +468,7 @@ class TelegramGateway:
         r.callback_query(F.data.startswith("a:"))(self.on_callback)
         r.callback_query(F.data.startswith("o:"))(self.on_open_button)
         r.callback_query(F.data.startswith("k:"))(self.on_ask_button)
+        r.callback_query(F.data.startswith("h:"))(self.on_question_button)
         r.callback_query(F.data.startswith("m:"))(self.on_menu_button)
         r.callback_query(F.data.startswith("g:"))(self.on_setup_button)
         r.callback_query(F.data.startswith("t:"))(self.on_mcp_button)
@@ -719,13 +724,17 @@ class TelegramGateway:
         /open alone: buttons for the known projects."""
         if not self._authorized_msg(m):
             return
+        from app.cli import AGENT_RUN
+
         words = (command.args or "").split()
         new = bool(words) and words[-1].lower() == "new"
-        query = " ".join(words[:-1] if new else words)
+        words = words[:-1] if new else words
+        agent = words.pop().lower() if len(words) > 1 and words[-1].lower() in AGENT_RUN else ""
+        query = " ".join(words)
         if not query:
             await self._open_menu(m.answer)
             return
-        await self._open(m.answer, query, new)
+        await self._open(m.answer, query, new, agent)
 
     async def _open_menu(self, answer) -> None:
         hub = self.orch.channel
@@ -764,10 +773,89 @@ class TelegramGateway:
                             reply="Reply to this message to answer it yourself")  # fmt: skip
         msg = await self._send(self.bot.send_message, chat_id=self.s.telegram_control_chat_id, text=html,
                                reply_markup=kb)  # fmt: skip
+        if msg is None:
+            raise RuntimeError("Telegram did not take the escalation")
+        self.orch.store.put(
+            "ask_tg", f"c:{self.s.telegram_control_chat_id}:{msg.message_id}", {"ask_id": k}
+        )
+
+    async def notify_ask(self, a: dict, event: str) -> None:
+        """A copy of every request between agents, and of its answer, for the operator."""
+        asks, k = self.orch.asks, a["ask_id"]
+        asker = escape(asks._label(a.get("from_session"), a.get("from_project")))
+        if event == "answered":
+            if a.get("answered_by") == "the operator":
+                return  # the operator wrote it
+            body = (f"{escape(a.get('answered_by') or 'an agent')} → {asker}:\n"
+                    f"{escape(fmt.truncate(a.get('answer') or '', 700))}")  # fmt: skip
+            html = fmt.envelope(
+                "answer", body, project=a.get("from_project"), title=f"Answer ({k})", ref=k
+            )
+            await self.send_control(html)
+            return
+        target = self.orch.channel.sessions.get(a.get("to_session") or "")
+        where = f"<b>{escape(a['to_project'])}</b>" + (f" (s{target.num})" if target else "")
+        body = f"{asker} → {where}:\n{escape(fmt.truncate(a['request'], 700))}"
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✍️ Answer myself", callback_data=f"k:answer:{k}"),
+            InlineKeyboardButton(text="❌ Cancel", callback_data=f"k:cancel:{k}"),
+        ]])  # fmt: skip
+        html = fmt.envelope("agent", body, project=a["to_project"], title=f"Agent request ({k})", ref=k,
+                            reply="Reply to this message to answer it yourself")  # fmt: skip
+        msg = await self._send(self.bot.send_message, chat_id=self.s.telegram_control_chat_id, text=html,
+                               reply_markup=kb)  # fmt: skip
         if msg is not None:
             self.orch.store.put(
                 "ask_tg", f"c:{self.s.telegram_control_chat_id}:{msg.message_id}", {"ask_id": k}
             )
+
+    async def send_question(self, hi, html: str) -> None:
+        """An agent's question for the operator, with one button per option; raises when Telegram refuses."""
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=o[:60], callback_data=f"h:{hi.request_id}:{i}")]
+            for i, o in enumerate(hi.options)
+        ]) if hi.options else None  # fmt: skip
+        msg = await self._send(self.bot.send_message, chat_id=self.s.telegram_control_chat_id, text=html,
+                               reply_markup=kb)  # fmt: skip
+        if msg is None:
+            raise RuntimeError("Telegram did not take the question")
+
+    async def on_question_button(self, q: CallbackQuery):
+        chat_id = q.message.chat.id if q.message else None
+        if not self.authorized(q.from_user.id, chat_id):
+            await q.answer("Not authorized.", show_alert=True)
+            return
+        _, request_id, idx = q.data.split(":")
+        from app.collaboration import CollaborationError
+
+        try:
+            hi = self.orch.collab.get_human_input(request_id)
+            hi = self.orch.collab.answer_human_input(
+                request_id, hi.options[int(idx)], str(q.from_user.id)
+            )
+        except (CollaborationError, IndexError, ValueError) as e:
+            await q.answer(str(e)[:190] or "Not available.", show_alert=True)
+            return
+        await q.answer("Answered.")
+        if q.message:
+            await q.message.answer(f"✅ <code>{request_id}</code>: {escape(hi.response or '')}")
+
+    def _asks_text(self) -> str:
+        asks = self.orch.asks
+        rows = [
+            f"<code>{a['ask_id']}</code> {escape(asks._label(a.get('from_session'), a.get('from_project')))} → "
+            f"<b>{escape(a['to_project'])}</b> · {a['state']}\n  {escape(fmt.truncate(a['request'], 120))}"
+            for a in asks.open_asks()
+        ]
+        return (
+            ("<b>Open agent requests</b>\n" + "\n".join(rows))
+            if rows
+            else "No open agent requests."
+        )
+
+    async def on_asks(self, m: TgMessage):
+        if self._authorized_msg(m):
+            await m.answer(self._asks_text())
 
     async def on_ask_button(self, q: CallbackQuery):
         chat_id = q.message.chat.id if q.message else None
@@ -862,7 +950,7 @@ class TelegramGateway:
         await q.answer("Opening…")
         await self._open(q.message.answer, f"p{q.data[2:]}", False)
 
-    async def _open(self, answer, query: str, new: bool) -> None:
+    async def _open(self, answer, query: str, new: bool, agent: str = "") -> None:
         from app.launcher import open_project
 
         root = self.s.projects_root or Path(__file__).resolve().parents[2]
@@ -881,10 +969,17 @@ class TelegramGateway:
                 )
                 return
             query = Path(folder).name
-        live = hub.live()
+        live = [x for x in hub.live() if (x.agent or "claude_code") == (agent or "claude_code")]
         try:
             status, hits = await asyncio.to_thread(
-                open_project, root, query, [x.cwd for x in live], new, self.s.mcp_require_token
+                open_project,
+                root,
+                query,
+                [x.cwd for x in live],
+                new,
+                self.s.mcp_require_token,
+                None,
+                agent,
             )
         except Exception as e:  # osascript refused (permission), setup failed, ...
             log.warning("open %s failed: %s", query, e)
@@ -907,8 +1002,9 @@ class TelegramGateway:
                 f"or <code>/open {escape(repo.name)} new</code> for another session."
             )
             return
+        flag = f" --agent {agent}" if agent else ""
         body = (
-            "Opening a Terminal window on the Mac with <code>agw session</code>; "
+            f"Opening a Terminal window on the Mac with <code>agw session{flag}</code>; "
             "it starts taking work by itself."
         )
         if status == "opened_connected":
@@ -1514,7 +1610,12 @@ class TelegramGateway:
                 notes=f"{notes} · {r['seconds'] // 60} min", error=r["error"] or None, source="telegram",
             ))  # fmt: skip
             if r.get("log") and r["log"].exists():
-                data = r["log"].read_bytes()[-1_000_000:]  # the end of the log holds the outcome
+                from app.logs import redact
+
+                tail = (
+                    r["log"].read_bytes()[-1_000_000:].decode(errors="replace")
+                )  # the outcome is at the end
+                data = redact(tail).encode()  # gateway secrets and token-looking strings masked
                 await self._send(self.bot.send_document, chat_id=self.s.telegram_control_chat_id,
                                  document=BufferedInputFile(data, r["log"].name))  # fmt: skip
 
@@ -1870,6 +1971,15 @@ class TelegramGateway:
         ids = {mt.group(1): mt.group(0) for mt in reversed(list(_ID.finditer(body)))}  # first wins
         rep_id = ids.get("rep") if self.orch.collab.get_report(ids.get("rep", "")) else None
         task_id = ids.get("tsk") if ids.get("tsk") in self.orch.tasks else None
+        if sender is not None and sender == getattr(self.bot, "id", None) and ids.get("hin"):
+            from app.collaboration import CollaborationError
+
+            try:  # a reply to an agent's question is the answer
+                self.orch.collab.answer_human_input(ids["hin"], text, str(user_id))
+                await m.reply(f"✅ Answered <code>{ids['hin']}</code>.")
+            except CollaborationError as e:
+                await m.reply(f"❌ {escape(str(e))}")
+            return
         if sender is not None and sender == getattr(self.bot, "id", None) and (rep_id or task_id):
             await self._record_feedback(
                 m, text, report_id=rep_id, task_id=None if rep_id else task_id,

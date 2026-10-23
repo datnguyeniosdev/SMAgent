@@ -744,7 +744,11 @@ class CollaborationService:
         body = fmt.escape(hi.question)
         if hi.options:
             body += "\n" + fmt.bullet([fmt.escape(o) for o in hi.options])
-        reply = f"<code>/answer {hi.request_id} </code>"
+        reply = (
+            "Tap an option or reply to this message"
+            if hi.options
+            else "Reply to this message to answer"
+        )
         if anchor is not None and not project:
             html = self.svc.msg("question", anchor, body, ref=hi.request_id, reply=reply)
         else:
@@ -753,13 +757,22 @@ class CollaborationService:
                 project=project or (self.svc.project_of(anchor) if anchor else self.svc.default_project),
                 task_id=task_id, session=session_id, ref=hi.request_id, reply=reply,
             )  # fmt: skip
+        n = self.svc.notifier
         try:
-            if anchor is not None:
-                await self.svc.notifier.report(anchor, html, control=True)
-            elif hasattr(self.svc.notifier, "send_control"):
-                await self.svc.notifier.send_control(html)
-        except Exception:
+            if hasattr(n, "send_question"):
+                await n.send_question(hi, html)
+            elif anchor is not None:
+                await n.report(anchor, html, control=True)
+            elif hasattr(n, "send_control"):
+                await n.send_control(html)
+        except Exception as e:
             log.exception("human input delivery failed")
+            hi.status = "expired"  # nobody can answer a question that never arrived
+            self.store.put("human_input", hi.request_id, hi, task_id=task_id, state=hi.status)
+            raise CollaborationError(
+                "delivery_failed",
+                f"the question did not reach Telegram ({type(e).__name__}); try again later",
+            ) from e
         return hi
 
     def get_human_input(self, request_id: str) -> HumanInput:

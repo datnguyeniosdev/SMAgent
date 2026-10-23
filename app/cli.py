@@ -419,8 +419,37 @@ def _claude_version(claude: str) -> tuple[int, ...]:
     return tuple(int(x) for x in m.groups()) if m else ()
 
 
+# One-shot runs of other agents' CLIs (prompt last). ponytail: codex/gemini flags unverified on this Mac.
+AGENT_RUN = {
+    "opencode": ["opencode", "run"],
+    "codex": ["codex", "exec"],
+    "antigravity": ["gemini", "-p"],
+}
+
+
+def cmd_agent_loop(args) -> int:
+    """A terminal that runs another agent once a minute to take work from Telegram (it has no loop of its own)."""
+    from app.projects import project_for
+    from app.repo_setup import loop_prompt
+
+    base = AGENT_RUN[args.agent]
+    if shutil.which(base[0]) is None:
+        raise SystemExit(f"{base[0]} not found on PATH")
+    project = project_for(Path.cwd())
+    prompt = loop_prompt(project, "cli", args.agent)
+    print(f"{args.agent} takes work for {project!r} once a minute. Ctrl-C stops it.")
+    try:
+        while True:
+            subprocess.run([*base, *args.claude_args, prompt], env=_clean_env(), check=False)  # noqa: S603
+            time.sleep(60)
+    except KeyboardInterrupt:
+        return 0
+
+
 def cmd_session(args) -> int:
     """Open an interactive Claude Code session in this repo that receives pushed work (channel)."""
+    if args.agent != "claude_code":
+        return cmd_agent_loop(args)
     claude = shutil.which("claude")
     if claude is None:
         raise SystemExit("claude CLI not found")
@@ -658,6 +687,8 @@ def main(argv: list[str] | None = None) -> int:
         "session", help="(in a repo) open Claude Code that takes work from Telegram"
     )
     sp.add_argument("--no-loop", action="store_true", help="do not start the pull loop")
+    sp.add_argument("--agent", default="claude_code", choices=["claude_code", *AGENT_RUN],
+                    help="another agent CLI, run once a minute to take work")  # fmt: skip
     sp.add_argument("claude_args", nargs=argparse.REMAINDER, help="extra arguments for claude")
     sp.set_defaults(fn=cmd_session)
     sp = sub.add_parser("serve", help="start only the gateway")

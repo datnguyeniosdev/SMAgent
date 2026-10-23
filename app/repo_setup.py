@@ -144,11 +144,11 @@ def client_kind() -> str:
     return "cli" if entry == "cli" or entry.startswith("sdk") else "app"
 
 
-def loop_prompt(project: str, client: str = "") -> str:
+def loop_prompt(project: str, client: str = "", agent: str = "claude_code") -> str:
     """Pull loop: one request at a time; a busy session takes nothing new (no duplicate jobs)."""
     kind = f", client '{client}'" if client else ""
     return (
-        f"Call the agent-gateway tool get_messages with project '{project}', agent 'claude_code'{kind} and "
+        f"Call the agent-gateway tool get_messages with project '{project}', agent '{agent}'{kind} and "
         "cwd set to this folder, reusing "
         "the session_id it returned before. If it reports busy, switched off or no messages, do nothing this "
         "round. A message with meta.kind 'answer' answers your own ask_agent: use it to continue that work, "

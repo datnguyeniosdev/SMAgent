@@ -37,7 +37,7 @@ def test_each_agent_gets_its_documented_shape_and_removal_restores(home):
 
     for _ in range(2):  # idempotent
         for agent in ("opencode", "codex", "antigravity", "cursor"):
-            ag.install(agent, URL)
+            ag.install(agent, URL, token=False)
 
     oc = json.loads((home / ".config/opencode/opencode.json").read_text())
     assert oc["theme"] == "dark" and oc["mcp"]["agent-gateway"] == {
@@ -93,3 +93,14 @@ def test_names_and_cli(home, capsys):
     assert 'agent="cursor"' in capsys.readouterr().out
     main(["setup", "--agents", "cursor,opencode", "--remove"])
     assert not ag.configured("cursor") and not ag.configured("opencode")
+
+
+def test_token_header_names_the_variable_never_the_secret(home):
+    for agent in ("opencode", "codex", "antigravity", "cursor"):
+        ag.install(agent, URL, token=True)
+    oc = json.loads((home / ".config/opencode/opencode.json").read_text())["mcp"]["agent-gateway"]
+    assert oc["headers"] == {"Authorization": "Bearer {env:AGW_API_TOKEN}"}
+    codex = tomllib.loads((home / ".codex/config.toml").read_text())["mcp_servers"]["agent-gateway"]
+    assert codex["bearer_token_env_var"] == "AGW_API_TOKEN"
+    for f in (".gemini/config/mcp_config.json", ".cursor/mcp.json"):
+        assert "Bearer ${" in (home / f).read_text()

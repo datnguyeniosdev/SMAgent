@@ -9,6 +9,7 @@ the outcome (exit code) is reported with report_deployment and the full log is k
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import subprocess
 from pathlib import Path
@@ -19,6 +20,30 @@ ENVS = ("uat", "prod")
 TIMEOUT_S = 3 * 3600  # a cold engine import plus two platform builds can take long
 LINKED = ("4_delivery/deploy/.env.deploy",)  # gitignored, needed by the script
 _running: set[str] = set()
+
+
+def deploy_env(environ: dict | None = None) -> dict:
+    """The shell environment without the gateway's own secrets: every variable its .env sets, every
+    key saved with /keys or named by the provider config, and AGW_* / TELEGRAM_*. The project's
+    deploy script gets what it needs from its own .env.deploy or the operator's shell."""
+    from dotenv import dotenv_values
+
+    from app.config import env_file
+
+    env = dict(os.environ if environ is None else environ)
+    drop = set(dotenv_values(env_file())) | {"CLAUDECODE"}
+    try:
+        from app.config import get_settings
+        from app.main import load_gateway_config
+
+        cfg = load_gateway_config(get_settings())
+        for p in cfg.providers.values() if cfg else []:
+            drop |= {p.api_key_env, p.model_env} - {None}
+    except Exception as e:  # noqa: BLE001 - without a config the prefix and .env rules still apply
+        logging.getLogger(__name__).debug("provider config not read for the deploy env: %s", e)
+    return {
+        k: v for k, v in env.items() if k not in drop and not k.startswith(("AGW_", "TELEGRAM_"))
+    }
 
 
 def deployable(root: Path) -> list[Path]:
@@ -99,7 +124,7 @@ async def run(repo: Path, env: str, branch: str, dry_run: bool, log_dir: Path) -
             return {"status": "failed", "commit": "", "log": log, "error": f"checkout failed: {e}",
                     "seconds": int(loop.time() - start)}  # fmt: skip
         args = [DEPLOY_SCRIPT, env, *(["--dry-run"] if dry_run else [])]
-        environ = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+        environ = deploy_env()
         with log.open("wb") as out:
             proc = await asyncio.create_subprocess_exec(
                 "bash", *args, cwd=wt, stdout=out, stderr=subprocess.STDOUT, env=environ

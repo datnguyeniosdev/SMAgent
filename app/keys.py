@@ -61,11 +61,19 @@ def _fernet() -> Fernet:
         ) from e
 
 
+def _mask_in_logs(value: str) -> None:
+    from app.logs import register_secrets
+
+    register_secrets([value])
+
+
 def save(store, name: str, value: str) -> None:
     store.put(
         KIND, name, {"name": name, "enc": _fernet().encrypt(value.encode()).decode()}, state="set"
     )
     os.environ[name] = value
+    if name.endswith(("_KEY", "_TOKEN", "_SECRET", "_PASSWORD")):
+        _mask_in_logs(value)
 
 
 def clear(store, name: str, env_value: str | None) -> None:
@@ -94,7 +102,9 @@ def load(store) -> list[str]:
     bad = []
     for r in rows:
         try:
-            os.environ[r["name"]] = f.decrypt(r["enc"].encode()).decode()
+            os.environ[r["name"]] = value = f.decrypt(r["enc"].encode()).decode()
+            if r["name"].endswith(("_KEY", "_TOKEN", "_SECRET", "_PASSWORD")):
+                _mask_in_logs(value)
         except (InvalidToken, AttributeError):
             bad.append(r["name"])
     return bad

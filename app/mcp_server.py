@@ -264,7 +264,11 @@ def build_mcp_server(svc) -> MCPServer:
     @tool
     async def cancel_task(task_id: str) -> dict[str, Any]:
         """Cancel a task. 'unknown' means an in-flight side effect may already have happened."""
-        task_or_error(task_id)
+        task = task_or_error(task_id)
+        if (task.created_by or "").isdigit():  # a Telegram user id: the operator started it
+            raise GatewayToolError(
+                "the operator started this task; only they can cancel it (/stop on Telegram)"
+            )
         stopped = await svc.stop(task_id)
         return {"task_id": task_id, "stopped": stopped, "state": svc.tasks[task_id].state.value}
 
@@ -549,6 +553,8 @@ def build_mcp_server(svc) -> MCPServer:
             rep = await svc.channel.reply(session_id, text, message_id, images)
         except KeyError as e:
             raise GatewayToolError(f"unknown session {session_id}: call get_messages first") from e
+        except PermissionError as e:
+            raise GatewayToolError(str(e)) from e
         except CollaborationError as e:
             raise GatewayToolError(str(e)) from e
         return reply_result(rep)
@@ -560,7 +566,7 @@ def build_mcp_server(svc) -> MCPServer:
         hub = svc.channel
         return {"agents": [
             {"id": f"s{s.num}", "session_id": s.session_id, "project": s.project, "agent": s.agent or None,
-             "mode": s.mode, "can_take_work": s.deliverable, "enabled": s.enabled, "blocked": s.blocked,
+             "kind": s.kind, "mode": s.mode, "can_take_work": s.deliverable, "enabled": s.enabled, "blocked": s.blocked,
              "busy_with": [f"m{m.get('num')}" for m in hub.in_progress(s.session_id)],
              "folder": s.cwd.rstrip("/").rsplit("/", 1)[-1], "last_seen": s.last_seen.isoformat()}
             for s in hub.live()
@@ -572,7 +578,8 @@ def build_mcp_server(svc) -> MCPServer:
         wait_s: int = 600,
     ) -> dict[str, Any]:  # fmt: skip
         """Ask another agent to do something, or for information: to = s# (that session, see
-        list_agents) or a project (p#, name, fragment: its best session). Pass your own session_id
+        list_agents), agent:<tool> (e.g. agent:opencode: an open session of that agent tool, your
+        project's first) or a project (p#, name, fragment: its best session). Pass your own session_id
         (from get_messages) so the answer reaches your inbox; it arrives there as an "answer"
         message (no reply needed), and get_ask(ask_id) shows it too. Write the request so it stands
         alone: what you need, why, and what the answer must contain. If the other agent cannot take

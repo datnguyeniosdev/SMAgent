@@ -15,6 +15,7 @@ routed back into the same session (see CollaborationService.submit_feedback).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import re
@@ -100,6 +101,30 @@ class ChannelHub:
 
     # ---- sessions ----
 
+    def _ops(self, html: str) -> None:
+        """A short notice to the operator's group (sessions coming and going, late deliveries)."""
+        fn = getattr(getattr(self.svc, "notifier", None), "send_control", None)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if fn is not None:
+
+            async def go():
+                try:
+                    await fn(html)
+                except Exception:  # noqa: BLE001 - a notice never breaks delivery
+                    log.exception("operator notice failed")
+
+            loop.create_task(go())
+
+    def _label(self, s: LiveSession) -> str:
+        from html import escape
+
+        kind = "app" if s.kind == "app" else "CLI"
+        agent = s.agent or ("claude_code" if s.mode == "push" else "agent")
+        return f"<b>s{s.num}</b> {escape(agent)} ({kind}) · {escape(s.project)}"
+
     def connect(
         self,
         session_id: str,
@@ -108,6 +133,7 @@ class ChannelHub:
         blocked: bool = False,
         mode: str = "push",
         pid: int = 0,
+        notify: bool = True,
     ) -> LiveSession:
         rec = self.svc.store.get("channel_session", session_id) or {}
         task = self.svc.tasks.get(rec.get("task_id", ""))
@@ -131,11 +157,13 @@ class ChannelHub:
         self.svc.store.event("channel.connected", task_id=task.task_id, session=session_id,
                              project=project, mode=mode, blocked=blocked)  # fmt: skip
         log.info("%s session %s connected (%s, %s)", mode, session_id, project, cwd)
+        if notify:
+            self._ops(f"🔌 {self._label(s)} connected")
         return s
 
     def _save(self, s: LiveSession) -> None:
         body = {"project": s.project, "cwd": s.cwd, "task_id": s.task_id, "mode": s.mode,
-                "enabled": s.enabled}  # fmt: skip
+                "enabled": s.enabled, "agent": s.agent, "client": s.client}  # fmt: skip
         self.svc.store.put("channel_session", s.session_id, body, task_id=s.task_id, state="open")
 
     def disconnect(self, s: LiveSession) -> None:
@@ -144,6 +172,7 @@ class ChannelHub:
         ):  # a newer stream for the same id may have replaced it
             del self.sessions[s.session_id]
             self._release(s)
+            self._ops(f"⚪ {self._label(s)} left")
             self.svc.store.event("channel.disconnected", task_id=s.task_id, session=s.session_id)
             log.info("%s session %s disconnected", s.mode, s.session_id)
 
@@ -157,6 +186,8 @@ class ChannelHub:
     def _prune(self) -> None:
         cutoff = now() - PULL_TTL
         for s in [s for s in self.sessions.values() if s.mode == "pull" and s.last_seen < cutoff]:
+            if self.in_progress(s.session_id):  # still working on a message within its lease
+                continue
             self.disconnect(s)
 
     def live(self) -> list[LiveSession]:
@@ -251,13 +282,14 @@ class ChannelHub:
         partial = [p for p in projects if key and key in _norm(p)]
         return partial[0] if len(partial) == 1 else None
 
-    def session_for(self, project: str) -> LiveSession | None:
-        """Newest deliverable session of the project; push (instant) before pull."""
+    def session_for(self, project: str, exclude: str | None = None) -> LiveSession | None:
+        """Newest deliverable session of the project; push (instant) before pull. exclude: the
+        asking session (an agent's request never goes back to itself)."""
         self._prune()
         matches = [
             s
             for s in self.sessions.values()
-            if _norm(s.project) == _norm(project) and s.deliverable
+            if _norm(s.project) == _norm(project) and s.deliverable and s.session_id != exclude
         ]
         return max(matches, key=lambda s: (s.mode == "push", s.connected_at)) if matches else None
 
@@ -278,14 +310,22 @@ class ChannelHub:
     # ---- messages ----
 
     def _flush_pending(self, project: str) -> None:
-        target = self.session_for(project)
-        if target is None:
-            return
         waiting = self.svc.store.list("channel_msg", states=["pending"])
         for msg in sorted(waiting, key=lambda m: m.get("created_at", "")):  # oldest first
-            if _norm(msg["project"]) == _norm(project):
+            if _norm(msg["project"]) != _norm(project):
+                continue
+            target = self.session_for(project, exclude=msg.get("from_session"))
+            if target is not None:
                 target.queue.put_nowait(msg)
                 self._set(msg, "queued")
+                self._assigned(msg, target)
+                if (msg.get("meta") or {}).get("source") == "telegram":
+                    self._ops(f"📬 m{msg.get('num')} delivered to {self._label(target)}")
+
+    def _assigned(self, msg: dict, target: LiveSession) -> None:
+        """An agent's request changed hands: its ask follows (watchdog, attribution)."""
+        if msg.get("ask_id") and msg.get("kind") == "request":
+            self.svc.asks.note_delivery(msg["ask_id"], target.session_id)
 
     def send(
         self,
@@ -299,9 +339,10 @@ class ChannelHub:
     ) -> tuple[dict, LiveSession | None]:
         """Queue a message for a session (that one if it can take it, else the best of the project).
         extra: e.g. {"ask_id": ..., "kind": "request" | "answer"} for agent-to-agent messages."""
+        exclude = (extra or {}).get("from_session")
         target = self.sessions.get(session_id or "")
-        if target is None or not target.deliverable:
-            target = self.session_for(project)
+        if target is None or not target.deliverable or target.session_id == exclude:
+            target = self.session_for(project, exclude=exclude)
         msg = {
             "message_id": new_id("chm"),
             "project": target.project if target else project,
@@ -346,17 +387,23 @@ class ChannelHub:
         cutoff, projects = now() - LEASE, set()
         for msg in self.svc.store.list("channel_msg", states=["delivered"]):
             at = msg.get("delivered_at")
+            holder = self.sessions.get(msg.get("session_id") or "")
             if at is None:  # delivered before leases existed: too old to hand out again, expire it
                 msg["deliveries"] = MAX_DELIVERIES
             elif datetime.fromisoformat(at) > cutoff:
                 continue
+            elif holder is not None and holder.mode == "push":
+                continue  # Claude has it on screen; pushing it again would start it twice
             msg["deliveries"] = msg.get("deliveries", 1) + 1
-            if msg["deliveries"] <= MAX_DELIVERIES:
-                self._set(msg, "pending")
-                projects.add(msg["project"])
-            else:
+            if msg["deliveries"] > MAX_DELIVERIES:
                 self._set(msg, "expired")
                 self._tell_expired(msg)
+            elif holder is not None:  # still connected: only its own session gets it again
+                holder.queue.put_nowait(msg)
+                self._set(msg, "queued")
+            else:
+                self._set(msg, "pending")
+                projects.add(msg["project"])
             self.svc.store.event("channel.lease_expired", message_id=msg["message_id"],
                                  session=msg.get("session_id"), state=msg["state"])  # fmt: skip
         for project in projects:
@@ -405,6 +452,13 @@ class ChannelHub:
         )
         return msg
 
+    @staticmethod
+    def pull_id(project: str, agent: str, cwd: str) -> str:
+        """One pull session per project, agent tool and folder (Claude, Codex and OpenCode on the
+        same project stay apart), stable across polls that forget to pass session_id."""
+        where = hashlib.sha256(cwd.encode()).hexdigest()[:6] if cwd else "0"
+        return f"pull_{_norm(project)[:24]}_{_norm(agent or 'agent')[:12]}_{where}"
+
     def pull(
         self, project: str, session_id: str | None, cwd: str = "", limit: int = 1, agent: str = "",
         client: str = "",
@@ -412,16 +466,21 @@ class ChannelHub:
         """get_messages: register/refresh a pull session and hand over what is queued for it.
         Nothing new while it still has an unanswered message (no duplicate or parallel jobs).
         Returns (session, new messages, messages still in progress)."""
-        sid = session_id or f"pull_{_norm(project)[:40]}"
+        sid = session_id or self.pull_id(project, agent, cwd)
         if sid in self._stopping:  # /close: hand out nothing; the tool tells the loop to stop
             self._stopping.discard(sid)
             return LiveSession(sid, project, cwd, "", mode="pull", closing=True), [], []
         s = self.sessions.get(sid)
-        if s is None or s.mode != "pull":
-            s = self.connect(sid, project, cwd, mode="pull")
+        new = s is None or s.mode != "pull"
+        if new:
+            s = self.connect(sid, project, cwd, mode="pull", notify=False)
         s.last_seen = now()
         s.agent = agent or s.agent
         s.client = client if client in ("app", "cli") else s.client
+        if new:  # announced once the agent and its kind are known
+            self._ops(f"🔌 {self._label(s)} connected")
+        if agent or client:
+            self._save(s)
         self._expire()
         busy = self.in_progress(s.session_id)
         out = []
@@ -446,6 +505,16 @@ class ChannelHub:
             s.last_seen = now()
         note = f"\n\n(answer to {message_id})" if message_id else ""
         msg = self.svc.store.get("channel_msg", message_id) if message_id else None
+        if (
+            msg is not None
+            and msg.get("session_id") not in (None, session_id)
+            and msg.get("state") == "delivered"
+        ):
+            raise PermissionError(
+                f"m{msg.get('num')} was handed to another session; answer only your own messages"
+            )
+        if msg is not None and _norm(msg.get("project", "")) != _norm(rec["project"]):
+            raise PermissionError(f"m{msg.get('num')} belongs to another project")
         if msg is not None and msg.get("kind") == "answer":  # answers need no reply
             self._set(msg, "done")
             return {"note": "that message was an answer to your own ask; nothing to reply"}
@@ -462,6 +531,7 @@ class ChannelHub:
                 self._set(msg, "done")  # frees the session for its next message
         body = text.strip() + note
         mode = rec.get("mode", "push")
+        agent = (s.agent if s else "") or rec.get("agent") or "claude_code"
         return await self.svc.collab.submit_report(
-            rec["task_id"], body, f"claude_code ({mode} session)", images=images
+            rec["task_id"], body, f"{agent} ({mode} session)", images=images
         )

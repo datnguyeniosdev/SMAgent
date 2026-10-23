@@ -58,14 +58,17 @@ def is_connected(repo: Path) -> bool:
         return False
 
 
-def terminal_command(repo: Path) -> str:
+def terminal_command(repo: Path, agent: str = "") -> str:
     agw = Path(sys.executable).parent / "agw"
-    return f"cd {shlex.quote(str(repo))} && {shlex.quote(str(agw))} session"
+    extra = f" --agent {shlex.quote(agent)}" if agent and agent != "claude_code" else ""
+    return f"cd {shlex.quote(str(repo))} && {shlex.quote(str(agw))} session{extra}"
 
 
-def open_in_terminal(repo: Path) -> None:
+def open_in_terminal(repo: Path, agent: str = "") -> None:
     """New Terminal.app window running `agw session` in the repo (macOS asks once for permission)."""
-    cmd = terminal_command(repo).replace("\\", "\\\\").replace('"', '\\"')  # AppleScript string
+    cmd = (
+        terminal_command(repo, agent).replace("\\", "\\\\").replace('"', '\\"')
+    )  # AppleScript string
     script = f'tell application "Terminal"\nactivate\ndo script "{cmd}"\nend tell'
     r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
@@ -73,7 +76,7 @@ def open_in_terminal(repo: Path) -> None:
 
 
 def open_project(root: Path, query: str, live_cwds=(), new: bool = False, token: bool = True,
-                 launch=None) -> tuple[str, list[Path]]:  # fmt: skip
+                 launch=None, agent: str = "") -> tuple[str, list[Path]]:  # fmt: skip
     """-> (status, matches). status: none | many | already_open | opened | opened_connected."""
     hits = find_projects(root, query)
     if not hits:
@@ -93,5 +96,8 @@ def open_project(root: Path, query: str, live_cwds=(), new: bool = False, token:
         # ponytail: assumes the gateway's default address; pass the real one if it ever moves
         setup_repo(repo, "http://127.0.0.1:8000/mcp", token=token)
         status = "opened_connected"
-    (launch or open_in_terminal)(repo)
+    if launch is not None or not agent:
+        (launch or open_in_terminal)(repo)
+    else:
+        open_in_terminal(repo, agent)
     return status, hits

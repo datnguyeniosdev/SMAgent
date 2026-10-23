@@ -83,6 +83,12 @@ uv run agw setup --agents detected
 
 `--agents` takes names, `all` or `detected`. Each file is backed up once (`*.agw-backup`). Add `--remove` to take the gateway entries out again. Telegram `/setup` has the same on/off buttons per agent. Restart the agent afterwards.
 
+With `MCP_REQUIRE_TOKEN=true` each config also gets an `Authorization: Bearer` header that names `AGW_API_TOKEN` (never the value): export it in the agent's environment. The header syntax follows each tool's docs; only OpenCode's was tried on this Mac.
+
+These agents have no loop of their own, so they take Telegram work only while `agw session --agent opencode|codex|antigravity` runs in the repo (it runs the agent once a minute; extra arguments go to the agent, e.g. `-- --auto` for OpenCode). Telegram: `/open p# opencode`.
+
+**What Telegram shows.** Every request between agents (🤝 with ✍️ Answer myself / ❌ Cancel) and its answer (💡); `/asks` lists the open ones. Sessions are announced when they connect (🔌) and leave (⚪), and a queued `/send` says when it finally reaches a session (📬). An agent's question has one button per option, and replying to it answers it. A question or escalation Telegram refuses is reported back to the agent, or retried, instead of being lost.
+
 ### Environments (prod, dev, uat)
 
 Each environment runs beside the others from this folder, with its own settings file, port and data:
@@ -147,7 +153,7 @@ uv run agw dev
 | `uv run agw dev` | OpenCode + gateway together |
 | `uv run agw doctor` | what is configured and reachable (also on Telegram: `/setup`) |
 | `uv run agw open <name>` | open a project folder in a Claude session (Telegram: `/open`) |
-| `agw session` | in a repo: Claude Code that takes work from Telegram (push + pull) |
+| `agw session [--agent opencode\|codex\|antigravity]` | in a repo: Claude Code that takes work from Telegram (push + pull), or another agent run once a minute |
 | `uv run agw serve [--port 8000] [--reload]` | gateway only (REST, Telegram, `/mcp`) |
 | `uv run agw opencode` | `opencode serve` with `OPENCODE_PASSWORD`/`OPENCODE_URL` from `.env` |
 | `uv run agw validate` | validate `config/` |

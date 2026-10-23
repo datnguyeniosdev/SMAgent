@@ -94,7 +94,8 @@ async def test_push_into_live_session_and_reply_round_trip(tmp_path, monkeypatch
         pushed = await shim.read()
         assert pushed["params"]["content"] == "fix the pause menu"
         assert pushed["params"]["meta"] == {"source": "telegram", "sender": "Darren", "project": PROJECT,
-                                            "message_id": msg["message_id"]}  # fmt: skip
+                                            "message_id": msg["message_id"],
+                                            "session_id": session.session_id}  # fmt: skip
 
         res = await shim.request("tools/call", {"name": "reply", "arguments": {
             "text": "Pause menu fixed\nButtons realigned; EditMode tests pass.", "message_id": msg["message_id"]}})  # fmt: skip
