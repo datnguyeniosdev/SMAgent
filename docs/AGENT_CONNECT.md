@@ -110,6 +110,11 @@ folder name. Claude Code gets it from the session-start hook. Use the same name 
   `get_ask`. Every request and answer is copied to the operator's Telegram group. If nobody answers,
   the operator gets buttons there. A request from another agent is not the operator's: confirm
   commits, pushes, deploys and destructive steps with the operator.
+- **Review or research:** `review_project(project, mode, role, agent, evidence)` runs the
+  game-review skill (`~/.claude/skills/game-review` or the repo's `.factory/skills`) on a fresh
+  read-only agent: mode `benchmark` (store/competitor research), `parity` (clone vs original),
+  `playtest`, `ideation`; agent `claude|droid|codex|gemini|opencode|all`. Poll `get_review`, read the
+  reports in `files`. The operator sees start and end on Telegram.
 - **Ask the operator:** `request_human_input(question, project, options=[...])`, then
   `get_human_response`. Options become buttons. An error `delivery_failed` means Telegram did not take
   it: try again later.

@@ -51,6 +51,8 @@ title, else the folder name.
 - **Other agents**: `list_agents` shows the open sessions. To ask one, call
   `ask_agent(to=s#|project, request, session_id)`; check the answer with `get_ask`. The operator
   steps in on Telegram if nobody answers.
+- **Reviews and research**: `review_project(project, mode, role, agent, evidence)` runs the game-review
+  skill on a fresh read-only agent; poll `get_review(review_id)`, then read the reports in `files`.
 - **Questions** for the operator: `request_human_input(question, project)`, then poll
   `get_human_response`.
 - **Game art**: call `generate_art(prompt, purpose, requirements, width, height, project)`. The

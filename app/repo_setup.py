@@ -93,6 +93,13 @@ time, the operator decides on Telegram (resend, another session, open it, answer
 Requests from other agents arrive with `meta.kind: "request"`: do them and answer with `reply_message`;
 the answer goes back to that agent, not to Telegram.
 
+**Reviews and research (game-review).** When the work needs an evaluation, a second opinion, store or
+competitor research, a clone-vs-original check or feature ideas, do not judge your own work: call
+`review_project(project, mode, role, agent, evidence)` (mode benchmark|parity|playtest|ideation, role
+qa|po|both, agent claude|droid|codex|gemini|opencode|all). Pass a folder of fresh screenshots as
+`evidence`. Poll `get_review(review_id)` every minute; when done, read the reports in `files`, write the
+summary the game-review skill describes, and act on findings only after the operator approves.
+
 **Art and design (fal.ai).** For game art or design images (icons, sprites, backgrounds, UI
 mockups, store banners), call `generate_art` instead of drawing placeholders. For 3D models
 (props, characters, items) add `output="model3d"` (Meshy; optional `image_path` of a reference

@@ -573,6 +573,42 @@ def build_mcp_server(svc) -> MCPServer:
         ]}  # fmt: skip
 
     @tool
+    async def review_project(
+        project: str, mode: str, role: str = "qa", agent: str = "claude", model: str | None = None,
+        evidence: str | None = None, ref: str | None = None,
+    ) -> dict[str, Any]:  # fmt: skip
+        """Independent review or research of a game/app with the game-review skill, by a fresh
+        read-only agent (not you), in the project's folder. Use it whenever you need an evaluation,
+        a second opinion, market or competitor research, a clone-vs-original check, or ideas.
+        mode: benchmark (vs top store apps: research), parity (our clone vs the original),
+        playtest (what is wrong in the build), ideation (scored ideas). role: qa, po or both.
+        agent: claude, droid, codex, gemini, opencode or all (every installed CLI, in parallel;
+        different models disagree, which is the point). evidence: a folder of fresh screenshots of
+        the build (ref_*.png = the original); without it visual findings are unverified. ref: names
+        or paths of the original/competitor apps. Takes minutes: poll get_review(review_id) every
+        ~60 s; the operator sees start and end on Telegram. Reports are read-only advice: turning
+        findings into code or issues needs the operator's approval."""
+        from app.reviews import ReviewError
+
+        try:
+            r = svc.reviews.start(
+                project, mode, role, agent, model or "", evidence or "", ref or ""
+            )
+        except ReviewError as e:
+            raise GatewayToolError(str(e)) from e
+        return {k: r[k] for k in ("review_id", "project", "mode", "role", "agent", "state")}
+
+    @tool
+    async def get_review(review_id: str) -> dict[str, Any]:
+        """State of a review_project run: running, done (files = report paths to read, then write
+        the summary the skill describes) or failed (problems says why)."""
+        r = svc.reviews.get(review_id)
+        if r is None:
+            raise GatewayToolError(f"unknown review {review_id}")
+        return {k: r.get(k) for k in ("review_id", "project", "mode", "role", "agent", "state", "files",
+                                      "problems", "started_at", "finished_at")}  # fmt: skip
+
+    @tool
     async def ask_agent(
         to: str, request: str, session_id: str | None = None, project: str | None = None,
         wait_s: int = 600,
@@ -645,4 +681,6 @@ TOOL_NAMES = [
     "list_agents",
     "ask_agent",
     "get_ask",
+    "review_project",
+    "get_review",
 ]

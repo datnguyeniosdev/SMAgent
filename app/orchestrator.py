@@ -246,6 +246,9 @@ class Orchestrator:
         from app.asks import AskService
 
         self.asks = AskService(self)  # agent-to-agent requests, operator as fallback
+        from app.reviews import ReviewService
+
+        self.reviews = ReviewService(self)  # game-review skill runs (independent QA/PO, research)
         self.registry = AgentCapabilityRegistry(gateway_cfg, self) if gateway_cfg else None
         self.planner = Planner(
             self.plugins,

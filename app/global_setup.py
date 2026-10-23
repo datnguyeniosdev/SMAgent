@@ -78,7 +78,9 @@ def skill_text() -> str:
         "task in a repo under the projects folder ends (report it with submit_report), when the user "
         "mentions Telegram, a report, a deploy, game art or design images (generate_art, reviewed by the "
         'operator), requests arriving through get_messages or <channel source="agent-gateway-channel"> '
-        "events, or when agent-gateway (mcp__agent-gateway__*) tools are missing after setup.\n"
+        "events, when a game or app needs a review, second opinion, competitor research or ideas "
+        "(review_project runs the game-review skill), or when agent-gateway (mcp__agent-gateway__*) "
+        "tools are missing after setup.\n"
         "---\n\n"
     )
     return front + body + "\n"

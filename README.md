@@ -87,6 +87,8 @@ With `MCP_REQUIRE_TOKEN=true` each config also gets an `Authorization: Bearer` h
 
 These agents have no loop of their own, so they take Telegram work only while `agw session --agent opencode|codex|antigravity` runs in the repo (it runs the agent once a minute; extra arguments go to the agent, e.g. `-- --auto` for OpenCode). Telegram: `/open p# opencode`.
 
+**Reviews and research.** `review_project` runs the game-review skill's `run.sh` in the project's folder (a fresh read-only agent per role/agent, reports in `4_delivery/uat/reviews`), without the gateway's secrets, at most one run per project at a time; `get_review` follows it, and Telegram gets 🔎 at the start and ✅/❌ with the report names at the end. Switch it with `/mcp` like any tool.
+
 **What Telegram shows.** Every request between agents (🤝 with ✍️ Answer myself / ❌ Cancel) and its answer (💡); `/asks` lists the open ones. Sessions are announced when they connect (🔌) and leave (⚪), and a queued `/send` says when it finally reaches a session (📬). An agent's question has one button per option, and replying to it answers it. A question or escalation Telegram refuses is reported back to the agent, or retried, instead of being lost.
 
 ### Environments (prod, dev, uat)
