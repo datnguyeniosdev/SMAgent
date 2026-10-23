@@ -522,7 +522,8 @@ def build_mcp_server(svc) -> MCPServer:
             note = "this session is switched off by the operator (/on to resume); do nothing"
         elif busy:
             note = ("busy: finish the in-progress request(s) and answer them with reply_message first; "
-                    "no new work is handed out until then, so do nothing this round")  # fmt: skip
+                    "no new work is handed out until then, so do nothing this round. If you no longer "
+                    "have that request in mind (a fresh run), in_progress_messages has it: finish it now")  # fmt: skip
         else:
             note = "" if msgs else "no new requests; do nothing"
         return {
@@ -531,6 +532,10 @@ def build_mcp_server(svc) -> MCPServer:
             "closed": sess.closing,
             "busy": bool(busy),
             "in_progress": [m["message_id"] for m in busy],
+            "in_progress_messages": [
+                {"message_id": m["message_id"], "text": m["text"], "meta": m.get("meta", {})}
+                for m in busy
+            ],
             "messages": [
                 {"message_id": m["message_id"], "text": m["text"], "meta": m["meta"]} for m in msgs
             ],

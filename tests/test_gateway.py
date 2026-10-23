@@ -266,7 +266,7 @@ def test_api_attachments_and_tasks(api):
     assert [a["kind"] for a in arts] == ["envelope"]  # result envelope only; nothing executed
     r = api.post("/api/v1/tasks", headers=H, json={"description": "x", "workflow": "code"})
     assert r.status_code == 422 and "WORKSPACE_ROOT" in r.json()["detail"]
-    assert api.post("/api/v1/actions/forged/execute", headers=H).status_code == 409
+    assert api.post("/api/v1/actions/forged/execute", headers=H).status_code == 403  # agents' token
     r = api.post("/api/v1/messages", headers=H, json={"content": "hello"})
     assert r.status_code == 201 and r.json()["task_id"] is None
 

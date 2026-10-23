@@ -74,6 +74,8 @@ class HumanInput(BaseModel):
     task_id: str | None = None
     question: str
     options: list[str] = []
+    project: str | None = None
+    session_id: str | None = None  # who asked: the answer is pushed there too
     status: Literal["pending", "answered", "expired"] = "pending"
     response: str | None = None
     responder: str | None = None
@@ -615,16 +617,25 @@ class CollaborationService:
             telegram_update_id=update_id,
             telegram_message_id=message_id,
         )
-        live = ((self.svc.tasks[task_id].request or {}).get("data") or {}).get("channel_session")
+        req = self.svc.tasks[task_id].request or {}
+        data = req.get("data") or {}
+        live = data.get("channel_session") or data.get("session_id")
+        # an agent's own work: only an agent can act on it, so "recorded" helps nobody
+        external = req.get("source") == "external"
+        visual = self._feedback_route(fb, report) if external and not live else None
+        if visual is not None and visual.id == "acknowledge":
+            visual = None
         hub = getattr(self.svc, "channel", None)
-        if live and hub is not None:  # a live Claude Code session's report: push the reply into it
+        if (
+            (live or external) and visual is None and hub is not None
+        ):  # that session, else the project's
             route, fb.route_id = None, "channel"
             text_for_session = f"Telegram reply from the operator:\n{fb.text}"
             for aid in shot_ids:
                 text_for_session += f"\nScreenshot: {self.svc.artifacts.get(aid).path}"
             _msg, target = hub.send(
                 task_data_project(self.svc.tasks[task_id]), text_for_session,
-                session_id=live, sender=user_id,
+                session_id=live or None, sender=user_id,
             )  # fmt: skip
             fb.follow_up_task_id = None
             fb.live_message_id, fb.delivered = _msg["message_id"], target is not None
@@ -735,6 +746,8 @@ class CollaborationService:
             task_id=task_id,
             question=question.strip(),
             options=list(options)[:6],
+            project=project,
+            session_id=session_id,
             expires_at=now()
             + timedelta(seconds=self.svc.s.action_ttl_s if ttl_s is None else ttl_s),
         )
@@ -785,11 +798,14 @@ class CollaborationService:
             self.store.put("human_input", hi.request_id, hi, task_id=hi.task_id, state=hi.status)
         return hi
 
-    def answer_human_input(self, request_id: str, text: str, responder: str) -> HumanInput:
+    def answer_human_input(
+        self, request_id: str, text: str, responder: str, free: bool = False
+    ) -> HumanInput:
+        """free: a typed reply on Telegram, accepted even when the question offered options."""
         hi = self.get_human_input(request_id)
         if hi.status != "pending":
             raise CollaborationError("duplicate", f"request {request_id} is {hi.status}")
-        if hi.options and text not in hi.options:
+        if hi.options and text not in hi.options and not free:
             raise CollaborationError("invalid", f"answer must be one of {hi.options}")
         hi.status, hi.response, hi.responder, hi.answered_at = (
             "answered",
@@ -801,6 +817,16 @@ class CollaborationService:
         self.store.event(
             "human_input.answered", task_id=hi.task_id, request_id=request_id, by=responder
         )
+        hub = getattr(self.svc, "channel", None)
+        rec = self.store.get("channel_session", hi.session_id or "") or {}
+        project = hi.project or rec.get("project")
+        if hub is not None and project:  # the asker gets it without polling
+            hub.send(
+                project, f"💬 The operator answered your question {request_id}:\n{hi.response}\n\n"
+                "(Continue the work that needed it. It needs no reply.)",
+                session_id=hi.session_id, sender=responder, source="operator",
+                extra={"kind": "answer", "human_input": request_id},
+            )  # fmt: skip
         return hi
 
     # ---- handoffs ----

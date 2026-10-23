@@ -257,13 +257,21 @@ class ChannelHub:
         return "stopped its Claude Code process"
 
     def set_enabled(self, s: LiveSession, on: bool) -> None:
-        s.enabled = on
-        self._save(s)
-        self.svc.store.event("channel.switch", task_id=s.task_id, session=s.session_id, enabled=on)
+        """/on, /off. A window started with `agw session` is a push session plus its pull loop in the
+        same folder: both switch together, or /off would just move the work to the twin."""
+        twins = [s] + [x for x in self.sessions.values()
+                       if x is not s and s.cwd and x.cwd == s.cwd and x.mode != s.mode]  # fmt: skip
+        for x in twins:
+            x.enabled = on
+            self._save(x)
+            self.svc.store.event(
+                "channel.switch", task_id=x.task_id, session=x.session_id, enabled=on
+            )
         if on:
             self._flush_pending(s.project)
         else:
-            self._release(s)  # its queued work moves to another enabled session, or waits
+            for x in twins:
+                self._release(x)  # its queued work moves to another enabled session, or waits
 
     def known_projects(self) -> set[str]:
         return {r["project"] for r in self.svc.store.list("channel_session")} | {
@@ -283,15 +291,20 @@ class ChannelHub:
         return partial[0] if len(partial) == 1 else None
 
     def session_for(self, project: str, exclude: str | None = None) -> LiveSession | None:
-        """Newest deliverable session of the project; push (instant) before pull. exclude: the
-        asking session (an agent's request never goes back to itself)."""
+        """An idle session of the project before a busy one, then push (instant) before pull, then the
+        newest. exclude: the asking session (an agent's request never goes back to itself)."""
         self._prune()
         matches = [
             s
             for s in self.sessions.values()
             if _norm(s.project) == _norm(project) and s.deliverable and s.session_id != exclude
         ]
-        return max(matches, key=lambda s: (s.mode == "push", s.connected_at)) if matches else None
+
+        def rank(s: LiveSession):
+            idle = s.queue.empty() and not self.in_progress(s.session_id)
+            return idle, s.mode == "push", s.connected_at
+
+        return max(matches, key=rank) if matches else None
 
     def undeliverable_reason(self, project: str) -> str:
         """Why nothing can take work for the project right now ("" when no session is open)."""
@@ -429,8 +442,8 @@ class ChannelHub:
         return sorted(msgs, key=lambda m: m.get("created_at", ""))
 
     def cancel(self, ref: str) -> dict | None:
-        """m<num> or message id. Waiting work is dropped; in-progress work is only marked (the
-        session's answer is then labelled cancelled; work already running in Claude is not stopped)."""
+        """m<num> or message id. Waiting work is dropped. In-progress work is marked, and its session is
+        told to stop (a note that needs no reply); an answer that still comes is labelled cancelled."""
         ref = ref.strip()
         num = int(ref[1:]) if re.fullmatch(r"[mM]\d+", ref) else None
         msg = next(
@@ -450,6 +463,13 @@ class ChannelHub:
         self.svc.store.event(
             "channel.cancelled", message_id=msg["message_id"], was=msg["cancelled_from"]
         )
+        if msg["cancelled_from"] == "delivered" and msg.get("session_id"):
+            self.send(
+                msg.get("project", ""),
+                f"🛑 The operator cancelled m{msg.get('num')} ({msg['message_id']}). Stop working on it and "
+                "leave what you changed as it is; say what state it is in only if asked. This needs no reply.",
+                session_id=msg["session_id"], sender="operator", source="operator", extra={"kind": "answer"},
+            )  # fmt: skip
         return msg
 
     @staticmethod

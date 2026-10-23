@@ -7,8 +7,11 @@ without its own secrets, tells the operator on Telegram, and keeps the result fo
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import os
 import re
+import signal
 from html import escape
 from pathlib import Path
 
@@ -39,6 +42,23 @@ class ReviewService:
     def __init__(self, svc):
         self.svc = svc
         self._jobs: dict[str, asyncio.Task] = {}
+        self._procs: dict[str, asyncio.subprocess.Process] = {}
+        self._stopped: set[str] = set()
+
+    def stop(self, review_id: str) -> bool:
+        """The operator's 🛑: end the run (run.sh and the reviewer agents it started)."""
+        proc = self._procs.get(review_id)
+        if proc is None:
+            return False
+        self._stopped.add(review_id)
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGTERM)
+        return True
+
+    def recent(self, n: int = 8) -> list[dict]:
+        return sorted(self.svc.store.list("review"), key=lambda r: r["started_at"], reverse=True)[
+            :n
+        ]
 
     def get(self, review_id: str) -> dict | None:
         r = self.svc.store.get("review", review_id)
@@ -111,13 +131,25 @@ class ReviewService:
         try:
             proc = await asyncio.create_subprocess_exec(
                 *r["argv"], cwd=r["folder"], env=deploy_env(), stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
+                stderr=asyncio.subprocess.STDOUT, start_new_session=True,
             )  # fmt: skip
+            self._procs[r["review_id"]] = proc
             try:
                 out, _ = await asyncio.wait_for(proc.communicate(), TIMEOUT_S)
-            except TimeoutError:
-                proc.kill()
+            except (TimeoutError, asyncio.CancelledError) as e:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGTERM)  # run.sh and the agents it started
+                if isinstance(e, asyncio.CancelledError):
+                    r.update(state="failed", files=[], problems=["interrupted: the gateway stopped"],
+                             finished_at=now().isoformat())  # fmt: skip
+                    self._save(r)
+                    await self._tell(
+                        f"❌ <b>Review interrupted</b> (the gateway stopped) · <code>{r['review_id']}</code>"
+                    )
+                    raise
                 out = b"[fail] timed out"
+            if r["review_id"] in self._stopped:
+                out += b"\n[fail] stopped by the operator"
             text = out.decode(errors="replace")
             files = re.findall(r"^\[ok\] (.+\.md)$", text, re.M)
             failed = re.findall(r"^\[(?:fail|skip)\] (.+)$", text, re.M)
@@ -130,6 +162,7 @@ class ReviewService:
             )
         self._save(r)
         self._jobs.pop(r["review_id"], None)
+        self._procs.pop(r["review_id"], None)
         self.svc.store.event("review.finished", review_id=r["review_id"], state=r["state"])
         names = (
             "\n".join(f"• <code>{escape(Path(f).name)}</code>" for f in r["files"]) or "no report"

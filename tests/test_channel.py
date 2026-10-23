@@ -368,10 +368,11 @@ async def test_one_job_at_a_time_queue_and_cancel(settings, cfg_dir):
     assert [m["message_id"] for m in got] == [m3["message_id"]]  # m2 skipped
 
     await gw.on_cancel(*msg("m3", "cancel"))  # in progress: only marked
-    assert "not interrupted" in answers[-1]
+    assert "told to stop" in answers[-1]
     rep = await hub.reply(s.session_id, "done third", m3["message_id"])
     assert "which was cancelled on Telegram" in rep.text
-    assert hub.open_messages() == []
+    [stop] = hub.open_messages()  # the session was told to stop; a note, no reply needed
+    assert stop["kind"] == "answer" and "cancelled m3" in stop["text"]
     await gw.on_cancel(*msg("m9", "cancel"))
     assert "Usage: /cancel" in answers[-1]
 

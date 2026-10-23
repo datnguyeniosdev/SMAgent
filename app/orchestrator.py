@@ -1754,6 +1754,10 @@ class Orchestrator:
             raise Rejected("approval expired", expired=True) from e
         finally:
             self._approvals.pop(approval_id, None)
+            if (self.store.get("approval", approval_id) or {}).get("state") == "pending":
+                rec.update(state="cancelled")  # the step was cancelled or the gateway stopped
+                self.store.put("approval", approval_id, rec, task_id=task.task_id, run_id=run_id,
+                               state="cancelled")  # fmt: skip
             if (
                 not self._approvals_pending(task.task_id)
                 and task.state == TaskState.waiting_for_approval
@@ -1893,6 +1897,12 @@ class Orchestrator:
 
     async def recover(self) -> list[dict]:
         """Resume interrupted tasks. Non-idempotent in-flight steps become unknown, never replayed."""
+        for a in self.store.list(
+            "approval", states=["pending"]
+        ):  # their step died with the process
+            a["state"] = "expired"
+            self.store.put("approval", a["approval_id"], a, task_id=a.get("task_id"), run_id=a.get("run_id"),
+                           state="expired")  # fmt: skip
         report = []
         for body in self.store.list("task"):
             task = Task.model_validate(body)

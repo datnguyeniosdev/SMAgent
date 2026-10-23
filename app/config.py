@@ -30,6 +30,9 @@ class Settings(BaseSettings):
 
     # REST control API. Control endpoints are disabled when unset.
     api_token: SecretStr | None = None
+    # Operator decisions over REST (approve, execute an action, answer a question). Agents hold
+    # API_TOKEN, so it cannot be enough for these; unset = Telegram only.
+    operator_token: SecretStr | None = None
     # false: /mcp accepts token-less requests, but only from this machine (loopback client, local
     # Host header, no foreign Origin), so local Claude Code sessions connect without AGW_API_TOKEN.
     mcp_require_token: bool = True
@@ -181,6 +184,7 @@ class Settings(BaseSettings):
             for s in (
                 self.telegram_bot_token,
                 self.api_token,
+                self.operator_token,
                 self.openai_api_key,
                 self.deepseek_api_key,
                 self.opencode_password,

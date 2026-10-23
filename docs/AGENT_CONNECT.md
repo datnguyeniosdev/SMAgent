@@ -102,7 +102,9 @@ folder name. Claude Code gets it from the session-start hook. Use the same name 
   every minute with a recurring job (the hook asks for it), plus a 10-minute check that the session still reaches the local MCP servers (it never starts the
   gateway; if the tools are gone it asks for `/mcp` reconnect). Other agents take work while
   `agw session --agent <you>` runs in the repo (Telegram: `/open p# <you>`), or when the user says to
-  check Telegram. Answer only messages handed to your own session_id.
+  check Telegram. Answer only messages handed to your own session_id. `busy` means you still owe an
+  answer; a fresh run finds that request's text in `in_progress_messages`. Notes with
+  `meta.kind == "answer"` (answers to your questions, "the operator cancelled m#") need no reply.
 - **Finish a task:** `submit_report(project, text, agent_status)`: a title line plus at most 5 short
   bullets (changed / validated / not done), no logs. Screenshots: pass `image_paths` (absolute paths of
   PNG/JPEG/WebP/GIF files); `reply_message` and the channel `reply` tool take them too.

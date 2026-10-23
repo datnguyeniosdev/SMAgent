@@ -425,7 +425,8 @@ async def test_external_report_without_task_and_feedback_readback(settings, cfg_
         fb = await orch.collab.submit_feedback(
             text="also add a sound toggle", user_id="11", source="api", report_id=rep["report_id"]
         )
-        await wait_done(orch, orch.tasks[fb.follow_up_task_id])
+        # an agent's own report: the reply waits for that project's agent (no gateway follow-up task)
+        assert fb.route_id == "channel" and fb.follow_up_task_id is None and fb.delivered is False
         res = (await c.call_tool("get_task_result", {"task_id": task.task_id})).structured_content
         assert [f["text"] for f in res["feedback"]] == ["also add a sound toggle"]
 
@@ -1056,7 +1057,7 @@ async def test_single_group_mode_report_and_reply(settings, cfg_dir):
     await gw.on_discussion(m, **kw)
     assert [f.text for f in orch.collab.feedback_for(t.task_id)] == ["make the buttons bigger"]
     assert len(m.replies) == 1 and m.replies[0].startswith("💬 <b>FEEDBACK</b> · #2048")
-    assert "Recorded" in m.replies[0] and "ref <code>fb_" in m.replies[0]  # one threaded ack
+    assert "Queued" in m.replies[0] and "ref <code>fb_" in m.replies[0]  # one threaded ack
 
 
 def fmt_plain(html):
@@ -1135,7 +1136,7 @@ async def test_photo_reply_attaches_screenshots_to_feedback(settings, cfg_dir, m
         await gw.on_album_part(p)
     await asyncio.sleep(0.05)
     fb2 = orch.collab.feedback_for(t.task_id)[-1]
-    assert fb2.text == "looks off" and len(fb2.artifact_ids) == 2 and fb2.route_id == "acknowledge"
+    assert fb2.text == "looks off" and len(fb2.artifact_ids) == 2 and fb2.route_id == "channel"
     n_before = len(orch.collab.feedback_for(t.task_id))
 
     # an unreadable "photo" is rejected before anything is stored

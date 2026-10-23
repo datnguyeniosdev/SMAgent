@@ -258,7 +258,7 @@ def reload_providers(orch) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
-    setup_logging(settings.log_level, settings.secret_values())
+    setup_logging(settings.log_level, settings.secret_values(), settings.data_dir / "agw.log")
     logging.getLogger("uvicorn.access").addFilter(_QuietProbes())
     orch = build(settings)
     app.state.orch = orch
@@ -326,6 +326,15 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             log.warning("could not remove the telegram webhook: %s", type(e).__name__)
         await asyncio.gather(*app.state.webhook_tasks, return_exceptions=True)
+    # deploys and reviews: stop their processes and report "interrupted" while Telegram still works
+    jobs = [*getattr(orch.notifier, "_deploy_tasks", ()), *orch.reviews._jobs.values()]
+    for t in jobs:
+        t.cancel()
+    if jobs:
+        try:
+            await asyncio.wait_for(asyncio.gather(*jobs, return_exceptions=True), 15)
+        except TimeoutError:
+            log.warning("deploy/review jobs did not stop within 15 s")
     if hasattr(orch.notifier, "bot"):
         await orch.notifier.bot.session.close()  # aiohttp session of the Telegram bot
     mcp_stop.set()
@@ -362,6 +371,25 @@ def require_token(
 
 
 Auth = Annotated[str, Depends(require_token)]
+
+
+def require_operator(
+    request: Request, creds: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)]
+) -> str:
+    """Approve / execute / answer: decisions the operator makes, never the agents (they hold API_TOKEN)."""
+    token = request.app.state.settings.operator_token
+    if token is None:
+        raise HTTPException(
+            403, "operator decisions are made on Telegram (set OPERATOR_TOKEN to allow them here)"
+        )
+    if creds is None or not secrets.compare_digest(
+        creds.credentials.encode(), token.get_secret_value().encode()
+    ):
+        raise HTTPException(401, "invalid operator token")
+    return "operator"
+
+
+Operator = Annotated[str, Depends(require_operator)]
 Orch = Annotated[Orchestrator, Depends(orch)]
 
 
@@ -508,7 +536,7 @@ class DecisionIn(BaseModel):
 
 
 @app.post("/api/v1/approvals/{approval_id}")
-async def decide(approval_id: str, body: DecisionIn, actor: Auth, o: Orch):
+async def decide(approval_id: str, body: DecisionIn, actor: Operator, o: Orch):
     return {"result": o.decide_approval(approval_id, body.approve, actor)}
 
 
@@ -616,7 +644,7 @@ async def post_message(body: MessageIn, actor: Auth, o: Orch):
 
 
 @app.post("/api/v1/actions/{action_id}/execute")
-async def execute_action(action_id: str, actor: Auth, o: Orch):
+async def execute_action(action_id: str, actor: Operator, o: Orch):
     return {"result": await o.apply_action(action_id, actor)}
 
 
@@ -787,7 +815,7 @@ async def human_input_get(request_id: str, _: Auth, o: Orch):
 
 
 @app.post("/api/v1/human-input/{request_id}/answer")
-async def human_input_answer(request_id: str, body: AnswerIn, actor: Auth, o: Orch):
+async def human_input_answer(request_id: str, body: AnswerIn, actor: Operator, o: Orch):
     from app.collaboration import CollaborationError
 
     try:
@@ -826,6 +854,16 @@ def _local_only(request: Request) -> None:
     headers = {k.lower().encode(): v.encode() for k, v in request.headers.items()}
     if not _local_request(request.scope, headers):
         raise HTTPException(403, "local requests only")
+
+
+@app.get("/api/v1/channel/peek", include_in_schema=False)
+async def channel_peek(request: Request, project: str, agent: str, cwd: str = ""):
+    """`agw session --agent X`: keep its pull session listed and say whether there is anything to do,
+    so the agent CLI (a paid model run) starts only when there is work."""
+    _local_only(request)
+    s, _, busy = request.app.state.orch.channel.pull(project, None, cwd, 0, agent, "cli")
+    return {"closing": s.closing, "enabled": s.enabled,
+            "work": s.enabled and not s.closing and (bool(busy) or not s.queue.empty())}  # fmt: skip
 
 
 @app.get("/api/v1/channel/stream", include_in_schema=False)

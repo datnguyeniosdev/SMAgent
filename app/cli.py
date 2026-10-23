@@ -435,12 +435,31 @@ def cmd_agent_loop(args) -> int:
     base = AGENT_RUN[args.agent]
     if shutil.which(base[0]) is None:
         raise SystemExit(f"{base[0]} not found on PATH")
+    import urllib.parse
+    import urllib.request
+
+    from app.config import ENV_PORTS, env_name
+
     project = project_for(Path.cwd())
     prompt = loop_prompt(project, "cli", args.agent)
-    print(f"{args.agent} takes work for {project!r} once a minute. Ctrl-C stops it.")
+    query = urllib.parse.urlencode(
+        {"project": project, "agent": args.agent, "cwd": str(Path.cwd())}
+    )
+    url = f"http://127.0.0.1:{ENV_PORTS[env_name()]}/api/v1/channel/peek?{query}"
+    print(f"{args.agent} takes work for {project!r}: checked every minute, run only when there is work. "
+          "Ctrl-C stops it.")  # fmt: skip
     try:
         while True:
-            subprocess.run([*base, *args.claude_args, prompt], env=_clean_env(), check=False)  # noqa: S603
+            try:
+                with urllib.request.urlopen(url, timeout=10) as r:  # noqa: S310 - fixed local URL
+                    state = json.loads(r.read())
+            except OSError:
+                state = {"work": False}  # gateway down: try again next minute
+            if state.get("closing"):
+                print("closed by the operator (/close)")
+                return 0
+            if state.get("work"):
+                subprocess.run([*base, *args.claude_args, prompt], env=_clean_env(), check=False)  # noqa: S603
             time.sleep(60)
     except KeyboardInterrupt:
         return 0

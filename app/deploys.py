@@ -9,8 +9,10 @@ the outcome (exit code) is reported with report_deployment and the full log is k
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
+import signal
 import subprocess
 from pathlib import Path
 
@@ -20,6 +22,7 @@ ENVS = ("uat", "prod")
 TIMEOUT_S = 3 * 3600  # a cold engine import plus two platform builds can take long
 LINKED = ("4_delivery/deploy/.env.deploy",)  # gitignored, needed by the script
 _running: set[str] = set()
+_procs: dict[str, asyncio.subprocess.Process] = {}  # repo -> its deploy.sh, for /deploy stop
 
 
 def deploy_env(environ: dict | None = None) -> dict:
@@ -100,8 +103,47 @@ def prepare(repo: Path, branch: str) -> tuple[Path, str]:
     return wt, _git(wt, "rev-parse", "--short", "HEAD")
 
 
+def lock_file(repo: Path) -> Path:
+    """Holds the running deploy.sh's pid, so a deploy left running across a gateway restart still
+    blocks a second one in the same worktree."""
+    return worktree_dir(repo).parent / f"{repo.name}.pid"
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def orphan_pid(repo: Path) -> int | None:
+    try:
+        pid = int(lock_file(repo).read_text().strip())
+    except (OSError, ValueError):
+        return None
+    return pid if _alive(pid) else None
+
+
 def busy(repo: Path) -> bool:
-    return str(repo) in _running
+    return str(repo) in _running or orphan_pid(repo) is not None
+
+
+def stop(repo: Path) -> bool:
+    """/deploy stop: end the project's deploy (this gateway's, or one left from before a restart)."""
+    proc = _procs.get(str(repo))
+    pid = proc.pid if proc is not None else orphan_pid(repo)
+    if pid is None:
+        return False
+    try:
+        os.killpg(pid, signal.SIGTERM)  # the script and the builds it started
+    except (ProcessLookupError, PermissionError):
+        return False
+    if proc is None:
+        lock_file(repo).unlink(missing_ok=True)
+    return True
 
 
 async def run(repo: Path, env: str, branch: str, dry_run: bool, log_dir: Path) -> dict:
@@ -127,14 +169,22 @@ async def run(repo: Path, env: str, branch: str, dry_run: bool, log_dir: Path) -
         environ = deploy_env()
         with log.open("wb") as out:
             proc = await asyncio.create_subprocess_exec(
-                "bash", *args, cwd=wt, stdout=out, stderr=subprocess.STDOUT, env=environ
-            )
+                "bash", *args, cwd=wt, stdout=out, stderr=subprocess.STDOUT, env=environ,
+                start_new_session=True,  # its own process group: stop/timeout end the builds too
+            )  # fmt: skip
+            _procs[str(repo)] = proc
+            lock_file(repo).write_text(str(proc.pid))
             try:
                 rc = await asyncio.wait_for(proc.wait(), TIMEOUT_S)
-            except TimeoutError:
-                proc.kill()
+            except (TimeoutError, asyncio.CancelledError) as e:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGTERM)
                 await proc.wait()
+                if isinstance(e, asyncio.CancelledError):
+                    raise  # the gateway is stopping: the caller reports "interrupted"
                 error = f"timed out after {TIMEOUT_S // 60} min"
+            if rc in (-signal.SIGTERM, 128 + signal.SIGTERM) and not error:
+                error = "stopped from Telegram (/deploy stop)"
         if rc != 0 and not error:
             lines = [ln for ln in log.read_text(errors="replace").splitlines() if ln.strip()]
             error = (lines[-1] if lines else f"exit code {rc}")[:300]
@@ -143,3 +193,5 @@ async def run(repo: Path, env: str, branch: str, dry_run: bool, log_dir: Path) -
                 "seconds": int(loop.time() - start)}  # fmt: skip
     finally:
         _running.discard(str(repo))
+        _procs.pop(str(repo), None)
+        lock_file(repo).unlink(missing_ok=True)

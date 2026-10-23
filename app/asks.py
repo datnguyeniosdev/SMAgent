@@ -34,6 +34,7 @@ class AskError(ValueError):
 class AskService:
     def __init__(self, svc):
         self.svc = svc
+        self.started = now()  # after a restart, sessions come back only as they poll again
 
     @property
     def hub(self):
@@ -217,6 +218,14 @@ class AskService:
             doing = f"; still busy with m{busy[0].get('num')}" if busy else ""
             since = datetime.fromisoformat(a["sent_at"]).astimezone().strftime("%H:%M")
             return f"s{target.num} has had it since {since}, no answer (last seen {seen} min ago{doing})"
+        msg = self.svc.store.get("channel_msg", a.get("message_id") or "") or {}
+        if (
+            a["state"] == "delivered"
+            and target is None
+            and msg.get("state") == "delivered"
+            and not late
+        ):
+            return None  # B has it and its lease runs: B may just not have polled since a restart
         best = hub.session_for(a["to_project"])
         if best is not None:  # someone can take it now (e.g. a session opened): deliver there
             if a["state"] == "queued" or target is None or not target.deliverable:
@@ -230,6 +239,10 @@ class AskService:
 
     async def check(self) -> list[str]:
         """One watchdog round; returns the ask ids escalated now."""
+        from app.channel import PULL_TTL
+
+        if now() - self.started < PULL_TTL:
+            return []  # just restarted: a session that is gone may only not have polled yet
         self.hub._expire()  # push-only projects too: stale deliveries go back to the inbox
         escalated = []
         for a in self.open_asks():

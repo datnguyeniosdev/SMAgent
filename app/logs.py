@@ -45,11 +45,20 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(data, default=str)
 
 
-def setup_logging(level: str, secrets: list[str]) -> None:
+def setup_logging(level: str, secrets: list[str], log_file=None) -> None:
+    """log_file: also keep the log on disk (var/agw.log, 5 x 5 MB), so it outlives the terminal."""
+    from logging.handlers import RotatingFileHandler
+
     register_secrets(secrets)
-    handler = logging.StreamHandler()
-    handler.setFormatter(JsonFormatter())
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    if log_file is not None:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(
+            RotatingFileHandler(log_file, maxBytes=5_000_000, backupCount=5, encoding="utf-8")
+        )
+    for h in handlers:
+        h.setFormatter(JsonFormatter())
     root = logging.getLogger()
-    root.handlers[:] = [handler]
+    root.handlers[:] = handlers
     root.setLevel(level)
     logging.getLogger("httpx").setLevel(logging.WARNING)  # httpx logs full URLs incl. bot token

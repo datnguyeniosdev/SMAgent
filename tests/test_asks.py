@@ -70,6 +70,7 @@ async def test_unreachable_agent_is_escalated_with_buttons_and_the_operator_answ
 ):
     monkeypatch.setattr(asks_mod, "UNREACHABLE", timedelta(0))
     orch, _ = make(settings, cfg_dir, [])
+    orch.asks.started -= timedelta(hours=1)  # past the restart grace
     gw = gateway(orch)
     hub = orch.channel
     a, _, _ = hub.pull(A, None)
@@ -147,3 +148,16 @@ async def test_buttons_resend_retarget_cancel_and_late_session(settings, cfg_dir
     await gw.on_ask_button(press(f"k:resend:{ask['ask_id']}"))
     assert alerts[-1] == "Already cancelled."
     assert b2.num and DISCUSSION  # sessions stay listed
+
+
+async def test_no_escalation_right_after_a_restart(settings, cfg_dir, monkeypatch):
+    monkeypatch.setattr(asks_mod, "UNREACHABLE", timedelta(0))
+    orch, _ = make(settings, cfg_dir, [])
+    gateway(orch)
+    hub = orch.channel
+    a, _, _ = hub.pull(A, None)
+    hub.disconnect(hub.connect("cc_b", B, "/w/k09"))
+    orch.asks.create(B, "ping", from_session=a.session_id)
+    assert await orch.asks.check() == []  # sessions have not polled again yet
+    orch.asks.started -= timedelta(hours=1)
+    assert len(await orch.asks.check()) == 1

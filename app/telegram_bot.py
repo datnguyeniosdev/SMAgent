@@ -59,6 +59,7 @@ HELP = (
 /send &lt;s#|p#|project&gt; &lt;text&gt; — give an agent a request
 /queue — requests waiting or in progress (m1…) · /cancel &lt;m#&gt;
 /asks — open requests between agents (every one is also copied here as 🤝)
+/reviews — game-review runs started by agents (review_project), with 🛑 stop
 /open &lt;folder|p#&gt; [opencode|codex|antigravity] [new] — open an agent session (default Claude;
   /open alone: buttons)
 /close &lt;s#&gt; · /off &lt;s#&gt; · /on &lt;s#&gt; — close a session, or stop/resume giving it work
@@ -72,6 +73,7 @@ Reply to any gateway message (text or photos) to give feedback or answer it.
 /providers — model providers shared by every project: add one, its models · /addmodel · /findmodel
 /plan &lt;p#&gt; — which models a project uses for each workflow role (designer, implementer, …)
 /deploy — run a project's deploy script: project → UAT/PROD → branch → dry run or real, confirmed
+  (a running deploy shows 🛑 Stop there)
 
 <b>More</b> (not in the / menu)
 /task · /status · /report · /steps · /retry · /stop · /answer · /feedback · /approvals ·
@@ -456,6 +458,7 @@ class TelegramGateway:
         r.message(Command("on", "off"))(self.on_switch)
         r.message(Command("queue"))(self.on_queue)
         r.message(Command("asks"))(self.on_asks)
+        r.message(Command("reviews"))(self.on_reviews)
         r.message(Command("open"))(self.on_open)
         r.message(Command("close"))(self.on_close)
         r.message(Command("cancel"))(self.on_cancel)
@@ -469,6 +472,7 @@ class TelegramGateway:
         r.callback_query(F.data.startswith("o:"))(self.on_open_button)
         r.callback_query(F.data.startswith("k:"))(self.on_ask_button)
         r.callback_query(F.data.startswith("h:"))(self.on_question_button)
+        r.callback_query(F.data.startswith("rv:"))(self.on_review_button)
         r.callback_query(F.data.startswith("m:"))(self.on_menu_button)
         r.callback_query(F.data.startswith("g:"))(self.on_setup_button)
         r.callback_query(F.data.startswith("t:"))(self.on_mcp_button)
@@ -715,8 +719,8 @@ class TelegramGateway:
             await m.answer("Usage: /cancel &lt;m#&gt; (open requests: /queue)")
             return
         was = msg.get("cancelled_from")
-        note = ("it was already being worked on: the session is not interrupted, its answer will be "
-                "marked cancelled") if was == "delivered" else "it will not be delivered"  # fmt: skip
+        note = ("it was already being worked on: the session was told to stop (a late answer is "
+                "marked cancelled)") if was == "delivered" else "it will not be delivered"  # fmt: skip
         await m.answer(f"🗑 <b>m{msg.get('num')}</b> cancelled · {escape(note)}")
 
     async def on_open(self, m: TgMessage, command: CommandObject):
@@ -851,6 +855,34 @@ class TelegramGateway:
             ("<b>Open agent requests</b>\n" + "\n".join(rows))
             if rows
             else "No open agent requests."
+        )
+
+    async def on_reviews(self, m: TgMessage):
+        """/reviews: the latest review_project runs; running ones have a stop button."""
+        if not self._authorized_msg(m):
+            return
+        rows = self.orch.reviews.recent()
+        if not rows:
+            await m.answer("No reviews yet. Agents start them with review_project.")
+            return
+        icon = {"running": "⏳", "done": "✅", "failed": "❌"}
+        text = "<b>Reviews</b>\n" + "\n".join(
+            f"{icon.get(r['state'], '·')} <code>{r['review_id']}</code> {escape(r['project'])} · "
+            f"{r['role']}/{r['mode']} on {escape(r['agent'])}" for r in rows
+        )  # fmt: skip
+        kb = [[InlineKeyboardButton(text=f"🛑 Stop {r['review_id']}", callback_data=f"rv:stop:{r['review_id']}")]
+              for r in rows if r["state"] == "running"]  # fmt: skip
+        await m.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb) if kb else None)
+
+    async def on_review_button(self, q: CallbackQuery):
+        chat_id = q.message.chat.id if q.message else None
+        if not self.authorized(q.from_user.id, chat_id):
+            await q.answer("Not authorized.", show_alert=True)
+            return
+        review_id = q.data.split(":")[2]
+        ok = self.orch.reviews.stop(review_id)
+        await q.answer(
+            "Stopping; the result follows." if ok else "It is not running.", show_alert=not ok
         )
 
     async def on_asks(self, m: TgMessage):
@@ -1478,8 +1510,12 @@ class TelegramGateway:
         if not repos:
             await answer("No project has 4_delivery/deploy/deploy.sh.")
             return
+        from app import deploys
+
         kb = [[InlineKeyboardButton(text=f"🚀 {detect_project(r)[:50]}", callback_data=f"d:p:{i}")]
               for i, r in enumerate(repos)]  # fmt: skip
+        kb += [[InlineKeyboardButton(text=f"🛑 Stop deploy · {detect_project(r)[:40]}", callback_data=f"d:stop:{i}")]
+               for i, r in enumerate(repos) if deploys.busy(r)]  # fmt: skip
         await answer(
             "🚀 <b>DEPLOY</b> · pick a project:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
@@ -1497,6 +1533,16 @@ class TelegramGateway:
         await q.answer()
         Btn, answer = InlineKeyboardButton, q.message.answer  # noqa: N806
         parts = q.data.split(":")
+        if parts[1] == "stop":
+            repos = self._deploy_repos()
+            repo = (
+                repos[int(parts[2])] if parts[2].isdigit() and int(parts[2]) < len(repos) else None
+            )
+            ok = repo is not None and deploys.stop(repo)
+            name = detect_project(repo) if repo else "?"
+            await answer(f"🛑 Stopping the deploy of {escape(name)}; its result follows." if ok
+                         else f"No deploy of {escape(name)} is running.")  # fmt: skip
+            return
         if parts[1] == "go":  # confirmed: the plan was fixed when the confirmation was shown
             job = self._deploy_wait.pop(parts[2], None)
             if job is None:
@@ -1596,6 +1642,12 @@ class TelegramGateway:
         async def work():
             try:
                 r = await deploys.run(repo, env, branch, dry, self.s.data_dir / "deploys")
+            except asyncio.CancelledError:  # the gateway is stopping: say so before going
+                await asyncio.shield(self.orch.collab.report_deployment(Deployment(
+                    project=name, environment=env, status="failed", notes=notes, source="telegram",
+                    error="interrupted: the gateway stopped during the deploy; run it again",
+                )))  # fmt: skip
+                raise
             except Exception as e:  # noqa: BLE001 - reported, never lost silently
                 log.exception("deploy of %s crashed", repo.name)
                 r = {
@@ -1975,7 +2027,7 @@ class TelegramGateway:
             from app.collaboration import CollaborationError
 
             try:  # a reply to an agent's question is the answer
-                self.orch.collab.answer_human_input(ids["hin"], text, str(user_id))
+                self.orch.collab.answer_human_input(ids["hin"], text, str(user_id), free=True)
                 await m.reply(f"✅ Answered <code>{ids['hin']}</code>.")
             except CollaborationError as e:
                 await m.reply(f"❌ {escape(str(e))}")
