@@ -455,6 +455,10 @@ class CollaborationService:
         task = self.svc.tasks[report.task_id]
         # sent in full (agents keep it short); the bot splits anything over Telegram's limit
         title, _, rest = report.text.strip().partition("\n")
+        if (
+            len(title) > 120
+        ):  # a one-line answer is not a title (titles are cut): all of it goes below
+            title, rest = "", report.text.strip()
         vi = fmt.STATUS_VI
         meta = [f"từ {fmt.escape(report.source)}",
                 f"gateway: {vi.get(report.verified_status, report.verified_status)}"]  # fmt: skip
@@ -462,7 +466,7 @@ class CollaborationService:
             meta.insert(1, f"agent: {fmt.escape(vi.get(report.agent_status, report.agent_status))}")
         if report.artifact_ids:
             meta.append(f"📎 {len(report.artifact_ids)}")
-        body = fmt.escape(rest.strip())
+        body = f"<blockquote>{fmt.escape(rest.strip())}</blockquote>" if rest.strip() else ""
         if report.pending_actions:
             body += "\n\n⚠️ " + fmt.escape("; ".join(report.pending_actions))
         html = self.svc.msg(

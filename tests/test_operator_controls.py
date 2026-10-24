@@ -127,3 +127,14 @@ async def test_html_escaped_project_name_reaches_the_same_session(settings, cfg_
         got = (await c.call_tool("get_messages", args)).structured_content
     assert got["session_id"] == first.structured_content["session_id"]
     assert [m["message_id"] for m in got["messages"]] == [msg["message_id"]]
+
+
+async def test_one_line_answer_is_shown_in_full_in_a_quote_block(settings, cfg_dir):
+    """Codex answers in one long line: it must not become a title cut at 120 characters."""
+    orch, _ = make(settings, cfg_dir, [])
+    gw = gateway(orch)
+    task = orch.register_external("Telegram request", "mcp", A)
+    text = "Dạ, " + "em đang chạy vòng theo dõi Telegram cho dự án Coinlets " * 4 + "ạ."
+    await orch.collab.submit_report(task_id=task.task_id, text=text, source="codex (pull session)")
+    sent = gw.bot.sent[-1][1]["text"]
+    assert "<blockquote>" in sent and text.replace("&", "&amp;") in sent and "…" not in sent
