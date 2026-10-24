@@ -259,6 +259,12 @@ def cmd_dev(args) -> int:
         return 0
     procs = []
     env = dict(os.environ)
+    from app.config import env_name
+
+    if env_name() == "prod":
+        from app.codex_relay import resume_all
+
+        resume_all()  # Codex desktop relays (they keep running across gateway restarts)
     if s.telegram_mode == "webhook" and not s.telegram_webhook_url:
         tunnel, url = start_tunnel(args.port)
         procs.append(tunnel)

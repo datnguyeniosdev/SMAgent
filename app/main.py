@@ -866,7 +866,8 @@ async def channel_peek(
     _local_only(request)
     s, _, busy = request.app.state.orch.channel.pull(project, None, cwd, 0, agent, client)
     queued = s.enabled and not s.closing and not s.queue.empty()
-    return {"closing": s.closing, "enabled": s.enabled, "queued": queued,
+    nxt = s.queue._queue[0]["message_id"] if queued else None  # ponytail: asyncio.Queue internals
+    return {"closing": s.closing, "enabled": s.enabled, "queued": queued, "next": nxt,
             "work": queued or (s.enabled and not s.closing and bool(busy))}  # fmt: skip
 
 

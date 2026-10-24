@@ -1,7 +1,9 @@
 """Codex desktop has no loop of its own. A SessionStart hook (installed by `agw setup --agents codex`)
 starts one relay per project folder: every minute it asks the gateway about that folder's Codex session
 (which keeps it listed) and pushes new Telegram work into the open desktop thread with `codex queue`.
-SessionEnd stops it. State: var/codex-relays/<folder hash>.json = {"thread": ..., "pid": ...}."""
+The relay outlives SessionEnd (work waits in the thread until it is opened again) and stops when the
+thread is deleted or the operator closes the session; `agw dev` restarts relays after a reboot.
+State: var/codex-relays/<folder hash>.json = {"thread": ..., "pid": ..., "cwd": ...}."""
 
 from __future__ import annotations
 
@@ -9,7 +11,6 @@ import hashlib
 import json
 import os
 import shutil
-import signal
 import subprocess
 import sys
 import time
@@ -22,7 +23,6 @@ CODEX_APP_CLI = (
     "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
 )
 RELAYS = Path(__file__).resolve().parents[1] / "var" / "codex-relays"
-REPUSH_S = 600  # ponytail: same work is pushed again after 10 min, not tracked per message
 
 
 def codex_cli() -> str | None:
@@ -48,24 +48,10 @@ def _alive(pid) -> bool:
         return False
 
 
-def hook(event: dict) -> dict | None:
-    """SessionStart / SessionEnd from Codex. Returns the SessionStart output (context for Codex)."""
-    from app.projects import project_for
-
-    cwd, thread = event.get("cwd") or os.getcwd(), event.get("session_id")
-    project = project_for(Path(cwd))
-    if not project or not thread:
-        return None
+def _start(cwd: str, thread: str) -> None:
+    """Record the folder's thread and run its relay unless one is running."""
     path = state_file(cwd)
-    data = _read(path)
-    if event.get("hook_event_name") == "SessionEnd":
-        if data.get("thread") == thread:
-            if _alive(data.get("pid")):
-                os.kill(int(data["pid"]), signal.SIGTERM)
-            path.unlink(missing_ok=True)
-        return None
-    RELAYS.mkdir(parents=True, exist_ok=True)
-    data["thread"] = thread  # the newest thread of this folder gets the work
+    data = {**_read(path), "thread": thread, "cwd": cwd}
     if not _alive(data.get("pid")):
         agw = Path(sys.executable).parent / "agw"
         with open(path.with_suffix(".log"), "a") as log:
@@ -74,6 +60,32 @@ def hook(event: dict) -> dict | None:
                 stderr=log, start_new_session=True,
             ).pid  # fmt: skip
     path.write_text(json.dumps(data))
+
+
+def resume_all() -> None:
+    """`agw dev`: restart the relays that are not running (e.g. after a reboot)."""
+    from app.projects import repo_for
+
+    for path in RELAYS.glob("*.json") if RELAYS.is_dir() else []:
+        data = _read(path)
+        cwd = data.get("cwd")
+        if cwd and data.get("thread") and not _alive(data.get("pid")) and repo_for(Path(cwd)):
+            _start(cwd, data["thread"])
+
+
+def hook(event: dict) -> dict | None:
+    """SessionStart / SessionEnd from Codex. Returns the SessionStart output (context for Codex)."""
+    from app.projects import project_for
+
+    cwd, thread = event.get("cwd") or os.getcwd(), event.get("session_id")
+    project = project_for(Path(cwd))
+    if not project or not thread:
+        return None
+    if event.get("hook_event_name") == "SessionEnd":
+        # the relay stays: work waits in the thread (codex queue) until it is opened again
+        return None
+    RELAYS.mkdir(parents=True, exist_ok=True)
+    _start(cwd, thread)  # the newest thread of this folder gets the work
     context = (
         f"agent-gateway: this folder is the project '{project}'; Telegram work for it reaches this "
         f"thread as a message asking you to call get_messages (agent 'codex', client 'app', cwd "
@@ -100,13 +112,11 @@ def relay(cwd: str, port: int, once: bool = False) -> int:
     # the exact session: Codex desktop otherwise drops cwd or reuses an old session_id
     sid = ChannelHub.pull_id(project, "codex", cwd)
     prompt = loop_prompt(project, "app", "codex").replace("this folder", cwd)
-    prompt, pushed = (
-        prompt.replace("reusing the session_id it returned before", f"session_id '{sid}'"),
-        0.0,
-    )
+    prompt = prompt.replace("reusing the session_id it returned before", f"session_id '{sid}'")
+    pushed = None  # the queued message last pushed: each new one is pushed once
     while True:
         data = _read(path)
-        if not once and data.get("pid") != os.getpid():  # stopped (SessionEnd) or replaced
+        if not once and data.get("pid") != os.getpid():  # replaced by a newer relay
             return 0
         try:
             with urllib.request.urlopen(url, timeout=10) as r:  # noqa: S310 - fixed local URL
@@ -116,14 +126,18 @@ def relay(cwd: str, port: int, once: bool = False) -> int:
         if state.get("closing"):
             path.unlink(missing_ok=True)
             return 0
-        if state.get("queued") and time.time() - pushed > REPUSH_S:
+        if state.get("queued") and state.get("next") != pushed:
             r = subprocess.run(  # noqa: S603
                 [exe, "queue", "--thread", data["thread"], "--message", prompt],
                 capture_output=True, text=True, timeout=120,
             )  # fmt: skip
+            out = (r.stderr or r.stdout).strip()
             print(f"{time.strftime('%H:%M:%S')} pushed to {data['thread']}: exit {r.returncode} "
-                  f"{(r.stderr or r.stdout).strip()[-200:]}", flush=True)  # fmt: skip
-            pushed = time.time() if r.returncode == 0 else pushed
+                  f"{out[-200:]}", flush=True)  # fmt: skip
+            if "no rollout found" in out:  # the thread was deleted: a new one restarts the relay
+                path.unlink(missing_ok=True)
+                return 0
+            pushed = state.get("next") if r.returncode == 0 else pushed
         if once:
             return 0
         time.sleep(60)
