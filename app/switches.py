@@ -18,5 +18,7 @@ class Switches:
 
     def set(self, name: str, on: bool) -> None:
         self.store.put(KIND, name, {"on": on})
-        if on and name.startswith("art:"):  # a provider is only usable through the tool: turn it on too
+        if on and name.startswith(
+            "art:"
+        ):  # a provider is only usable through the tool: turn it on too
             self.store.put(KIND, "generate_art", {"on": True})

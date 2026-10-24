@@ -355,11 +355,13 @@ def build_mcp_server(svc) -> MCPServer:
             except (KeyError, binascii.Error) as e:
                 raise GatewayToolError(f"image {i}: invalid base64 payload") from e
         decoded += paths_or_error(image_paths)
+        s = svc.channel.sessions.get(session_id or "")
+        source = f"{s.agent} ({s.mode} session)" if s and s.agent else "mcp-caller"
         try:
             rep = await svc.collab.submit_report(
                 task_id,
                 text,
-                source="mcp-caller",
+                source=source,
                 agent_status=agent_status,
                 images=decoded,
                 handoff_id=handoff_id,

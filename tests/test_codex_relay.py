@@ -150,3 +150,24 @@ def test_relay_ends_when_the_thread_is_deleted_and_dev_restarts_dead_relays(tmp_
     monkeypatch.setattr(cr.subprocess, "Popen", lambda *a, **k: started.append(a[0]) or Proc())
     cr.resume_all()
     assert started and json.loads(state.read_text())["pid"] == 4242
+
+
+async def test_codex_reports_and_replies_name_codex(settings, cfg_dir):
+    """A Codex session's submit_report / reply_message must not read as claude_code or mcp-caller."""
+    from mcp.client import Client
+
+    from app.mcp_server import build_mcp_server
+    from tests.test_config_gateway import make
+
+    orch, _ = make(settings, cfg_dir, [])
+    hub, p = orch.channel, "Coinlets"
+    s, _, _ = hub.pull(p, None, "/w/coin", 0, "codex", "app")
+    msg, _ = hub.send(p, "progress?", session_id=s.session_id)
+    hub.pull(p, s.session_id, "/w/coin", 1, "codex", "app")
+    async with Client(build_mcp_server(orch)) as c:
+        args = {"project": p, "text": "Dạ, xong ạ", "session_id": s.session_id}
+        r = (await c.call_tool("submit_report", args)).structured_content
+        rr = (await c.call_tool("reply_message", {"session_id": s.session_id, "text": "Dạ, ok ạ",
+                                                   "message_id": msg["message_id"]})).structured_content  # fmt: skip
+    assert orch.collab.get_report(r["report_id"]).source == "codex (pull session)"
+    assert orch.collab.get_report(rr["report_id"]).source == "codex (pull session)"
