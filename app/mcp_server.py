@@ -281,7 +281,10 @@ def build_mcp_server(svc) -> MCPServer:
         project: str | None = None,
         session_id: str | None = None,
     ) -> dict[str, Any]:
-        """Ask the operator a question via Telegram. Poll get_human_response with the returned id."""
+        """Ask the operator a question via Telegram. Use it for every confirmation or decision (commit,
+        push, merge, deploy, a choice), even when you also ask in the app: options = 2-4 short button
+        labels; pass your session_id so the answer arrives through get_messages (kind "answer").
+        Or poll get_human_response with the returned id."""
         try:
             hi = await svc.collab.request_human_input(
                 question, task_id, options or [], ttl_s, project, session_id

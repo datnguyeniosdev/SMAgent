@@ -36,6 +36,8 @@ INSTRUCTIONS = (
     "short summary, no logs, at most 500 characters: a title line and at most 5 bullets (changed / validated / "
     "not done), in polite "
     "Vietnamese (start with 'Dạ,', 'ạ' where natural). "
+    "Ask every confirmation (commit, push, deploy, a choice) on Telegram with the agent-gateway tool "
+    "request_human_input, passing options as 2-4 short button labels. "
     "After a build or deploy, also call the agent-gateway tool report_deployment with notes = a short "
     "Vietnamese release note and url = the link to the build. "
     "Screenshot paths in a message can be opened with the Read tool."

@@ -57,7 +57,9 @@ title, else the folder name.
   steps in on Telegram if nobody answers.
 - **Reviews and research**: `review_project(project, mode, role, agent, evidence)` runs the game-review
   skill on a fresh read-only agent; poll `get_review(review_id)`, then read the reports in `files`.
-- **Questions** for the operator: `request_human_input(question, project)`, then poll
+- **Every confirmation or decision** (commit, push, merge, deploy, a choice, a yes/no) also goes to
+  Telegram: `request_human_input(question, project, session_id, options=[2-4 short button labels])`
+  in polite Vietnamese; the answer comes back through `get_messages` (`meta.kind: "answer"`) or
   `get_human_response`.
 - **Game art**: call `generate_art(prompt, purpose, requirements, width, height, project)`. The
   operator approves and reviews each image; use `get_task_result(...).images` only after

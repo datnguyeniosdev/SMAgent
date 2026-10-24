@@ -69,8 +69,11 @@ Quote each item back, then act on it like a user request. Confirm before commits
 anything destructive.
 
 **Questions and delegation.**
-- To ask the operator mid-task, call `request_human_input` with `project`, then poll
-  `get_human_response`. The operator answers with `/answer <id> <text>`.
+- **Every confirmation or decision goes to Telegram too** (commit, push, merge, deploy, a choice, a
+  yes/no), even when you also ask in the app or terminal: call `request_human_input` with `project`,
+  your `session_id` and `options` (2-4 short button labels), in polite Vietnamese. The operator taps
+  a button (or types `/answer <id> <text>`); the answer arrives through `get_messages` as
+  `meta.kind: "answer"`, or poll `get_human_response`. Act on whichever answer comes first.
 - Use `delegate_task` (with `project`) only when the user asks to hand work to the gateway. Follow it
   with `get_task_status` / `get_task_result`.
 {deploy}
