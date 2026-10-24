@@ -138,3 +138,15 @@ async def test_one_line_answer_is_shown_in_full_in_a_quote_block(settings, cfg_d
     await orch.collab.submit_report(task_id=task.task_id, text=text, source="codex (pull session)")
     sent = gw.bot.sent[-1][1]["text"]
     assert "<blockquote>" in sent and text.replace("&", "&amp;") in sent and "…" not in sent
+
+
+async def test_quote_block_holds_only_the_agents_answer(settings, cfg_dir):
+    """A short pull-session answer: the block shows the answer, the gateway note goes to the info line."""
+    orch, _ = make(settings, cfg_dir, [])
+    gw = gateway(orch)
+    task = orch.register_external("Telegram request", "mcp", A)
+    text = "Dạ, chào lại anh/chị ạ.\n\n(answer to chm_ff4acac414)"
+    await orch.collab.submit_report(task_id=task.task_id, text=text, source="codex (pull session)")
+    sent = gw.bot.sent[-1][1]["text"]
+    block = sent.split("<blockquote>")[1].split("</blockquote>")[0]
+    assert block == "Dạ, chào lại anh/chị ạ." and "trả lời chm_ff4acac414" in sent
