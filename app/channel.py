@@ -490,8 +490,8 @@ class ChannelHub:
         if not cwd and sid not in self.sessions:
             # the agent forgot cwd, or reused a stale id (Codex desktop does both): its project's one
             # open session of that tool
-            mine = [x for x in self.sessions.values() if x.mode == "pull" and x.project == project
-                    and x.agent == agent and x.cwd]  # fmt: skip
+            mine = [x for x in self.sessions.values() if x.mode == "pull" and x.cwd
+                    and _norm(x.project) == _norm(project) and _norm(x.agent) == _norm(agent)]  # fmt: skip
             sid = mine[0].session_id if len(mine) == 1 else sid
         if sid in self._stopping:  # /close: hand out nothing; the tool tells the loop to stop
             self._stopping.discard(sid)

@@ -95,7 +95,15 @@ def relay(cwd: str, port: int, once: bool = False) -> int:
         {"project": project, "agent": "codex", "cwd": cwd, "client": "app"}
     )
     url = f"http://127.0.0.1:{port}/api/v1/channel/peek?{query}"
-    prompt, pushed = loop_prompt(project, "app", "codex").replace("this folder", cwd), 0.0
+    from app.channel import ChannelHub
+
+    # the exact session: Codex desktop otherwise drops cwd or reuses an old session_id
+    sid = ChannelHub.pull_id(project, "codex", cwd)
+    prompt = loop_prompt(project, "app", "codex").replace("this folder", cwd)
+    prompt, pushed = (
+        prompt.replace("reusing the session_id it returned before", f"session_id '{sid}'"),
+        0.0,
+    )
     while True:
         data = _read(path)
         if not once and data.get("pid") != os.getpid():  # stopped (SessionEnd) or replaced

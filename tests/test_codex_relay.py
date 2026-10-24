@@ -60,6 +60,7 @@ def test_relay_pushes_queued_work_into_the_thread(tmp_path, monkeypatch):
     cr.relay("/w/coin", 8000, once=True)
     assert calls[0][:4] == ["/bin/codex", "queue", "--thread", "t9"]
     assert "agent 'codex'" in calls[0][5] and "/w/coin" in calls[0][5]
+    assert "session_id 'pull_coinco_codex_" in calls[0][5]  # the exact folder session
 
 
 def test_setup_adds_and_removes_only_its_codex_hooks(tmp_path):
