@@ -96,3 +96,18 @@ def test_loop_prompt_lets_a_fresh_run_finish_unanswered_work():
     p = loop_prompt("Coinlets", "app", "codex")
     assert "If it reports busy, follow its note" in p and "in_progress_messages" in p
     assert "busy, switched off or no messages, do nothing" not in p
+
+
+async def test_stale_session_id_without_cwd_finds_the_folder_session(settings, cfg_dir):
+    """Codex desktop reuses an old session_id (from a cwd-less call) after that session expired."""
+    from tests.test_config_gateway import make
+
+    orch, _ = make(settings, cfg_dir, [])
+    hub, p = orch.channel, "Coinlets"
+    relay_s, _, _ = hub.pull(p, None, "/w/coin", 0, "codex", "app")
+    msg, _ = hub.send(p, "test", session_id=relay_s.session_id)
+    stale = hub.pull_id(p, "codex", "")  # what the thread remembered
+    s, got, _ = hub.pull(p, stale, "", 1, "codex", "app")
+    assert s.session_id == relay_s.session_id and [m["message_id"] for m in got] == [
+        msg["message_id"]
+    ]
