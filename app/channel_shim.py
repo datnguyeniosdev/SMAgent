@@ -36,6 +36,8 @@ INSTRUCTIONS = (
     "short summary, no logs, at most 500 characters: a title line and at most 5 bullets (changed / validated / "
     "not done), in polite "
     "Vietnamese (start with 'Dạ,', 'ạ' where natural). "
+    "After a build or deploy, also call the agent-gateway tool report_deployment with notes = a short "
+    "Vietnamese release note and url = the link to the build. "
     "Screenshot paths in a message can be opened with the Read tool."
 )
 REPLY_TOOL = {

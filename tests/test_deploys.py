@@ -168,3 +168,13 @@ async def test_typed_deploy_asks_what_is_missing(settings, cfg_dir, tmp_path, mo
     assert buttons(answers[-1][1])[0] == ("main", "d:b:0:prod:0")
     await gw.on_deploy(tg(answers), SimpleNamespace(args="coin appstore main"))  # dry run or real
     assert [d for _, d in buttons(answers[-1][1])] == ["d:m:0:prod:0:dry", "d:m:0:prod:0:real"]
+
+
+def test_deploy_notice_carries_the_full_release_note_and_link():
+    from app.collaboration import Deployment, deployment_html
+
+    note = "\n".join(f"- Sửa lỗi {i}" for i in range(60))  # longer than the old 500-character cut
+    html = deployment_html(Deployment(project="K05", environment="uat", status="succeeded",
+                                      notes=note, url="https://appdistribution.firebase.dev/i/x"))  # fmt: skip
+    assert "Release note" in html and "Sửa lỗi 59" in html
+    assert "https://appdistribution.firebase.dev/i/x" in html

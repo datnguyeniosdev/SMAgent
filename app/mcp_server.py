@@ -320,8 +320,8 @@ def build_mcp_server(svc) -> MCPServer:
         image_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         """Report work on a task: a short summary for Telegram, no logs or command output (title line,
-        then at most 5 short bullets, at most 500 characters; logs are stripped and longer text is
-        cut). Write it in polite Vietnamese ("gọi dạ bảo vâng"): the title starts with "Dạ,", "ạ" where natural.
+        then at most 5 short bullets, at most 500 characters). Write it in polite Vietnamese
+        ("gọi dạ bảo vâng"): the title starts with "Dạ,", "ạ" where natural.
         image_paths: absolute paths of local PNG/JPEG/WebP/GIF files (e.g. screenshots you saved).
         images: [{"name": "shot.png", "data_base64": "..."}], when there is no file.
         The gateway publishes the report to Telegram and records agent status separately from verification.
@@ -386,7 +386,10 @@ def build_mcp_server(svc) -> MCPServer:
     ) -> dict[str, Any]:
         """Post a deployment notice to the Telegram report channel and record it.
         status: succeeded | failed | partial | dry_run | started | cancelled. Report the real outcome of the
-        deploy command (its exit code), never an assumed one. Returns whether the channel message was delivered."""
+        deploy command (its exit code), never an assumed one. For every real build (also one asked for
+        via Telegram /send): notes = a short Vietnamese release note (what is new or fixed for testers),
+        url = the link to the build (Firebase App Distribution, TestFlight, web or store page).
+        Returns whether the channel message was delivered."""
         from pydantic import ValidationError
 
         from app.collaboration import Deployment

@@ -128,7 +128,7 @@ class Deployment(BaseModel):
         default=[], max_length=10
     )  # where it shipped (e.g. "Firebase App Distribution")
     url: str | None = Field(None, max_length=500)
-    notes: str | None = Field(None, max_length=1000)
+    notes: str | None = Field(None, max_length=3000)  # the release note
     error: str | None = Field(None, max_length=1500)
     source: str = "api"
     task_id: str | None = None
@@ -160,9 +160,9 @@ def deployment_html(d: Deployment) -> str:
     if d.targets:
         lines.append(f"Shipped to: {e(', '.join(d.targets))}")
     if d.url and d.url.startswith(("https://", "http://")):
-        lines.append(f"URL: {e(d.url)}")
+        lines.append(f"Link: {e(d.url)}")
     if d.notes:
-        lines.append(f"Notes: {e(fmt.truncate(d.notes, 500))}")
+        lines.append(f"\n<b>Release note</b>\n{e(d.notes)}")
     if d.error:
         lines.append(f"Error: {e(fmt.truncate(d.error, 800))}")
     lines.append(

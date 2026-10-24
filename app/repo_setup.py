@@ -140,8 +140,13 @@ once the command has finished, call `report_deployment`:
   - `partial` if only some platforms shipped
 
   Never report a success you did not observe.
-- When known: `version`, `build_number`, `commit` (short SHA), `platforms`, `targets`, `url`, `notes`.
-  For failures, add a short `error` (the failing step and its last error line). No secrets.
+- When known: `version`, `build_number`, `commit` (short SHA), `platforms`, `targets`.
+- **Every real build** (not `--dry-run`), including one asked for in a Telegram `/send` message:
+  - `notes`: a release note in Vietnamese: what is new or fixed in this build for testers, a few
+    short bullets from the commits since the last build (no logs).
+  - `url`: the link to the build (Firebase App Distribution, TestFlight / App Store Connect, the
+    web build or store page). Name it in `notes` when there are several.
+- For failures, add a short `error` (the failing step and its last error line). No secrets.
 """
 
 

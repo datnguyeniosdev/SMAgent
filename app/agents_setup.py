@@ -45,6 +45,9 @@ title, else the folder name.
 - **Task finished** in such a repo: call `submit_report(project, text, agent_status)`. The text is a
   title line plus at most 5 short bullets (changed / validated / not done), at most 500 characters, no logs, in polite
   Vietnamese ("gọi dạ bảo vâng": title starts with "Dạ,", "ạ" where natural).
+- **After a build or deploy** (also one asked for via Telegram `/send`): call `report_deployment` with
+  `notes` = a short Vietnamese release note (what is new or fixed for testers) and `url` = the link
+  to the build (Firebase App Distribution, TestFlight, web or store page).
 - **Work from Telegram**: when the user asks you to check Telegram or take work, call
   `get_messages(project, agent="{agent}", session_id=<the id it returned before>)`.
   - Do each request, then answer it with `reply_message(session_id, message_id, text)`.
