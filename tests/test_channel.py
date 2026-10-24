@@ -222,7 +222,9 @@ async def test_pull_mode_round_trip_and_switch(settings, cfg_dir):
         first = await get(cwd="/repo")  # registers the pull session
         sid = first["session_id"]
         assert (
-            first["messages"] == [] and first["enabled"] and hub.session_for(PROJECT).mode == "pull"
+            first["messages"] == []
+            and first.get("enabled", True)
+            and hub.session_for(PROJECT).mode == "pull"
         )
 
         msg, target = hub.send(PROJECT, "rename the score label", sender="Darren")
@@ -242,7 +244,9 @@ async def test_pull_mode_round_trip_and_switch(settings, cfg_dir):
         back = await get(session_id=sid)
         assert "use title case" in back["messages"][0]["text"]
         busy = await get(session_id=sid)  # one at a time: nothing new until it is answered
-        assert busy["busy"] and busy["in_progress"] == [back["messages"][0]["message_id"]]
+        assert busy["busy"] and [m["message_id"] for m in busy["in_progress_messages"]] == [
+            back["messages"][0]["message_id"]
+        ]
         await c.call_tool("reply_message", {"session_id": sid, "text": "Done",
                                             "message_id": back["messages"][0]["message_id"]})  # fmt: skip
 
@@ -469,7 +473,7 @@ async def test_close_push_and_pull_sessions(settings, cfg_dir):
         again = (
             await c.call_tool("get_messages", {"project": PROJECT, "session_id": sid})
         ).structured_content
-        assert not again["closed"] and [x["message_id"] for x in again["messages"]] == [
+        assert not again.get("closed") and [x["message_id"] for x in again["messages"]] == [
             msg["message_id"]
         ]
     await gw.on_close(m, SimpleNamespace(args="s99"))
@@ -504,7 +508,7 @@ def test_mcp_is_stateless_so_restarts_break_no_client(tmp_path, monkeypatch, cfg
             app, base_url="http://127.0.0.1:8000", client=("127.0.0.1", 50000)
         ) as c:  # "restarted"
             r = c.post("/mcp", json=call, headers=h)  # no session header, no new initialize
-            assert r.status_code == 200 and '"enabled":true' in r.text.replace(" ", "")
+            assert r.status_code == 200 and '"session_id"' in r.text
     finally:
         get_settings.cache_clear()
 

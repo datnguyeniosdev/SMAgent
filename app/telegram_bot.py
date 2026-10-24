@@ -72,7 +72,8 @@ Reply to any gateway message (text or photos) to give feedback or answer it.
 /keys — provider API keys and models (values only in a private chat with the bot)
 /providers — model providers shared by every project: add one, its models · /addmodel · /findmodel
 /plan &lt;p#&gt; — which models a project uses for each workflow role (designer, implementer, …)
-/deploy — run a project's deploy script: project → UAT/PROD → branch → dry run or real, confirmed
+/deploy — run a project's deploy script: project → target → branch → dry run or real, confirmed
+  (or typed: /deploy [p#] [uat|testflight|appstore|review] [branch] [dry|real]; what is left out is asked with buttons)
   (a running deploy shows 🛑 Stop there)
 
 <b>More</b> (not in the / menu)
@@ -268,7 +269,14 @@ class TelegramGateway:
     # ---------- delivery (Notifier) ----------
 
     async def _send(self, fn, **kw):
-        """Send with Telegram rate-limit backoff and a plain-text fallback on parse errors."""
+        """Send with Telegram rate-limit backoff and a plain-text fallback on parse errors.
+        Text over Telegram's limit goes out as several messages (nothing is cut); returns the first."""
+        if fn == self.bot.send_message and len(kw.get("text", "")) > fmt.MESSAGE_LIMIT:
+            first, *more = fmt.chunks(kw["text"])
+            msg = await self._send(fn, **{**kw, "text": first})
+            for part in more:
+                await self._send(fn, **{**kw, "text": part, "reply_markup": None})
+            return msg
         for attempt in range(3):
             try:
                 return await fn(**kw)
@@ -549,7 +557,15 @@ class TelegramGateway:
         kb = InlineKeyboardMarkup(
             inline_keyboard=[buttons[i : i + 2] for i in range(0, len(buttons), 2)]
         )
-        off = [t for t in TOOL_NAMES if not sw.on(t)]
+        providers = (("art:images", "🎨 images (fal)", self.orch._image_provider),
+                     ("art:3d", "🧊 3D (Meshy)", self.orch._model3d_provider))  # fmt: skip
+        art = [(k, label) for k, label, p in providers if p]
+        if art:  # which providers generate_art may use
+            kb.inline_keyboard.append([
+                InlineKeyboardButton(text=f"{'✅' if sw.on(k) else '⛔'} {label}", callback_data=f"t:{k}")
+                for k, label in art
+            ])  # fmt: skip
+        off = [t for t in TOOL_NAMES if not sw.on(t)] + [label for k, label in art if not sw.on(k)]
         text = ("🔀 <b>AGENT TOOLS</b> (tap to switch; applies to the next call, no restart)\n"
                 + (f"Off: {escape(', '.join(off))}" if off else "All on."))  # fmt: skip
         await answer(text + (f"\n{note}" if note else ""), reply_markup=kb)
@@ -563,7 +579,7 @@ class TelegramGateway:
             await q.answer("Not authorized.", show_alert=True)
             return
         name = q.data[2:]
-        if name not in TOOL_NAMES:
+        if name not in TOOL_NAMES and name not in ("art:images", "art:3d"):
             await q.answer("Unknown tool.")
             return
         on = not self.orch.switches.on(name)
@@ -730,7 +746,7 @@ class TelegramGateway:
             return
         from app.cli import AGENT_RUN
 
-        words = (command.args or "").split()
+        words = ((command.args if command else None) or "").split()
         new = bool(words) and words[-1].lower() == "new"
         words = words[:-1] if new else words
         agent = words.pop().lower() if len(words) > 1 and words[-1].lower() in AGENT_RUN else ""
@@ -1130,16 +1146,11 @@ class TelegramGateway:
         img = self.orch._image_provider
         if img is not None:
             api.append((f"{img.name} (images)", getattr(img, "available", True),
-                        self.orch.switches.on("generate_art"), "generate_art"))  # fmt: skip
+                        self.orch.switches.on("art:images"), "art:images"))  # fmt: skip
         m3d = self.orch._model3d_provider
-        if m3d is not None:  # same switch as images: both are generate_art
+        if m3d is not None:  # its own switch: Meshy on never turns fal on
             api.append(
-                (
-                    f"{m3d.name} (3D)",
-                    m3d.available,
-                    self.orch.switches.on("generate_art"),
-                    "generate_art",
-                )
+                (f"{m3d.name} (3D)", m3d.available, self.orch.switches.on("art:3d"), "art:3d")
             )
         api_buttons = []
         for name, ready, on, key in api:
@@ -1163,7 +1174,10 @@ class TelegramGateway:
         verb, _, ref = q.data[2:].partition(":")
         hub = self.orch.channel
         if verb == "sw":  # an API agent, or image generation
-            known = {f"api:{c['name']}" for c in self.orch.router.describe()} | {"generate_art"}
+            known = {f"api:{c['name']}" for c in self.orch.router.describe()} | {
+                "art:images",
+                "art:3d",
+            }
             if ref not in known:
                 await q.answer("Unknown agent.")
                 return
@@ -1499,9 +1513,67 @@ class TelegramGateway:
 
         return deploys.deployable(projects_root())
 
-    async def on_deploy(self, m: TgMessage):
-        if self._authorized_msg(m):
+    async def on_deploy(self, m: TgMessage, command: CommandObject | None = None):
+        """/deploy alone: buttons. /deploy <project|p#> <target> [branch] [real]: straight to the confirmation.
+        Targets: uat (Firebase), testflight, appstore, review (App Store + submit for review)."""
+        if not self._authorized_msg(m):
+            return
+        words = ((command.args if command else None) or "").split()
+        if not words:
             await self._deploy_projects(m.answer)
+            return
+        await self._deploy_from_text(m.answer, words)
+
+    async def _deploy_from_text(self, answer, words: list[str]) -> None:
+        from app import deploys
+        from app.projects import detect_project
+
+        aliases = {"firebase": "uat", "tf": "uat-tf", "testflight": "uat-tf", "appstore": "prod", "store": "prod",
+                   "review": "prod-submit", "submit": "prod-submit"}  # fmt: skip
+        usage = ("Usage: /deploy [project|p#] [uat|testflight|appstore|review] [branch] [dry|real]\n"
+                 "Leave out any part and you get buttons for it, one step at a time.")  # fmt: skip
+        query = words[0]
+        target = aliases.get(words[1].lower(), words[1].lower()) if len(words) > 1 else None
+        rest = words[2:]
+        mode = rest[-1].lower() if rest and rest[-1].lower() in ("dry", "real") else None
+        rest = rest[:-1] if mode else rest
+        if target is not None and target not in deploys.TARGETS:
+            await answer(f"Unknown target {escape(words[1])}.\n{usage}")
+            return
+        repos = self._deploy_repos()
+        project = self.orch.channel.resolve_project(query) or query
+        key = re.sub(r"[^0-9a-z]+", "", project.lower())
+        hits = [
+            r
+            for r in repos
+            if key in re.sub(r"[^0-9a-z]+", "", f"{r.name} {detect_project(r)}".lower())
+        ]
+        if len(hits) != 1:
+            names = ", ".join(detect_project(r) for r in repos) or "none"
+            await answer(f"{'No' if not hits else 'More than one'} deployable project matches {escape(query)}. "
+                         f"Deployable: {escape(names)}")  # fmt: skip
+            return
+        i = repos.index(hits[0])
+        if target is None:
+            await self._deploy_step(answer, ["d", "p", str(i)])
+            return
+        if not rest:
+            await self._deploy_step(answer, ["d", "e", str(i), target])
+            return
+        try:
+            names = await asyncio.to_thread(deploys.branches, hits[0])
+        except (RuntimeError, subprocess.TimeoutExpired) as e:
+            await answer(f"❌ cannot list branches: {escape(str(e))}")
+            return
+        if rest[0] not in names:
+            await answer(
+                f"Unknown branch {escape(rest[0])}. Recent: {escape(', '.join(names[:8]))}"
+            )
+            return
+        step = ["d", "m" if mode else "b", str(i), target, str(names.index(rest[0]))] + (
+            [mode] if mode else []
+        )
+        await self._deploy_step(answer, step)
 
     async def _deploy_projects(self, answer) -> None:
         from app.projects import detect_project
@@ -1531,7 +1603,7 @@ class TelegramGateway:
             await q.answer("Not authorized.", show_alert=True)
             return
         await q.answer()
-        Btn, answer = InlineKeyboardButton, q.message.answer  # noqa: N806
+        answer = q.message.answer
         parts = q.data.split(":")
         if parts[1] == "stop":
             repos = self._deploy_repos()
@@ -1554,6 +1626,15 @@ class TelegramGateway:
             self._deploy_wait.pop(parts[2] if len(parts) > 2 else "", None)
             await answer("Deploy cancelled.")
             return
+        await self._deploy_step(answer, parts)
+
+    async def _deploy_step(self, answer, parts: list[str]) -> None:
+        """One step of /deploy: p (project chosen: ask the target) -> e (target: ask the branch) ->
+        b (branch: ask dry run or real) -> m (all known: confirm). Buttons and typed /deploy both land here."""
+        from app import deploys
+        from app.projects import detect_project
+
+        Btn = InlineKeyboardButton  # noqa: N806
         repos = self._deploy_repos()
         i = int(parts[2]) if parts[2].isdigit() else -1
         if not 0 <= i < len(repos):
@@ -1561,21 +1642,24 @@ class TelegramGateway:
             return
         repo, name = repos[i], detect_project(repos[i])
         if parts[1] == "p":
-            kb = [
-                [
-                    Btn(text="🧪 UAT", callback_data=f"d:e:{i}:uat"),
-                    Btn(text="🌍 PROD", callback_data=f"d:e:{i}:prod"),
-                ]
-            ]
+            short = {
+                "uat": "🧪 Firebase",
+                "uat-tf": "✈️ TestFlight",
+                "prod": "🌍 App Store",
+                "prod-submit": "🏁 Review",
+            }
+            btns = [Btn(text=short[t], callback_data=f"d:e:{i}:{t}") for t in deploys.TARGETS]
+            kb = [btns[k : k + 2] for k in range(0, len(btns), 2)]
             await answer(
-                f"🚀 <b>{escape(name)}</b> · environment:",
+                f"🚀 <b>{escape(name)}</b> · where to:",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
             )
             return
-        env = parts[3] if len(parts) > 3 and parts[3] in deploys.ENVS else None
+        env = parts[3] if len(parts) > 3 and parts[3] in deploys.TARGETS else None
         if env is None:
-            await answer("Unknown environment.")
+            await answer("Unknown target.")
             return
+        env_name, flags, label = deploys.TARGETS[env]
         try:
             names = await asyncio.to_thread(deploys.branches, repo)
         except (RuntimeError, subprocess.TimeoutExpired) as e:
@@ -1585,7 +1669,7 @@ class TelegramGateway:
             kb = [
                 [Btn(text=b[:60], callback_data=f"d:b:{i}:{env}:{j}")] for j, b in enumerate(names)
             ]
-            await answer(f"🚀 <b>{escape(name)}</b> · {env.upper()} · branch (newest first):",
+            await answer(f"🚀 <b>{escape(name)}</b> · {label} · branch (newest first):",
                          reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))  # fmt: skip
             return
         j = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else -1
@@ -1594,31 +1678,43 @@ class TelegramGateway:
             return
         branch = names[j]
         if parts[1] == "b":
-            kb = [[Btn(text="🧪 Dry run (build, no upload)", callback_data=f"d:m:{i}:{env}:{j}:dry")],
-                  [Btn(text="🚀 Real deploy", callback_data=f"d:m:{i}:{env}:{j}:real")]]  # fmt: skip
-            await answer(f"🚀 <b>{escape(name)}</b> · {env.upper()} · <code>{escape(branch)}</code>",
+            kb = [[Btn(text="🧪 Dry run", callback_data=f"d:m:{i}:{env}:{j}:dry"),
+                   Btn(text="🚀 Real", callback_data=f"d:m:{i}:{env}:{j}:real")]]  # fmt: skip
+            await answer(f"🚀 <b>{escape(name)}</b> · {label} · <code>{escape(branch)}</code>",
                          reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))  # fmt: skip
             return
         if parts[1] == "m":
-            dry = parts[5] == "dry" if len(parts) > 5 else True
-            token = new_id("dpl")[-8:]
-            self._deploy_wait[token] = (repo, env, branch, dry)
-            warn = (
-                "\n⚠️ <b>PRODUCTION</b>: this ships to users." if env == "prod" and not dry else ""
+            await self._deploy_confirm(
+                answer, repo, name, env, branch, parts[5] == "dry" if len(parts) > 5 else True
             )
-            busy = (
-                "\n⏳ A deploy of this project is running; this one would be refused."
-                if deploys.busy(repo)
-                else ""
-            )
-            kb = [[Btn(text=f"✅ Yes, {'dry run' if dry else 'deploy'} {env.upper()}", callback_data=f"d:go:{token}"),
-                   Btn(text="Cancel", callback_data=f"d:no:{token}")]]  # fmt: skip
-            await answer(
-                f"Confirm: <b>{escape(name)}</b> · {env.upper()} · <code>{escape(branch)}</code> · "
-                f"{'dry run' if dry else 'real deploy'}\nRuns <code>4_delivery/deploy/deploy.sh {env}"
-                f"{' --dry-run' if dry else ''}</code> in a separate deploy copy of the repo.{warn}{busy}",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
-            )
+
+    async def _deploy_confirm(
+        self, answer, repo: Path, name: str, env: str, branch: str, dry: bool
+    ) -> None:
+        """The last step before a deploy, from the buttons or from /deploy with options."""
+        from app import deploys
+
+        Btn = InlineKeyboardButton  # noqa: N806
+        env_name, flags, label = deploys.TARGETS[env]
+        token = new_id("dpl")[-8:]
+        self._deploy_wait[token] = (repo, env, branch, dry)
+        warn = (
+            "\n⚠️ <b>PRODUCTION</b>: this ships to users." if env_name == "prod" and not dry else ""
+        )
+        busy = (
+            "\n⏳ A deploy of this project is running; this one would be refused."
+            if deploys.busy(repo)
+            else ""
+        )
+        kb = [[Btn(text=f"✅ Yes, {'dry run' if dry else 'deploy'} {label}"[:60], callback_data=f"d:go:{token}"),
+               Btn(text="Cancel", callback_data=f"d:no:{token}")]]  # fmt: skip
+        await answer(
+            f"Confirm: <b>{escape(name)}</b> · {label} · <code>{escape(branch)}</code> · "
+            f"{'dry run' if dry else 'real deploy'}\nRuns <code>4_delivery/deploy/deploy.sh {env_name}"
+            f"{''.join(' ' + f for f in flags)}{' --dry-run' if dry else ''}</code> in a separate deploy copy "
+            f"of the repo.{warn}{busy}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
+        )
 
     async def _start_deploy(
         self, answer, repo: Path, env: str, branch: str, dry: bool, user: int
@@ -1632,10 +1728,11 @@ class TelegramGateway:
             await answer(f"⏳ {escape(name)} is already deploying; wait for its result.")
             return
         log.info("deploy %s %s %s dry=%s by user=%s", repo.name, env, branch, dry, user)
-        notes = f"branch {branch} · started from Telegram" + (" · dry run" if dry else "")
+        env_name, _, label = deploys.TARGETS[env]
+        notes = f"{label} · branch {branch} · started from Telegram" + (" · dry run" if dry else "")
         await self.orch.collab.report_deployment(
             Deployment(
-                project=name, environment=env, status="started", notes=notes, source="telegram"
+                project=name, environment=env_name, status="started", notes=notes, source="telegram"
             )
         )
 
@@ -1644,7 +1741,7 @@ class TelegramGateway:
                 r = await deploys.run(repo, env, branch, dry, self.s.data_dir / "deploys")
             except asyncio.CancelledError:  # the gateway is stopping: say so before going
                 await asyncio.shield(self.orch.collab.report_deployment(Deployment(
-                    project=name, environment=env, status="failed", notes=notes, source="telegram",
+                    project=name, environment=env_name, status="failed", notes=notes, source="telegram",
                     error="interrupted: the gateway stopped during the deploy; run it again",
                 )))  # fmt: skip
                 raise
@@ -1658,7 +1755,7 @@ class TelegramGateway:
                     "seconds": 0,
                 }
             await self.orch.collab.report_deployment(Deployment(
-                project=name, environment=env, status=r["status"], commit=r["commit"] or None,
+                project=name, environment=env_name, status=r["status"], commit=r["commit"] or None,
                 notes=f"{notes} · {r['seconds'] // 60} min", error=r["error"] or None, source="telegram",
             ))  # fmt: skip
             if r.get("log") and r["log"].exists():
@@ -1673,7 +1770,7 @@ class TelegramGateway:
 
         self._deploy_tasks.add(t := asyncio.create_task(work()))
         t.add_done_callback(self._deploy_tasks.discard)
-        await answer(f"🚀 Deploy started: <b>{escape(name)}</b> · {env.upper()} · <code>{escape(branch)}</code>"
+        await answer(f"🚀 Deploy started: <b>{escape(name)}</b> · {label} · <code>{escape(branch)}</code>"
                      f"{' · dry run' if dry else ''}. The result and the log come here when it ends.")  # fmt: skip
 
     # ---------- /keys: provider keys and models, set remotely ----------

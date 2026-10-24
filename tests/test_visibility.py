@@ -38,12 +38,12 @@ async def test_asks_and_answers_are_copied_and_sessions_announced(settings, cfg_
     assert ask["to_session"] == b.session_id  # agent:<tool> finds the session by its tool
     await settle()
     kind, kw, mid = gw.bot.sent[-1]
-    assert kw["chat_id"] == CONTROL and "AGENT REQUEST" in kw["text"] and "Coin size?" in kw["text"]
+    assert kw["chat_id"] == CONTROL and "AGENT NHỜ" in kw["text"] and "Coin size?" in kw["text"]
     assert "/asks" not in kw["text"] and ask["ask_id"] in gw._asks_text()
 
     orch.asks.answer(ask["ask_id"], "128 px", by="s2 (PocketSort)")
     await settle()
-    assert "AGENT ANSWER" in texts(gw)[-1] and "128 px" in texts(gw)[-1]
+    assert "AGENT TRẢ LỜI" in texts(gw)[-1] and "128 px" in texts(gw)[-1]
     assert gw._asks_text() == "No open agent requests."
 
     with pytest.raises(AskError):  # the asker is never its own target

@@ -45,7 +45,7 @@ async def test_ask_text_only(settings):
     assert task.provider == "openai" and task.usage[0].status == "ok"
     assert any(a.kind == "report" for a in orch.artifacts.for_task(task.task_id))
     assert "accepted" not in notes.texts() and "Started" not in notes.texts()  # no noise posts
-    assert notes.texts().startswith("✅ <b>DONE</b>") and "\n42\n" in notes.texts()
+    assert notes.texts().startswith("✅ <b>HOÀN THÀNH</b>") and "\n42\n" in notes.texts()
 
 
 async def test_ask_with_image_routes_to_vision(settings):

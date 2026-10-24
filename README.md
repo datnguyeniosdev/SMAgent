@@ -81,7 +81,7 @@ uv run agw setup --agents detected
 | `antigravity` (alias `gemini`) | `~/.gemini/config/mcp_config.json` (`serverUrl`) | `~/.gemini/GEMINI.md` |
 | `cursor` | `~/.cursor/mcp.json` | paste `agw setup --agents cursor --print-rules` into Cursor > Settings > Rules |
 
-`--agents` takes names, `all` or `detected`. Each file is backed up once (`*.agw-backup`). Add `--remove` to take the gateway entries out again. Telegram `/setup` has the same on/off buttons per agent. Restart the agent afterwards.
+Codex also gets the Claude Code skills (agent-gateway, game-review, ...) as links in `~/.codex/skills` (removed again with `--remove`; its own skills stay), and `agw session --agent codex` runs `codex exec --full-auto` so it can edit the workspace like a Claude session. `--agents` takes names, `all` or `detected`. Each file is backed up once (`*.agw-backup`). Add `--remove` to take the gateway entries out again. Telegram `/setup` has the same on/off buttons per agent. Restart the agent afterwards.
 
 With `MCP_REQUIRE_TOKEN=true` each config also gets an `Authorization: Bearer` header that names `AGW_API_TOKEN` (never the value): export it in the agent's environment. The header syntax follows each tool's docs; only OpenCode's was tried on this Mac.
 

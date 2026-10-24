@@ -422,7 +422,11 @@ def _claude_version(claude: str) -> tuple[int, ...]:
 # One-shot runs of other agents' CLIs (prompt last). ponytail: codex/gemini flags unverified on this Mac.
 AGENT_RUN = {
     "opencode": ["opencode", "run"],
-    "codex": ["codex", "exec"],
+    "codex": [
+        "codex",
+        "exec",
+        "--full-auto",
+    ],  # read-only without it; this is the reach a Claude session has
     "antigravity": ["gemini", "-p"],
 }
 

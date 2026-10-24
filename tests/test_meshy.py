@@ -146,3 +146,20 @@ async def test_generate_art_model3d_flow(settings, cfg_dir, tmp_path):
         off = await c.call_tool("generate_art", {"prompt": "chest", "purpose": "prop",
                                                  "requirements": "low poly wood", "output": "model3d"})  # fmt: skip
         assert off.is_error
+
+
+def test_meshy_and_fal_switch_apart(settings, cfg_dir):
+    from types import SimpleNamespace
+
+    from tests.test_config_gateway import make
+
+    orch, _ = make(settings, cfg_dir, [])
+    orch.image_provider, orch.model3d_provider = (
+        SimpleNamespace(name="fal"),
+        SimpleNamespace(name="meshy"),
+    )
+    orch.switches.set("art:images", False)  # fal off
+    orch.switches.set("art:3d", True)  # Meshy on
+    assert orch.model3d_provider is not None and orch.image_provider is None
+    orch.switches.set("generate_art", False)  # the tool itself off: both refuse
+    assert orch.model3d_provider is None and orch.image_provider is None

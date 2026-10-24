@@ -26,7 +26,8 @@ PROJECT_REF = "the project named in the agent-gateway session note"
 
 
 def claude_home() -> Path:
-    return Path.home() / ".claude"
+    """The Claude Code account being set up: CLAUDE_CONFIG_DIR (one folder per account), else ~/.claude."""
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude").expanduser()
 
 
 def skill_file() -> Path:

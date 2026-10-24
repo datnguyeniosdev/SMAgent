@@ -424,9 +424,10 @@ async def test_art_feedback_regenerates_without_a_second_cost_approval(settings,
     assert orch.art_review(second.task_id)["state"] == "pending"  # the new version is reviewed too
 
 
-def test_reports_on_telegram_are_summaries():
-    from app.formatting import summary_only
+def test_long_telegram_text_is_split_not_cut():
+    from app.formatting import chunks
 
-    text = "- Buttons realigned\n```\n$ dotnet test\nPassed 69\n```\n2026-10-21 23:00:01 INFO build ok\n- Tests: 69/69"
-    assert summary_only(text) == "- Buttons realigned\n\n- Tests: 69/69"
-    assert len(summary_only("x" * 5000)) == 700
+    text = "\n".join(f"line {i} " + "x" * 90 for i in range(200)) + "\n" + "y" * 9000
+    parts = chunks(text)
+    assert "".join(parts) == text and all(len(p) <= 4096 for p in parts)
+    assert chunks("short") == ["short"]

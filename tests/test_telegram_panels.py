@@ -89,7 +89,9 @@ async def test_tool_switches_apply_without_restart(settings, cfg_dir):
     answers, alerts = [], []
     await gw.on_mcp(tg(answers))
     text, kb = answers[-1]
-    assert "All on." in text and [d for _, d in buttons(kb)] == [f"t:{t}" for t in TOOL_NAMES]
+    data = [d for _, d in buttons(kb)]
+    assert "All on." in text and data[: len(TOOL_NAMES)] == [f"t:{t}" for t in TOOL_NAMES]
+    assert data[len(TOOL_NAMES) :] == ["t:art:images"]  # each art provider has its own switch
     async with Client(build_mcp_server(orch)) as c:
         assert not (await c.call_tool("list_agents", {})).is_error
         await gw.on_mcp_button(press("t:list_agents", answers, alerts))  # off, same server

@@ -415,7 +415,7 @@ class CollaborationService:
         )
         report.verified_status = self.verified_status(task_id)
         if agent_status == "completed" and report.verified_status != "verified":
-            report.pending_actions.append("agent reports completion; gateway has not verified it")
+            report.pending_actions.append("agent báo đã xong; gateway chưa tự kiểm chứng")
         if handoff_id:
             self._complete_handoff(handoff_id, report)
         self._save_report(report)
@@ -453,18 +453,21 @@ class CollaborationService:
         from app import formatting as fmt
 
         task = self.svc.tasks[report.task_id]
+        # sent in full (agents keep it short); the bot splits anything over Telegram's limit
         title, _, rest = report.text.strip().partition("\n")
-        meta = [f"from {fmt.escape(report.source)}", f"verified: {report.verified_status}"]
+        vi = fmt.STATUS_VI
+        meta = [f"từ {fmt.escape(report.source)}",
+                f"gateway: {vi.get(report.verified_status, report.verified_status)}"]  # fmt: skip
         if report.agent_status:
-            meta.insert(1, f"agent: {fmt.escape(report.agent_status)}")
+            meta.insert(1, f"agent: {fmt.escape(vi.get(report.agent_status, report.agent_status))}")
         if report.artifact_ids:
             meta.append(f"📎 {len(report.artifact_ids)}")
-        body = fmt.escape(fmt.summary_only(rest))
+        body = fmt.escape(rest.strip())
         if report.pending_actions:
             body += "\n\n⚠️ " + fmt.escape("; ".join(report.pending_actions))
         html = self.svc.msg(
             "report", task, (body + "\n\n" if body else "") + " · ".join(meta),
-            title=title, ref=report.report_id, reply="Reply to this post to send feedback",
+            title=title, ref=report.report_id, reply="Dạ, trả lời tin này để gửi góp ý cho agent ạ",
         )  # fmt: skip
         limit = self.svc.gateway_cfg.telegram.max_report_photos if self.svc.gateway_cfg else 4
         photos = []

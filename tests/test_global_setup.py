@@ -65,3 +65,12 @@ def test_hook_and_shim_follow_the_folder(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(root / "notes")
     shim_main(None)
     assert started == [("Gem Mosaic (GMA)", True), ("unconnected", False)]
+
+
+def test_each_claude_account_is_its_own_folder(tmp_path, monkeypatch):
+    from app import global_setup
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "work"))
+    assert global_setup.skill_file() == tmp_path / "work/skills/agent-gateway/SKILL.md"
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR")
+    assert global_setup.claude_home().name == ".claude"

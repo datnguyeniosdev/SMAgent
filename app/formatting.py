@@ -23,27 +23,37 @@ _STATE_ICON = {
 
 # Prefix vocabulary: the first token of every outgoing message, so its type is recognisable at a glance.
 KINDS = {
-    "done": ("✅", "DONE"),
-    "failed": ("❌", "FAILED"),
-    "cancelled": ("⏹", "CANCELLED"),
-    "expired": ("⌛", "EXPIRED"),
-    "unknown": ("❓", "UNKNOWN"),
-    "report": ("📋", "REPORT"),
-    "feedback": ("💬", "FEEDBACK"),
-    "question": ("🙋", "QUESTION"),
-    "approval": ("🔐", "APPROVAL"),
-    "deploy": ("🚀", "DEPLOY"),
-    "open": ("🖥", "OPEN"),
-    "ask": ("🆘", "AGENT WAITING"),
-    "agent": ("🤝", "AGENT REQUEST"),
-    "answer": ("💡", "AGENT ANSWER"),
-    "session": ("🔌", "SESSION"),
-    "step": ("⚙️", "STEP"),
-    "tool": ("🔧", "TOOL"),
-    "qa": ("🧪", "QA"),
-    "review": ("🔍", "REVIEW"),
-    "warn": ("⚠️", "WARN"),
-    "info": ("ℹ️", "INFO"),
+    "done": ("✅", "HOÀN THÀNH"),
+    "failed": ("❌", "THẤT BẠI"),
+    "cancelled": ("⏹", "ĐÃ HUỶ"),
+    "expired": ("⌛", "HẾT HẠN"),
+    "unknown": ("❓", "CHƯA RÕ"),
+    "report": ("📋", "BÁO CÁO"),
+    "feedback": ("💬", "PHẢN HỒI"),
+    "question": ("🙋", "CÂU HỎI"),
+    "approval": ("🔐", "CẦN DUYỆT"),
+    "deploy": ("🚀", "TRIỂN KHAI"),
+    "open": ("🖥", "MỞ PHIÊN"),
+    "ask": ("🆘", "AGENT ĐANG CHỜ"),
+    "agent": ("🤝", "AGENT NHỜ"),
+    "answer": ("💡", "AGENT TRẢ LỜI"),
+    "session": ("🔌", "PHIÊN"),
+    "step": ("⚙️", "BƯỚC"),
+    "tool": ("🔧", "CÔNG CỤ"),
+    "qa": ("🧪", "KIỂM THỬ"),
+    "review": ("🔍", "ĐÁNH GIÁ"),
+    "warn": ("⚠️", "CẢNH BÁO"),
+    "info": ("ℹ️", "THÔNG TIN"),
+}
+STATUS_VI = {
+    "completed": "hoàn thành",
+    "partial": "xong một phần",
+    "blocked": "đang vướng",
+    "failed": "thất bại",
+    "in_progress": "đang làm",
+    "verified": "đã xác minh",
+    "unverified": "chưa xác minh",
+    "pending": "đang chờ",
 }
 STATE_KIND = {
     "succeeded": "done",
@@ -79,11 +89,11 @@ def envelope(
         out.append(f"<b>{escape(truncate(title, 120))}</b>")
     if body:
         out += ["", body]
-    ids = [f"project <b>{escape(project)}</b>"]
+    ids = [f"dự án <b>{escape(project)}</b>"]
     if session:
-        ids.append(f"session <code>{escape(session)}</code>")
+        ids.append(f"phiên <code>{escape(session)}</code>")
     if ref:
-        ids.append(f"ref <code>{escape(ref)}</code>")
+        ids.append(f"mã <code>{escape(ref)}</code>")
     out += ["", "🆔 " + " · ".join(ids)]
     if reply:
         out.append(f"↩️ {reply}")
@@ -110,18 +120,18 @@ def log_block(text: str, max_chars: int = 2500) -> str:
     return code(text)
 
 
-_LOG_LINE = re.compile(
-    r"^\s*(\$ |>>> |Traceback |File \"|at [\w.$]+\(|\d{4}-\d\d-\d\d[T ]\d\d:\d\d|\[?(DEBUG|INFO|WARN|WARNING|ERROR)\b)"
-)
-
-
-def summary_only(text: str, limit: int = 700) -> str:
-    """Telegram gets the summary, not the logs: drop fenced blocks and log-looking lines, cap length.
-    (The full text stays in the report record / get_task_result.)"""
-    text = re.sub(r"```.*?(```|$)", "", text, flags=re.S)
-    lines = [ln for ln in text.strip().splitlines() if not _LOG_LINE.match(ln)]
-    cut = "\n".join(lines).strip()
-    return truncate(cut, limit) if len(cut) > limit else cut
+def chunks(text: str, limit: int = MESSAGE_LIMIT) -> list[str]:
+    """Split text into Telegram-sized parts at line breaks (hard-split only an over-long line)."""
+    out, cur = [], ""
+    for line in text.splitlines(keepends=True):
+        if cur and len(cur) + len(line) > limit:
+            out.append(cur)
+            cur = ""
+        while len(line) > limit:
+            out.append(line[:limit])
+            line = line[limit:]
+        cur += line
+    return [*out, cur] if cur or not out else out
 
 
 def truncate(text: str, n: int) -> str:

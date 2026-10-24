@@ -63,7 +63,7 @@ async def test_telegram_open(settings, cfg_dir, tmp_path, monkeypatch):
         chat=SimpleNamespace(id=CONTROL), from_user=SimpleNamespace(id=USER), answer=answer
     )
     await gw.on_open(m, SimpleNamespace(args="k09-coin-soft-fun"))
-    assert launched == [root / "k09-coin-sort-fun"] and answers[-1].startswith("🖥 <b>OPEN</b>")
+    assert launched == [root / "k09-coin-sort-fun"] and answers[-1].startswith("🖥 <b>MỞ PHIÊN</b>")
     assert "connected the repo" in answers[-1]
     await gw.on_open(m, SimpleNamespace(args="ios"))
     assert "Several folders match" in answers[-1] and "/open ios-quotes" in answers[-1]

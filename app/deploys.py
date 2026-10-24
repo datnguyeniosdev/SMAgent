@@ -19,6 +19,14 @@ from pathlib import Path
 from app.repo_setup import DEPLOY_SCRIPT
 
 ENVS = ("uat", "prod")
+# What /deploy offers: target -> (environment, extra deploy.sh flags, label). The flags are the
+# contract the project scripts follow; a script without iOS store support fails on them, visibly.
+TARGETS = {
+    "uat": ("uat", (), "UAT · Firebase"),
+    "uat-tf": ("uat", ("--testflight",), "UAT · TestFlight"),
+    "prod": ("prod", (), "PROD · App Store upload"),
+    "prod-submit": ("prod", ("--submit",), "PROD · App Store + review"),
+}
 TIMEOUT_S = 3 * 3600  # a cold engine import plus two platform builds can take long
 LINKED = ("4_delivery/deploy/.env.deploy",)  # gitignored, needed by the script
 _running: set[str] = set()
@@ -148,8 +156,9 @@ def stop(repo: Path) -> bool:
 
 async def run(repo: Path, env: str, branch: str, dry_run: bool, log_dir: Path) -> dict:
     """Run the deploy -> {status, commit, log, error, seconds}. status: succeeded | dry_run | failed."""
-    if env not in ENVS:
-        raise ValueError(f"environment must be one of {ENVS}")
+    if env not in TARGETS:
+        raise ValueError(f"target must be one of {tuple(TARGETS)}")
+    env_name, flags, _ = TARGETS[env]
     if busy(repo):
         raise ValueError(f"{repo.name} is already deploying")
     _running.add(str(repo))
@@ -165,7 +174,7 @@ async def run(repo: Path, env: str, branch: str, dry_run: bool, log_dir: Path) -
             log.write_text(f"preparing the deploy worktree failed: {e}\n")
             return {"status": "failed", "commit": "", "log": log, "error": f"checkout failed: {e}",
                     "seconds": int(loop.time() - start)}  # fmt: skip
-        args = [DEPLOY_SCRIPT, env, *(["--dry-run"] if dry_run else [])]
+        args = [DEPLOY_SCRIPT, env_name, *flags, *(["--dry-run"] if dry_run else [])]
         environ = deploy_env()
         with log.open("wb") as out:
             proc = await asyncio.create_subprocess_exec(

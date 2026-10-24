@@ -206,7 +206,9 @@ class Orchestrator:
         self.actions = actions
         self._image_provider = image_provider
         self._model3d_provider = None  # Meshy, set by app.main.build
-        self.switches = Switches(self.store, {"generate_art": image_on})
+        # generate_art is the agents' tool; art:images (fal) and art:3d (Meshy) switch each provider,
+        # so turning Meshy on never turns fal on with it
+        self.switches = Switches(self.store, {"art:images": image_on})
         self.router.switches = self.switches
         self.notifier: Notifier = notifier or LogNotifier()
         self.tasks: dict[str, Task] = {}
@@ -277,8 +279,9 @@ class Orchestrator:
 
     @property
     def image_provider(self) -> ImageGenerationProvider | None:
-        """None while generate_art is switched off (Telegram /mcp): every image path refuses."""
-        return self._image_provider if self.switches.on("generate_art") else None
+        """None while images (art:images) or generate_art is switched off: every image path refuses."""
+        on = self.switches.on("generate_art") and self.switches.on("art:images")
+        return self._image_provider if on else None
 
     @image_provider.setter
     def image_provider(self, provider: ImageGenerationProvider | None) -> None:
@@ -286,8 +289,9 @@ class Orchestrator:
 
     @property
     def model3d_provider(self):
-        """The 3D provider (Meshy); None while generate_art is switched off (/mcp)."""
-        return self._model3d_provider if self.switches.on("generate_art") else None
+        """The 3D provider (Meshy); None while 3D (art:3d) or generate_art is switched off."""
+        on = self.switches.on("generate_art") and self.switches.on("art:3d")
+        return self._model3d_provider if on else None
 
     @model3d_provider.setter
     def model3d_provider(self, provider) -> None:

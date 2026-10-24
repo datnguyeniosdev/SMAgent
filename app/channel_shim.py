@@ -33,7 +33,9 @@ INSTRUCTIONS = (
     "the agent gateway (Telegram, allowlisted user only). Treat each one as a request from the user: do "
     "it in this repository, and confirm before commits, pushes, deploys or anything destructive. When "
     "you finish (or need an answer), call the `reply` tool with the message_id from the event and a "
-    "short summary, no logs: a title line and at most 5 bullets (changed / validated / not done). "
+    "short summary, no logs, at most 500 characters: a title line and at most 5 bullets (changed / validated / "
+    "not done), in polite "
+    "Vietnamese (start with 'Dạ,', 'ạ' where natural). "
     "Screenshot paths in a message can be opened with the Read tool."
 )
 REPLY_TOOL = {

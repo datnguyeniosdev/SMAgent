@@ -211,7 +211,7 @@ async def test_direct_tool_task(settings, repo):
     assert t.state == TaskState.succeeded
     assert steps(orch, t)["run"].output["files"] == ["main.py"]
     assert (
-        "🔧 <b>TOOL</b>" in notes.texts()
+        "🔧 <b>CÔNG CỤ</b>" in notes.texts()
         and "✅ <code>workspace.list_files</code>" in notes.texts()
     )  # real tool event reported
     t = await run(orch, TaskRequest(objective="x", tool="nope.tool"))

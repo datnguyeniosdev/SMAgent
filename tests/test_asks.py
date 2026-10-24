@@ -57,9 +57,8 @@ async def test_agent_asks_agent_and_gets_the_answer(settings, cfg_dir):
             and "128 px" in msg["text"]
             and "needs no reply" in msg["text"]
         )
-        assert (await t("get_messages", {"project": A, "session_id": a_sid}))[
-            "busy"
-        ] is False  # answers don't block
+        again = await t("get_messages", {"project": A, "session_id": a_sid})
+        assert "busy" not in again  # answers don't block
         assert (await t("get_ask", {"ask_id": ask["ask_id"]}))["answer"] == "128 px"
         bad = await c.call_tool("ask_agent", {"to": "nobody-here", "request": "x"})
         assert bad.is_error and "unknown agent or project" in bad.content[0].text
@@ -81,7 +80,7 @@ async def test_unreachable_agent_is_escalated_with_buttons_and_the_operator_answ
     assert ask["state"] == "queued"
     assert await orch.asks.check() == [ask["ask_id"]]
     kind, kw, mid = gw.bot.sent[-1]
-    assert kw["chat_id"] == CONTROL and kw["text"].startswith("🆘 <b>AGENT WAITING</b>")
+    assert kw["chat_id"] == CONTROL and kw["text"].startswith("🆘 <b>AGENT ĐANG CHỜ</b>")
     assert "no open session" in kw["text"] and "Export the coin atlas" in kw["text"]
     labels = [b.text for row in kw["reply_markup"].inline_keyboard for b in row]
     assert labels == ["🔁 Resend", "➡️ Other session", "🚀 Open it", "✍️ Answer myself", "❌ Cancel"]

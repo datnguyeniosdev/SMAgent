@@ -43,7 +43,8 @@ folder (`~/Working`). Project name: the README "Game Identity" as `Name (CODE)`,
 title, else the folder name.
 
 - **Task finished** in such a repo: call `submit_report(project, text, agent_status)`. The text is a
-  title line plus at most 5 short bullets (changed / validated / not done), with no logs.
+  title line plus at most 5 short bullets (changed / validated / not done), at most 500 characters, no logs, in polite
+  Vietnamese ("gọi dạ bảo vâng": title starts with "Dạ,", "ạ" where natural).
 - **Work from Telegram**: when the user asks you to check Telegram or take work, call
   `get_messages(project, agent="{agent}", session_id=<the id it returned before>)`.
   - Do each request, then answer it with `reply_message(session_id, message_id, text)`.
@@ -74,13 +75,45 @@ def paths(agent: str) -> dict[str, Path | None]:
             "mcp": h / ".config/opencode/opencode.json",
             "rules": h / ".config/opencode/AGENTS.md",
         },
-        "codex": {"mcp": h / ".codex/config.toml", "rules": h / ".codex/AGENTS.md"},
+        "codex": {
+            "mcp": h / ".codex/config.toml",
+            "rules": h / ".codex/AGENTS.md",
+            "skills": h / ".codex/skills",
+        },  # fmt: skip
         "antigravity": {
             "mcp": h / ".gemini/config/mcp_config.json",
             "rules": h / ".gemini/GEMINI.md",
         },
         "cursor": {"mcp": h / ".cursor/mcp.json", "rules": None},
     }[agent]
+
+
+def _skills_src() -> Path:
+    return home() / ".claude/skills"
+
+
+def link_skills(dst: Path) -> list[str]:
+    """The Claude Code skills (agent-gateway, game-review, ...) for an agent that reads the same
+    SKILL.md format: symlinks, so an edit or update reaches every agent. Own skills there stay."""
+    src = _skills_src()
+    if not src.is_dir():
+        return []
+    dst.mkdir(parents=True, exist_ok=True)
+    linked = []
+    for d in sorted(src.iterdir()):
+        t = dst / d.name
+        if (d / "SKILL.md").is_file() and not t.exists() and not t.is_symlink():
+            t.symlink_to(d, target_is_directory=True)
+        if t.is_symlink() and t.resolve() == d.resolve():
+            linked.append(d.name)
+    return linked
+
+
+def unlink_skills(dst: Path) -> None:
+    src = _skills_src().resolve()
+    for t in dst.iterdir() if dst.is_dir() else ():
+        if t.is_symlink() and t.resolve().parent == src:
+            t.unlink()
 
 
 def detected() -> list[str]:
@@ -196,7 +229,12 @@ def install(agent: str, url: str = "http://127.0.0.1:8000/mcp", token: bool | No
     if rules is not None:
         _backup(rules)
         _block(rules, INSTRUCTIONS.format(agent=agent))
-        return f"{agent}: MCP in {mcp}, instructions in {rules}; restart {agent}"
+        skills = (
+            f", skills ({', '.join(link_skills(p['skills']))}) in {p['skills']}"
+            if p.get("skills")
+            else ""
+        )
+        return f"{agent}: MCP in {mcp}, instructions in {rules}{skills}; restart {agent}"
     return (f"{agent}: MCP in {mcp}; Cursor keeps global rules in its UI: paste the text from "
             "`agw setup --agents cursor --print-rules` into Cursor > Settings > Rules; restart Cursor")  # fmt: skip
 
@@ -214,6 +252,8 @@ def remove(agent: str) -> str:
             _write_json(mcp, data)
     if p["rules"] is not None and p["rules"].exists():
         _block(p["rules"], None)
+    if p.get("skills"):
+        unlink_skills(p["skills"])
     return f"{agent}: gateway entries removed"
 
 

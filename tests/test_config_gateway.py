@@ -384,7 +384,7 @@ async def test_uc03_report_with_screenshots_published_and_unverified(settings, c
         ).structured_content
         # Agent says "completed"; the gateway has no gate evidence and the handoff was pending -> unverified.
         assert rep["verified_status"] == "unverified"
-        assert rep["pending_actions"] == ["agent reports completion; gateway has not verified it"]
+        assert rep["pending_actions"] == ["agent báo đã xong; gateway chưa tự kiểm chứng"]
         bad = await c.call_tool(
             "submit_report",
             {
@@ -480,7 +480,7 @@ async def test_uc04_uc05_visual_feedback_end_to_end(settings, cfg_dir, env):
     text = "The layout is not correct. Use Gemini to redesign the layout, then create a prompt for Claude to implement the changes in the existing Unity project."
     m, kw = reply_msg(text, fwd_copy)
     await gw.on_discussion(m, **kw)
-    assert m.replies[0].startswith("💬 <b>FEEDBACK</b>") and "started (visual)" in m.replies[0]
+    assert m.replies[0].startswith("💬 <b>PHẢN HỒI</b>") and "started (visual)" in m.replies[0]
     fb = [f for f in orch.store.list("feedback")][0]
     assert (
         fb["task_id"] == t.task_id
@@ -964,9 +964,9 @@ async def test_report_deployment_posts_to_channel_and_records(settings, cfg_dir)
         kind, kw, mid = gw.bot.sent[-1]
         assert kw["chat_id"] == CHANNEL and mid == r["channel_message_id"]
         text = kw["text"]
-        assert text.startswith("🚀 <b>DEPLOY</b> · #2048_Shooter_K05")  # prefix · project tag
-        assert "<b>✅ uat · succeeded</b>" in text and "project <b>2048 Shooter (K05)</b>" in text
-        assert "ref <code>dep_" in text and "&lt;b&gt;x&lt;/b&gt;" in text  # user text escaped
+        assert text.startswith("🚀 <b>TRIỂN KHAI</b> · #2048_Shooter_K05")  # prefix · project tag
+        assert "<b>✅ uat · succeeded</b>" in text and "dự án <b>2048 Shooter (K05)</b>" in text
+        assert "mã <code>dep_" in text and "&lt;b&gt;x&lt;/b&gt;" in text  # user text escaped
         bad = await c.call_tool(
             "report_deployment", {"project": "x", "environment": "prod", "status": "great"}
         )
@@ -996,13 +996,15 @@ async def test_final_report_for_every_task_with_images(settings, cfg_dir):
     assert final.artifact_ids == [good.artifact_id]  # failed-validation image excluded
     kinds = [(k, kw.get("reply_parameters")) for k, kw, _ in gw.bot.sent[-2:]]
     head = gw.bot.sent[-2][1]["text"]
-    assert kinds[0][0] == "message" and head.startswith(f"✅ <b>DONE</b> · #project · #{t.task_id}")
-    assert "session <code>" in head and "🖼 1" in head
+    assert kinds[0][0] == "message" and head.startswith(
+        f"✅ <b>HOÀN THÀNH</b> · #project · #{t.task_id}"
+    )
+    assert "phiên <code>" in head and "🖼 1" in head
     assert kinds[1][0] == "photo" and kinds[1][1].message_id == final.telegram.channel_message_id
     # failed tasks are reported too
     t2 = await run(orch, TaskRequest(objective="x", tool="nope.tool"))
     last = [kw["text"] for k, kw, _ in gw.bot.sent if k == "message"][-1]
-    assert t2.state == TaskState.failed and last.startswith("❌ <b>FAILED</b>")
+    assert t2.state == TaskState.failed and last.startswith("❌ <b>THẤT BẠI</b>")
     ev = [e for e in orch.store.events(t2.task_id) if e["type"] == "task.final_report"]
     assert ev and ev[-1]["data"]["delivered"] is True
 
@@ -1026,9 +1028,9 @@ def test_envelope_and_templates_prefill_ids():
         title="Pause <menu>", session="ses_1", ref="rep_abcdef0123", reply="Reply to this post",
     )  # fmt: skip
     lines = html.split("\n")
-    assert lines[0] == "📋 <b>REPORT</b> · #2048_Shooter_K05 · #tsk_0123456789"
+    assert lines[0] == "📋 <b>BÁO CÁO</b> · #2048_Shooter_K05 · #tsk_0123456789"
     assert lines[1] == "<b>Pause &lt;menu&gt;</b>"
-    assert "session <code>ses_1</code> · ref <code>rep_abcdef0123</code>" in lines[-2]
+    assert "phiên <code>ses_1</code> · mã <code>rep_abcdef0123</code>" in lines[-2]
     t = templates(fmt.plain(html))
     assert (
         "<code>/report tsk_0123456789</code>" in t and "<code>/feedback rep_abcdef0123 </code>" in t
@@ -1056,8 +1058,8 @@ async def test_single_group_mode_report_and_reply(settings, cfg_dir):
     m, kw = reply_msg("make the buttons bigger", target)
     await gw.on_discussion(m, **kw)
     assert [f.text for f in orch.collab.feedback_for(t.task_id)] == ["make the buttons bigger"]
-    assert len(m.replies) == 1 and m.replies[0].startswith("💬 <b>FEEDBACK</b> · #2048")
-    assert "Queued" in m.replies[0] and "ref <code>fb_" in m.replies[0]  # one threaded ack
+    assert len(m.replies) == 1 and m.replies[0].startswith("💬 <b>PHẢN HỒI</b> · #2048")
+    assert "Queued" in m.replies[0] and "mã <code>fb_" in m.replies[0]  # one threaded ack
 
 
 def fmt_plain(html):

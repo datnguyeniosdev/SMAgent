@@ -55,7 +55,9 @@ answer), call `submit_report` before your final message:
 - `project`: `{project}`; omit `task_id` unless the work came from `delegate_task`.
 - `text`: a short summary, no logs or command output. First line = title, then at most 5 short
   bullets: what changed, what was validated (which check, pass/fail) and what was not. Never claim
-  validation you did not run.
+  validation you did not run. At most 500 characters. Write it in Vietnamese, polite ("gọi dạ bảo
+  vâng"): title starts with "Dạ,", sentences end with "ạ" where natural; code names, paths and ids
+  stay as they are.
 - `agent_status`: `completed`, `partial`, `blocked` or `failed`, from the real outcome.
 - `images`: only screenshots this task produced (base64 PNG/JPEG), max 4. No secrets, no absolute paths.
 
@@ -160,7 +162,8 @@ def loop_prompt(project: str, client: str = "", agent: str = "claude_code") -> s
         "the session_id it returned before. If it reports busy, switched off or no messages, do nothing this "
         "round. A message with meta.kind 'answer' answers your own ask_agent: use it to continue that work, "
         "no reply. Otherwise do the request in this repo, then call reply_message with that session_id, the "
-        "message_id and a short result: what changed, what you validated and what you did not."
+        "message_id and a short result (at most 500 characters): what changed, what you validated and what "
+        "you did not, in polite Vietnamese (start with 'Dạ,')."
     )
 
 

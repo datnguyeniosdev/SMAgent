@@ -104,3 +104,17 @@ def test_token_header_names_the_variable_never_the_secret(home):
     assert codex["bearer_token_env_var"] == "AGW_API_TOKEN"
     for f in (".gemini/config/mcp_config.json", ".cursor/mcp.json"):
         assert "Bearer ${" in (home / f).read_text()
+
+
+def test_codex_gets_the_claude_skills_as_links(home):
+    for name in ("agent-gateway", "game-review"):
+        (home / ".claude/skills" / name).mkdir(parents=True)
+        (home / ".claude/skills" / name / "SKILL.md").write_text("---\nname: x\n---\n")
+    (home / ".claude/skills/synced").mkdir()  # not a skill: no SKILL.md
+    (home / ".codex/skills/mine").mkdir(parents=True)  # the user's own skill stays
+    out = ag.install("codex", URL, token=False)
+    assert "skills (agent-gateway, game-review)" in out
+    links = home / ".codex/skills"
+    assert (links / "game-review").is_symlink() and not (links / "synced").exists()
+    ag.remove("codex")
+    assert sorted(p.name for p in links.iterdir()) == ["mine"]

@@ -81,7 +81,7 @@ def build_mcp_server(svc) -> MCPServer:
             raise GatewayToolError("model_format must be glb, fbx, obj, usdz or stl")
         if svc.model3d_provider is None:
             raise GatewayToolError(
-                "no 3D provider is on: set MESHY_API_KEY (/keys) and check generate_art in /mcp"
+                "no 3D provider is on: set MESHY_API_KEY (/keys) and switch on 🧊 3D (Meshy) in /mcp"
             )
         brief = f"{prompt.strip()}. For: {purpose.strip()}. {requirements.strip()}"
         if len(brief) > 800:
@@ -320,7 +320,8 @@ def build_mcp_server(svc) -> MCPServer:
         image_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         """Report work on a task: a short summary for Telegram, no logs or command output (title line,
-        then at most 5 short bullets; logs are stripped and long text is cut).
+        then at most 5 short bullets, at most 500 characters; logs are stripped and longer text is
+        cut). Write it in polite Vietnamese ("gọi dạ bảo vâng"): the title starts with "Dạ,", "ạ" where natural.
         image_paths: absolute paths of local PNG/JPEG/WebP/GIF files (e.g. screenshots you saved).
         images: [{"name": "shot.png", "data_base64": "..."}], when there is no file.
         The gateway publishes the report to Telegram and records agent status separately from verification.
@@ -526,21 +527,18 @@ def build_mcp_server(svc) -> MCPServer:
                     "have that request in mind (a fresh run), in_progress_messages has it: finish it now")  # fmt: skip
         else:
             note = "" if msgs else "no new requests; do nothing"
-        return {
-            "session_id": sess.session_id,
-            "enabled": sess.enabled,
-            "closed": sess.closing,
-            "busy": bool(busy),
-            "in_progress": [m["message_id"] for m in busy],
-            "in_progress_messages": [
-                {"message_id": m["message_id"], "text": m["text"], "meta": m.get("meta", {})}
-                for m in busy
-            ],
-            "messages": [
-                {"message_id": m["message_id"], "text": m["text"], "meta": m["meta"]} for m in msgs
-            ],
-            "note": note,
-        }
+        # Polled every minute: only non-default fields, so an idle poll costs a few tokens.
+        out: dict[str, Any] = {"session_id": sess.session_id, "messages": [slim(m) for m in msgs]}
+        if not sess.enabled:
+            out["enabled"] = False
+        if sess.closing:
+            out["closed"] = True
+        if busy:
+            out["busy"] = True
+            out["in_progress_messages"] = [slim(m) for m in busy]
+        if note:
+            out["note"] = note
+        return out
 
     @tool
     async def reply_message(
@@ -550,7 +548,9 @@ def build_mcp_server(svc) -> MCPServer:
         image_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         """Pull mode: answer the operator on Telegram with a short summary, no logs (first line =
-        title, then at most 5 short bullets: what changed, what was validated, what was not).
+        title, then at most 5 short bullets: what changed, what was validated, what was not; at most
+        500 characters), in
+        polite Vietnamese: start with "Dạ,", "ạ" where natural.
         image_paths: absolute paths of local PNG/JPEG/WebP/GIF files to attach (e.g. screenshots).
         Their Telegram reply comes back through get_messages."""
         images = paths_or_error(image_paths)
@@ -569,13 +569,16 @@ def build_mcp_server(svc) -> MCPServer:
         """Agent sessions that are open now (any project, any agent tool): s# id, project, agent,
         mode (push/pull), whether it can take work, what it is busy with. Use before ask_agent."""
         hub = svc.channel
-        return {"agents": [
-            {"id": f"s{s.num}", "session_id": s.session_id, "project": s.project, "agent": s.agent or None,
-             "kind": s.kind, "mode": s.mode, "can_take_work": s.deliverable, "enabled": s.enabled, "blocked": s.blocked,
-             "busy_with": [f"m{m.get('num')}" for m in hub.in_progress(s.session_id)],
-             "folder": s.cwd.rstrip("/").rsplit("/", 1)[-1], "last_seen": s.last_seen.isoformat()}
-            for s in hub.live()
-        ]}  # fmt: skip
+        agents = []
+        for s in hub.live():
+            a = {"id": f"s{s.num}", "project": s.project, "agent": s.agent or None, "mode": s.mode,
+                 "folder": s.cwd.rstrip("/").rsplit("/", 1)[-1]}  # fmt: skip
+            if not s.deliverable:
+                a["can_take_work"] = False
+            if busy := [f"m{m.get('num')}" for m in hub.in_progress(s.session_id)]:
+                a["busy_with"] = busy
+            agents.append(a)
+        return {"agents": agents}
 
     @tool
     async def review_project(
@@ -651,6 +654,12 @@ def paths_or_error(paths: list[str] | None) -> list[tuple[str, bytes]]:
         return load_image_paths(paths)
     except AttachmentError as e:
         raise GatewayToolError(str(e)) from e
+
+
+def slim(m: dict) -> dict[str, Any]:
+    """A message for get_messages, without meta keys that repeat the message id or the project."""
+    meta = {k: v for k, v in (m.get("meta") or {}).items() if k not in ("message_id", "project")}
+    return {"message_id": m["message_id"], "text": m["text"], **({"meta": meta} if meta else {})}
 
 
 def reply_result(rep) -> dict[str, Any]:
