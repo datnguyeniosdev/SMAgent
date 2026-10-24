@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import shutil
+import sys
 import tomllib
 from pathlib import Path
 
@@ -84,6 +86,7 @@ def paths(agent: str) -> dict[str, Path | None]:
             "mcp": h / ".codex/config.toml",
             "rules": h / ".codex/AGENTS.md",
             "skills": h / ".codex/skills",
+            "hooks": h / ".codex/hooks.json",
         },  # fmt: skip
         "antigravity": {
             "mcp": h / ".gemini/config/mcp_config.json",
@@ -112,6 +115,23 @@ def link_skills(dst: Path) -> list[str]:
         if t.is_symlink() and t.resolve() == d.resolve():
             linked.append(d.name)
     return linked
+
+
+def codex_hooks(path: Path, install: bool) -> None:
+    """SessionStart/SessionEnd -> `agw codex-hook` (the Codex desktop relay). Other hooks stay."""
+    cmd = f"{shlex.quote(str(Path(sys.executable).parent / 'agw'))} codex-hook"
+    data = _json(path)
+    hooks = data.setdefault("hooks", {})
+    for event in ("SessionStart", "SessionEnd"):
+        groups = [g for g in hooks.get(event, [])
+                  if not any("codex-hook" in h.get("command", "") for h in g.get("hooks", []))]  # fmt: skip
+        if install:
+            groups.append({"hooks": [{"type": "command", "command": cmd}]})
+        if groups:
+            hooks[event] = groups
+        else:
+            hooks.pop(event, None)
+    _write_json(path, data)
 
 
 def unlink_skills(dst: Path) -> None:
@@ -254,6 +274,10 @@ def install(agent: str, url: str = "http://127.0.0.1:8000/mcp", token: bool | No
             if p.get("skills")
             else ""
         )
+        if p.get("hooks"):
+            codex_hooks(p["hooks"], install=True)
+            skills += (f", desktop relay hook in {p['hooks']} (approve it once when Codex asks to "
+                       "review the new hook)")  # fmt: skip
         return f"{agent}: MCP in {mcp}, instructions in {rules}{skills}; restart {agent}"
     return (f"{agent}: MCP in {mcp}; Cursor keeps global rules in its UI: paste the text from "
             "`agw setup --agents cursor --print-rules` into Cursor > Settings > Rules; restart Cursor")  # fmt: skip
@@ -275,6 +299,8 @@ def remove(agent: str) -> str:
         _block(p["rules"], None)
     if p.get("skills"):
         unlink_skills(p["skills"])
+    if p.get("hooks") and p["hooks"].exists():
+        codex_hooks(p["hooks"], install=False)
     return f"{agent}: gateway entries removed"
 
 

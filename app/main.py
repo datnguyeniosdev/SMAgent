@@ -857,13 +857,17 @@ def _local_only(request: Request) -> None:
 
 
 @app.get("/api/v1/channel/peek", include_in_schema=False)
-async def channel_peek(request: Request, project: str, agent: str, cwd: str = ""):
-    """`agw session --agent X`: keep its pull session listed and say whether there is anything to do,
-    so the agent CLI (a paid model run) starts only when there is work."""
+async def channel_peek(
+    request: Request, project: str, agent: str, cwd: str = "", client: str = "cli"
+):
+    """`agw session --agent X` and the Codex desktop relay: keep the pull session listed and say whether
+    there is anything to do (work: new or unfinished; queued: new only), so a paid model run starts
+    only when there is work."""
     _local_only(request)
-    s, _, busy = request.app.state.orch.channel.pull(project, None, cwd, 0, agent, "cli")
-    return {"closing": s.closing, "enabled": s.enabled,
-            "work": s.enabled and not s.closing and (bool(busy) or not s.queue.empty())}  # fmt: skip
+    s, _, busy = request.app.state.orch.channel.pull(project, None, cwd, 0, agent, client)
+    queued = s.enabled and not s.closing and not s.queue.empty()
+    return {"closing": s.closing, "enabled": s.enabled, "queued": queued,
+            "work": queued or (s.enabled and not s.closing and bool(busy))}  # fmt: skip
 
 
 @app.get("/api/v1/channel/stream", include_in_schema=False)

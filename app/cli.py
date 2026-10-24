@@ -420,10 +420,6 @@ def _claude_version(claude: str) -> tuple[int, ...]:
 
 
 # One-shot runs of other agents' CLIs (prompt last). ponytail: codex/gemini flags unverified on this Mac.
-# Codex installed with the ChatGPT desktop app is not on PATH.
-CODEX_APP_CLI = (
-    "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
-)
 AGENT_RUN = {
     "opencode": ["opencode", "run"],
     # workspace-write with approvals reviewed automatically (--full-auto is gone in newer codex)
@@ -434,13 +430,12 @@ AGENT_RUN = {
 
 def cmd_agent_loop(args) -> int:
     """A terminal that runs another agent once a minute to take work from Telegram (it has no loop of its own)."""
+    from app.codex_relay import codex_cli
     from app.projects import project_for
     from app.repo_setup import loop_prompt
 
     base = AGENT_RUN[args.agent]
-    exe = shutil.which(base[0]) or (
-        CODEX_APP_CLI if base[0] == "codex" and Path(CODEX_APP_CLI).is_file() else None
-    )
+    exe = codex_cli() if base[0] == "codex" else shutil.which(base[0])
     if exe is None:
         raise SystemExit(f"{base[0]} not found on PATH")
     base = [exe, *base[1:]]
@@ -570,6 +565,27 @@ def cmd_hook_session_start(args) -> int:
         "(short reports, Telegram requests, reviewed art, refreshing the session after setup)."
     )
     return 0
+
+
+def cmd_codex_hook(args) -> int:
+    """Codex SessionStart/SessionEnd hook: start or stop the desktop relay for this folder."""
+    from app.codex_relay import hook
+
+    try:
+        event = json.loads(sys.stdin.read() or "{}")
+    except ValueError:
+        return 0
+    out = hook(event)
+    if out:
+        print(json.dumps(out))
+    return 0
+
+
+def cmd_codex_relay(args) -> int:
+    from app.codex_relay import relay
+    from app.config import ENV_PORTS
+
+    return relay(args.cwd, ENV_PORTS["prod"])
 
 
 ENV_TEMPLATE = """# agw environment "{env}": runs beside prod on port {port}, own data in var/{env}.
@@ -752,6 +768,10 @@ def main(argv: list[str] | None = None) -> int:
     sp = sub.add_parser("hook-session-start")
     sp.add_argument("--project")
     sp.set_defaults(fn=cmd_hook_session_start)
+    sub.add_parser("codex-hook").set_defaults(fn=cmd_codex_hook)  # Codex SessionStart/End
+    sp = sub.add_parser("codex-relay")
+    sp.add_argument("--cwd", required=True)
+    sp.set_defaults(fn=cmd_codex_relay)
 
     args, extra = p.parse_known_args(argv)
     if args.cmd == "session":  # everything unknown goes to claude (e.g. --continue, --resume <id>)
