@@ -114,3 +114,16 @@ async def test_review_can_be_stopped(settings, cfg_dir, tmp_path):
     assert done["state"] == "failed" and "stopped by the operator" in done["problems"]
     assert "Review failed" in gw.bot.sent[-1][1]["text"]
     assert Path(script).exists()
+
+
+async def test_html_escaped_project_name_reaches_the_same_session(settings, cfg_dir):
+    """Codex (glm) sometimes sends "Stack &amp; Merge": it must still get that project's work."""
+    orch, _ = make(settings, cfg_dir, [])
+    p = "Coinlets: Stack & Merge (TCN)"
+    async with Client(build_mcp_server(orch)) as c:
+        first = await c.call_tool("get_messages", {"project": p, "agent": "codex", "cwd": "/w/c"})
+        msg, _ = orch.channel.send(p, "report progress")
+        args = {"project": "Coinlets: Stack &amp; Merge (TCN)", "agent": "codex", "cwd": "/w/c"}
+        got = (await c.call_tool("get_messages", args)).structured_content
+    assert got["session_id"] == first.structured_content["session_id"]
+    assert [m["message_id"] for m in got["messages"]] == [msg["message_id"]]

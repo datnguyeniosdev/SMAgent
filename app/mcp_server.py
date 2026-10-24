@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import binascii
 import functools
+import html
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
@@ -66,6 +67,8 @@ def build_mcp_server(svc) -> MCPServer:
                     f"{fn.__name__} is switched off by the operator (Telegram /mcp); "
                     "continue without it or ask the operator to turn it on"
                 )
+            if isinstance(kwargs.get("project"), str):  # some models send "Stack &amp; Merge"
+                kwargs["project"] = html.unescape(kwargs["project"]).strip()
             return await fn(*args, **kwargs)
 
         return server.tool()(gated)
