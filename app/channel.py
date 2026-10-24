@@ -487,6 +487,11 @@ class ChannelHub:
         Nothing new while it still has an unanswered message (no duplicate or parallel jobs).
         Returns (session, new messages, messages still in progress)."""
         sid = session_id or self.pull_id(project, agent, cwd)
+        if not session_id and not cwd and sid not in self.sessions:
+            # the agent forgot cwd (Codex desktop does): its project's one open session of that tool
+            mine = [x for x in self.sessions.values() if x.mode == "pull" and x.project == project
+                    and x.agent == agent and x.cwd]  # fmt: skip
+            sid = mine[0].session_id if len(mine) == 1 else sid
         if sid in self._stopping:  # /close: hand out nothing; the tool tells the loop to stop
             self._stopping.discard(sid)
             return LiveSession(sid, project, cwd, "", mode="pull", closing=True), [], []

@@ -73,3 +73,17 @@ def test_setup_adds_and_removes_only_its_codex_hooks(tmp_path):
     assert "codex-hook" in hooks["SessionEnd"][0]["hooks"][0]["command"]
     ag.codex_hooks(path, install=False)
     assert json.loads(path.read_text())["hooks"] == {"SessionStart": [mine]}
+
+
+async def test_get_messages_without_cwd_finds_the_folder_session(settings, cfg_dir):
+    """Codex desktop calls get_messages without cwd: it still gets the relay's (folder) session."""
+    from tests.test_config_gateway import make
+
+    orch, _ = make(settings, cfg_dir, [])
+    hub, p = orch.channel, "Coinlets"
+    relay_s, _, _ = hub.pull(p, None, "/w/coin", 0, "codex", "app")  # the relay's peek
+    msg, _ = hub.send(p, "report progress", session_id=relay_s.session_id)
+    s, got, _ = hub.pull(p, None, "", 1, "codex", "app")  # the desktop thread, no cwd
+    assert s.session_id == relay_s.session_id and [m["message_id"] for m in got] == [
+        msg["message_id"]
+    ]
