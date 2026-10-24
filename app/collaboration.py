@@ -459,8 +459,9 @@ class CollaborationService:
         if len(title) > 120 or not rest.strip():  # a one-line answer: all of it in the quote block
             title, rest = "", text.strip()
         vi = fmt.STATUS_VI
-        meta = [f"từ {fmt.escape(report.source)}",
-                f"gateway: {vi.get(report.verified_status, report.verified_status)}"]  # fmt: skip
+        meta = [f"từ {fmt.escape(report.source)}"]
+        if report.verified_status != "unverified":  # only when the gateway checked something itself
+            meta.append(f"gateway: {vi.get(report.verified_status, report.verified_status)}")
         if note:
             meta.append(fmt.escape(f"trả lời {note.rstrip(')')}"))
         if report.agent_status:

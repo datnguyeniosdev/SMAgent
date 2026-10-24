@@ -150,3 +150,15 @@ async def test_quote_block_holds_only_the_agents_answer(settings, cfg_dir):
     sent = gw.bot.sent[-1][1]["text"]
     block = sent.split("<blockquote>")[1].split("</blockquote>")[0]
     assert block == "Dạ, chào lại anh/chị ạ." and "trả lời chm_ff4acac414" in sent
+
+
+async def test_unverified_reports_hide_the_gateway_label(settings, cfg_dir):
+    """An agent's own report is never checked by the gateway: no 'chưa xác minh' noise."""
+    orch, _ = make(settings, cfg_dir, [])
+    gw = gateway(orch)
+    task = orch.register_external("Telegram request", "mcp", A)
+    await orch.collab.submit_report(
+        task_id=task.task_id, text="Dạ, xong ạ", source="codex (pull session)"
+    )
+    sent = gw.bot.sent[-1][1]["text"]
+    assert "từ codex (pull session)" in sent and "gateway:" not in sent
