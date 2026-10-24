@@ -7,6 +7,7 @@ plugins; execution lives in the engine and the tool executor.
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -279,9 +280,18 @@ class Orchestrator:
 
     @property
     def image_provider(self) -> ImageGenerationProvider | None:
-        """None while images (art:images) or generate_art is switched off: every image path refuses."""
-        on = self.switches.on("generate_art") and self.switches.on("art:images")
-        return self._image_provider if on else None
+        """fal while images (art:images) are on; else Meshy text-to-image while 3D (art:3d) is on;
+        None while generate_art is switched off: every image path refuses."""
+        if not self.switches.on("generate_art"):
+            return None
+        if self._image_provider and self.switches.on("art:images"):
+            return self._image_provider
+        meshy = self._model3d_provider
+        if meshy is not None and getattr(meshy, "available", False) and self.switches.on("art:3d"):
+            from app.connectors.meshy import MeshyImages
+
+            return MeshyImages(meshy, os.environ.get("MESHY_IMAGE_MODEL"))
+        return None
 
     @image_provider.setter
     def image_provider(self, provider: ImageGenerationProvider | None) -> None:

@@ -163,3 +163,47 @@ def test_meshy_and_fal_switch_apart(settings, cfg_dir):
     assert orch.model3d_provider is not None and orch.image_provider is None
     orch.switches.set("generate_art", False)  # the tool itself off: both refuse
     assert orch.model3d_provider is None and orch.image_provider is None
+    orch.switches.set(
+        "art:3d", True
+    )  # turning Meshy on turns the tool on again (it was off in prod)
+    assert orch.switches.on("generate_art") and orch.model3d_provider is not None
+
+
+async def test_meshy_makes_images_when_fal_is_off():
+    from app.connectors.meshy import MeshyImages
+
+    calls = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        calls.append(req)
+        if req.method == "POST":
+            return httpx.Response(202, json={"result": "img-1"})
+        if req.url.host == "assets.meshy.ai":
+            return httpx.Response(200, content=make_png(32, 32))
+        return httpx.Response(200, json={"id": "img-1", "status": "SUCCEEDED",
+                                         "image_urls": ["https://assets.meshy.ai/img-1/0.png"]})  # fmt: skip
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    images = MeshyImages(MeshyProvider("k", client=client, poll_s=0))
+    png = await images.generate("a gold coin", "1920x1080", transparent=True)
+    assert png.startswith(b"\x89PNG")
+    body = json.loads(calls[0].content)
+    assert calls[0].url.path == "/openapi/v1/text-to-image"
+    assert body == {"ai_model": "nano-banana", "prompt": "a gold coin", "aspect_ratio": "16:9",
+                    "remove_background": True}  # fmt: skip
+
+
+def test_images_come_from_fal_then_meshy(settings, cfg_dir):
+    from types import SimpleNamespace
+
+    from app.connectors.meshy import MeshyImages
+    from tests.test_config_gateway import make
+
+    orch, _ = make(settings, cfg_dir, [])
+    orch.image_provider = SimpleNamespace(name="fal")
+    orch.model3d_provider = MeshyProvider("k")
+    assert orch.image_provider.name == "fal"
+    orch.switches.set("art:images", False)  # fal off: Meshy makes the images
+    assert isinstance(orch.image_provider, MeshyImages)
+    orch.switches.set("art:3d", False)
+    assert orch.image_provider is None

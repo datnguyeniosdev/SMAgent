@@ -120,6 +120,42 @@ class MeshyProvider:
                                  "provider", outcome="unknown") from e  # fmt: skip
 
 
+RATIOS = {"1:1": 1.0, "16:9": 16 / 9, "9:16": 9 / 16, "4:3": 4 / 3, "3:4": 3 / 4}
+
+
+class MeshyImages:
+    """Meshy text-to-image as an image provider for generate_art (when fal is off):
+    POST /openapi/v1/text-to-image {ai_model, prompt, aspect_ratio, remove_background} -> image_urls[0].
+    Meshy returns its own size; the nearest supported aspect ratio is asked for."""
+
+    name = "meshy"
+    verification = "mocked"
+    exact_size = False
+
+    def __init__(self, meshy: MeshyProvider, model: str | None = None):
+        self.meshy, self.model = meshy, model or "nano-banana"
+
+    async def health_status(self) -> tuple[str, str]:
+        return await self.meshy.health_status()
+
+    async def generate(self, prompt: str, size: str, transparent: bool) -> bytes:
+        if not self.meshy.available:
+            raise ConnectorError("meshy is not configured (MESHY_API_KEY)", "unavailable")
+        w, _, h = size.partition("x")
+        want = int(w) / int(h) if w.isdigit() and h.isdigit() and int(h) else 1.0
+        ratio = min(RATIOS, key=lambda k: abs(RATIOS[k] - want))
+        path = "/openapi/v1/text-to-image"
+        body = {"ai_model": self.model, "prompt": prompt, "aspect_ratio": ratio,
+                "remove_background": transparent}  # fmt: skip
+        task = await self.meshy._wait(path, await self.meshy._post(path, body))
+        urls = task.get("image_urls") or []
+        if not urls:
+            raise ConnectorError(
+                f"meshy task {task['id']} has no image", "provider", outcome="unknown"
+            )
+        return await self.meshy._download(urls[0], task["id"])
+
+
 def _detail(r: httpx.Response) -> str:
     try:
         body = r.json()
