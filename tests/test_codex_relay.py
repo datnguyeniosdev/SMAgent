@@ -87,3 +87,12 @@ async def test_get_messages_without_cwd_finds_the_folder_session(settings, cfg_d
     assert s.session_id == relay_s.session_id and [m["message_id"] for m in got] == [
         msg["message_id"]
     ]
+
+
+def test_loop_prompt_lets_a_fresh_run_finish_unanswered_work():
+    """A busy reply must not stop a new thread from finishing what a dead session left behind."""
+    from app.repo_setup import loop_prompt
+
+    p = loop_prompt("Coinlets", "app", "codex")
+    assert "If it reports busy, follow its note" in p and "in_progress_messages" in p
+    assert "busy, switched off or no messages, do nothing" not in p
