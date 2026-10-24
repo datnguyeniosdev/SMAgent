@@ -176,6 +176,16 @@ def _block(path: Path, text: str | None, start: str = START, end: str = END) -> 
         path.write_text(base + "\n" if base else "")
 
 
+def _codex_strip(text: str) -> str:
+    """config.toml without the gateway's markers and its [mcp_servers.<SERVER>] table. Only those:
+    the Codex app rewrites the file and may move its own tables in between the markers."""
+    text = re.sub(
+        rf"^(?:{re.escape(TOML_START)}|{re.escape(TOML_END)})[ \t]*\n?", "", text, flags=re.M
+    )
+    table = rf"^\[mcp_servers\.{re.escape(SERVER)}\][^\n]*\n(?:(?!\[)[^\n]*(?:\n|$))*"
+    return re.sub(table, "", text, flags=re.M).strip()
+
+
 def configured(agent: str) -> bool:
     p = paths(agent)["mcp"]
     if not p.exists():
@@ -205,14 +215,19 @@ def install(agent: str, url: str = "http://127.0.0.1:8000/mcp", token: bool | No
         _write_json(mcp, data)
     elif agent == "codex":
         old = mcp.read_text() if mcp.exists() else ""
-        outside = re.sub(re.escape(TOML_START) + r".*?" + re.escape(TOML_END), "", old, flags=re.S)
-        if re.search(rf"^\[mcp_servers\.{re.escape(SERVER)}\]", outside, re.M):
+        if TOML_START not in old and re.search(
+            rf"^\[mcp_servers\.{re.escape(SERVER)}\]", old, re.M
+        ):
             return (
                 f"{mcp}: [mcp_servers.{SERVER}] already exists (not managed here); left unchanged"
             )
         auth = '\nbearer_token_env_var = "AGW_API_TOKEN"' if token else ""
-        _block(mcp, f'[mcp_servers.{SERVER}]\nurl = "{url}"\nstartup_timeout_sec = 10\ntool_timeout_sec = 120{auth}',
-               TOML_START, TOML_END)  # fmt: skip
+        # the gateway's own tools run without a prompt (codex exec cannot answer one)
+        table = (f'[mcp_servers.{SERVER}]\nurl = "{url}"\nstartup_timeout_sec = 10\ntool_timeout_sec = 120'
+                 f'\ndefault_tools_approval_mode = "approve"{auth}')  # fmt: skip
+        base = _codex_strip(old)
+        mcp.parent.mkdir(parents=True, exist_ok=True)
+        mcp.write_text((base + "\n\n" if base else "") + f"{TOML_START}\n{table}\n{TOML_END}\n")
         try:
             tomllib.loads(mcp.read_text())
         except tomllib.TOMLDecodeError as e:  # never leave Codex with a broken config
@@ -250,7 +265,8 @@ def remove(agent: str) -> str:
     mcp = p["mcp"]
     if mcp.exists():
         if agent == "codex":
-            _block(mcp, None, TOML_START, TOML_END)
+            base = _codex_strip(mcp.read_text())
+            mcp.write_text(base + "\n" if base else "")
         else:
             data = _json(mcp)
             data.get("mcp" if agent == "opencode" else "mcpServers", {}).pop(SERVER, None)

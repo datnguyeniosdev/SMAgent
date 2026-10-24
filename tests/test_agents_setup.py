@@ -118,3 +118,22 @@ def test_codex_gets_the_claude_skills_as_links(home):
     assert (links / "game-review").is_symlink() and not (links / "synced").exists()
     ag.remove("codex")
     assert sorted(p.name for p in links.iterdir()) == ["mine"]
+
+
+def test_codex_app_tables_inside_the_markers_survive(home):
+    """The Codex app rewrites config.toml and can leave its own tables between our markers."""
+    (home / ".codex").mkdir()
+    rewritten = (CODEX + f"\n{ag.TOML_START}\n[mcp_servers.agent-gateway]\nurl = \"{URL}\"\n\n"
+                 '[mcp_servers.node_repl]\ncommand = "node_repl"\n\n[desktop]\nmode = "steer"\n'
+                 f"{ag.TOML_END}")  # fmt: skip
+    (home / ".codex/config.toml").write_text(rewritten)
+    ag.install("codex", URL)
+    cfg = tomllib.loads((home / ".codex/config.toml").read_text())
+    assert (
+        cfg["mcp_servers"]["node_repl"]["command"] == "node_repl"
+        and cfg["desktop"]["mode"] == "steer"
+    )
+    assert cfg["mcp_servers"]["agent-gateway"]["default_tools_approval_mode"] == "approve"
+    ag.remove("codex")
+    cfg = tomllib.loads((home / ".codex/config.toml").read_text())
+    assert "agent-gateway" not in cfg["mcp_servers"] and cfg["desktop"]["mode"] == "steer"

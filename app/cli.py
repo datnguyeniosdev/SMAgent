@@ -420,13 +420,14 @@ def _claude_version(claude: str) -> tuple[int, ...]:
 
 
 # One-shot runs of other agents' CLIs (prompt last). ponytail: codex/gemini flags unverified on this Mac.
+# Codex installed with the ChatGPT desktop app is not on PATH.
+CODEX_APP_CLI = (
+    "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
+)
 AGENT_RUN = {
     "opencode": ["opencode", "run"],
-    "codex": [
-        "codex",
-        "exec",
-        "--full-auto",
-    ],  # read-only without it; this is the reach a Claude session has
+    # workspace-write with approvals reviewed automatically (--full-auto is gone in newer codex)
+    "codex": ["codex", "exec", "--approve-for-me"],
     "antigravity": ["gemini", "-p"],
 }
 
@@ -437,8 +438,12 @@ def cmd_agent_loop(args) -> int:
     from app.repo_setup import loop_prompt
 
     base = AGENT_RUN[args.agent]
-    if shutil.which(base[0]) is None:
+    exe = shutil.which(base[0]) or (
+        CODEX_APP_CLI if base[0] == "codex" and Path(CODEX_APP_CLI).is_file() else None
+    )
+    if exe is None:
         raise SystemExit(f"{base[0]} not found on PATH")
+    base = [exe, *base[1:]]
     import urllib.parse
     import urllib.request
 
