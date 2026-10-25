@@ -55,18 +55,19 @@ title, else the folder name.
   - Do each request, then answer it with `reply_message(session_id, message_id, text)`.
   - `meta.kind: "answer"` answers your own `ask_agent`: use it, no reply.
 - **Other agents**: `list_agents` shows the open sessions. To ask one, call
-  `ask_agent(to=s#|project, request, session_id)`; check the answer with `get_ask`. The operator
+  `ask_agent(to=s#|project, request, session_id)`; the answer arrives through `get_messages`
+  (`meta.kind: "answer"`), `get_ask` shows it too. The operator
   steps in on Telegram if nobody answers.
 - **Reviews and research**: `review_project(project, mode, role, agent, evidence)` runs the game-review
-  skill on a fresh read-only agent; poll `get_review(review_id)`, then read the reports in `files`.
+  skill on a fresh read-only agent; pass `session_id`: the result (report paths) arrives through
+  `get_messages` as an "answer" message, no polling (`get_review(review_id)` shows it too).
 - **Every confirmation or decision** (commit, push, merge, deploy, a choice, a yes/no) also goes to
   Telegram: `request_human_input(question, project, session_id, options=[2-4 short button labels])`
-  in polite Vietnamese; the answer comes back through `get_messages` (`meta.kind: "answer"`) or
-  `get_human_response`.
-- **Game art**: call `generate_art(prompt, purpose, requirements, width, height, project)`. The
-  operator approves and reviews each image; use `get_task_result(...).images` only after
-  `review.state == "accepted"`. 3D models: `output="model3d"` (+ `image_path`, `model_format`);
-  the file is `models[0].path` once accepted.
+  in polite Vietnamese; the answer comes back through `get_messages` (`meta.kind: "answer"`).
+- **Game art**: call `generate_art(prompt, purpose, requirements, width, height, project, session_id)`.
+  The operator approves and reviews each image; the decision arrives through `get_messages` as an
+  "answer" message (no polling). Use `get_task_result(...).images` only once accepted. 3D models:
+  `output="model3d"` (+ `image_path`, `model_format`); the file is `models[0].path` once accepted.
 - Confirm with the user before commits, pushes, deploys or anything destructive.
 """
 

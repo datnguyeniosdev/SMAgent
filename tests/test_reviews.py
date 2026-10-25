@@ -27,12 +27,15 @@ async def test_review_runs_the_skill_and_reports(settings, cfg_dir, tmp_path, mo
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:secret")
     orch, _ = make(settings, cfg_dir, [])
     gw = gateway(orch)
-    orch.channel.pull(A, None, cwd=str(repo))
+    sid = orch.channel.pull(A, None, cwd=str(repo))[0].session_id
     async with Client(build_mcp_server(orch)) as c:
         bad = await c.call_tool("review_project", {"project": A, "mode": "vibes"})
         assert bad.is_error and "benchmark" in bad.content[0].text
         r = (
-            await c.call_tool("review_project", {"project": A, "mode": "parity", "agent": "all"})
+            await c.call_tool(
+                "review_project",
+                {"project": A, "mode": "parity", "agent": "all", "session_id": sid},
+            )  # fmt: skip
         ).structured_content
         assert r["state"] == "running"
         again = await c.call_tool("review_project", {"project": A, "mode": "parity"})
@@ -46,6 +49,8 @@ async def test_review_runs_the_skill_and_reports(settings, cfg_dir, tmp_path, mo
             await asyncio.sleep(0.05)
     assert done["state"] == "done" and done["files"][0].endswith("r.md")
     assert done["problems"] == ["droid not installed"]
+    (got,) = orch.channel.pull(A, sid, str(repo), 5)[1]  # the asker is woken with the result
+    assert got["kind"] == "answer" and r["review_id"] in got["text"] and "r.md" in got["text"]
     assert (repo / "args.txt").read_text().strip() == "args: --role qa --mode parity --agent all"
     assert "TELEGRAM_BOT_TOKEN" not in (repo / "env.txt").read_text()  # no gateway secrets
     sent = [kw["text"] for _, kw, _ in gw.bot.sent]

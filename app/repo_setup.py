@@ -73,9 +73,9 @@ anything destructive.
   yes/no), even when you also ask in the app or terminal: call `request_human_input` with `project`,
   your `session_id` and `options` (2-4 short button labels), in polite Vietnamese. The operator taps
   a button (or types `/answer <id> <text>`); the answer arrives through `get_messages` as
-  `meta.kind: "answer"`, or poll `get_human_response`. Act on whichever answer comes first.
-- Use `delegate_task` (with `project`) only when the user asks to hand work to the gateway. Follow it
-  with `get_task_status` / `get_task_result`.
+  `meta.kind: "answer"` and wakes you. Act on whichever answer comes first (app or Telegram).
+- Use `delegate_task` (with `project` and your `session_id`) only when the user asks to hand work to
+  the gateway. Its end arrives as an "answer" message; `get_task_result` has the details.
 {deploy}
 **Work from Telegram (live sessions).** The operator sends requests with `/send` or by replying to
 your answers. Two ways to receive them; the operator can switch a session off and on (`/off`, `/on`):
@@ -103,8 +103,9 @@ the answer goes back to that agent, not to Telegram.
 competitor research, a clone-vs-original check or feature ideas, do not judge your own work: call
 `review_project(project, mode, role, agent, evidence)` (mode benchmark|parity|playtest|ideation, role
 qa|po|both, agent claude|droid|codex|gemini|opencode|all). Pass a folder of fresh screenshots as
-`evidence`. Poll `get_review(review_id)` every minute; when done, read the reports in `files`, write the
-summary the game-review skill describes, and act on findings only after the operator approves.
+`evidence` and your `session_id`. Do not poll: the result (report paths) arrives as an "answer" message;
+then read the reports, write the summary the game-review skill describes, and act on findings only
+after the operator approves.
 
 **Art and design (fal.ai).** For game art or design images (icons, sprites, backgrounds, UI
 mockups, store banners), call `generate_art` instead of drawing placeholders. For 3D models
@@ -124,12 +125,11 @@ The model only knows what you write, so state the expected output precisely:
 
 Then:
 - Each generation is paid and waits for the operator's approval on Telegram, which shows your brief.
-- The operator reviews every image on Telegram (✅ Accept or Feedback). Poll
-  `get_task_result(task_id)` every ~30 s and follow `review.state`:
-  - `accepted`: copy `images[0].path` into the art folder the project already uses, name it in your report.
-  - `changes_requested`: the operator asked for changes and a new version is being generated; continue
-    with `review.next_task_id`.
-  - `pending` / `generating`: wait. Do not use an image before it is accepted.
+- The operator reviews every image on Telegram (✅ Accept or Feedback). Pass your `session_id` and do
+  not poll: each decision arrives through `get_messages` as an "answer" message.
+  - accepted: copy the listed file into the art folder the project already uses, name it in your report.
+  - changes requested: a new version is generated and reviewed; its decision arrives the same way.
+  - Until then, keep working on something else. Do not use an image before it is accepted.
 - If it was rejected, expired or failed, say so. Never present a placeholder as generated art.
 
 If a gateway call fails or a message is not delivered, tell the user Telegram was not notified and why."""

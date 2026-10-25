@@ -608,7 +608,31 @@ class Orchestrator:
         rec = {**(self.art_review(task_id) or {"task_id": task_id}), **kw, "at": now().isoformat()}
         self.store.put("art_review", task_id, rec, task_id=task_id, state=rec["state"])
         self.store.event("art.review", task_id=task_id, state=rec["state"])
+        task = self.tasks.get(task_id)
+        if task is not None and rec["state"] == "accepted":
+            files = [str(a.path) for a in self._all_artifacts(task)
+                     if a.kind == "model3d" or ((a.mime_type or "").startswith("image/")
+                                                and a.validation_status != "failed")]  # fmt: skip
+            self._answer_caller(task, f"🎨 The operator accepted your art {task_id}. Files:\n"
+                                + "\n".join(files) + "\nCopy what you need into the repo.")  # fmt: skip
+        elif task is not None and rec["state"] == "changes_requested":
+            self._answer_caller(task, f"🎨 The operator asked for changes to your art {task_id}: "
+                                f"{rec.get('feedback', '')}\nThe new version is "
+                                f"{rec.get('next_task_id')}; you get a message once it is reviewed.")  # fmt: skip
         return rec
+
+    def _answer_caller(self, task: Task, text: str) -> None:
+        """Push a result to the agent session that started the task (delegate_task, generate_art and
+        its revisions) as an "answer" message: it is woken (agw wait, Codex push) instead of polling.
+        get_task_result still has the details."""
+        data = (task.request or {}).get("data") or {}
+        hub = getattr(self, "channel", None)
+        mine = (task.request or {}).get("source") == "mcp" or data.get("revision_of")
+        if hub is None or not mine or not data.get("session_id") or not data.get("project"):
+            return
+        hub.send(data["project"], f"{text}\n\n(Continue the work that needed it. It needs no reply.)",
+                 session_id=data["session_id"], sender="gateway", source="gateway",
+                 extra={"kind": "answer", "task_id": task.task_id})  # fmt: skip
 
     async def regenerate_art(self, src: Task, feedback: str, user_id: str) -> Task:
         """The operator's Feedback on generated art: same brief plus the requested changes."""
@@ -881,6 +905,12 @@ class Orchestrator:
             correlation_id=task.correlation_id,
             state=state.value,
         )
+        art = task.task_type in ART_TASK_TYPES
+        if task.done and not (art and state == TaskState.succeeded):  # art waits for its review
+            why = f" ({task.error[:200]})" if task.error else ""
+            what = "art" if art else "task"
+            self._answer_caller(task, f"📦 Your {what} {task.task_id} ended: {state.value}{why}. "
+                                f"Details: get_task_result('{task.task_id}').")  # fmt: skip
 
     def _finish(self, task: Task, state: TaskState) -> None:
         if not task.done:

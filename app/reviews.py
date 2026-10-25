@@ -78,7 +78,7 @@ class ReviewService:
         return r
 
     def start(self, project: str, mode: str, role: str = "qa", agent: str = "claude", model: str = "",
-              evidence: str = "", ref: str = "") -> dict:  # fmt: skip
+              evidence: str = "", ref: str = "", session_id: str = "") -> dict:  # fmt: skip
         hub = self.svc.channel
         name = hub.resolve_project(project) or project
         folder = hub.project_dir(name)
@@ -116,6 +116,7 @@ class ReviewService:
         r = self._save({
             "review_id": new_id("rev"), "project": name, "folder": folder, "mode": mode, "role": role,
             "agent": agent, "model": model, "state": "running", "started_at": now().isoformat(), "argv": argv,
+            "session_id": session_id,
         })  # fmt: skip
         self._jobs[r["review_id"]] = asyncio.get_running_loop().create_task(self._run(r))
         self.svc.store.event("review.started", review_id=r["review_id"], project=name, mode=mode)
@@ -171,6 +172,17 @@ class ReviewService:
         icon = "✅" if r["state"] == "done" else "❌"
         await self._tell(f"{icon} <b>Review {r['state']}</b> · {escape(r['project'])} · <code>{r['review_id']}</code>\n"
                          f"{names}" + (f"\n{problems}" if problems else ""))  # fmt: skip
+        if r.get("session_id"):  # the agent that asked is woken with the result instead of polling
+            files = "\n".join(r["files"]) or "no report"
+            issues = "\n".join(r.get("problems", []))
+            self.svc.channel.send(
+                r["project"], f"🔎 Your review {r['review_id']} ({r['role']}/{r['mode']}) is {r['state']}. "
+                f"Reports:\n{files}" + (f"\nProblems:\n{issues}" if issues else "") + "\nRead them, "
+                "write the summary the game-review skill describes, and act on findings only after the "
+                "operator approves. (It needs no reply.)",
+                session_id=r["session_id"], sender="gateway", source="gateway",
+                extra={"kind": "answer", "review_id": r["review_id"]},
+            )  # fmt: skip
 
     async def _tell(self, html: str) -> None:
         fn = getattr(getattr(self.svc, "notifier", None), "send_control", None)

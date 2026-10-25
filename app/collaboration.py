@@ -635,8 +635,11 @@ class CollaborationService:
         if visual is not None and visual.id == "acknowledge":
             visual = None
         hub = getattr(self.svc, "channel", None)
+        src = self.svc.tasks[task_id]
+        art = src.task_type in ART_TASK_TYPES and src.done  # an agent's art too: regenerate, the
+        # agent hears the decision as an "answer" (Orchestrator._set_review)
         if (
-            (live or external) and visual is None and hub is not None
+            (live or external) and visual is None and hub is not None and not art
         ):  # that session, else the project's
             route, fb.route_id = None, "channel"
             text_for_session = f"Telegram reply from the operator:\n{fb.text}"
@@ -648,7 +651,7 @@ class CollaborationService:
             )  # fmt: skip
             fb.follow_up_task_id = None
             fb.live_message_id, fb.delivered = _msg["message_id"], target is not None
-        elif (src := self.svc.tasks[task_id]).task_type in ART_TASK_TYPES and src.done:
+        elif art:
             route, fb.route_id = None, "art_revision"  # Feedback on generated art: regenerate it
             fb.follow_up_task_id = (await self.svc.regenerate_art(src, fb.text, user_id)).task_id
         else:

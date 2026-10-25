@@ -305,11 +305,12 @@ async def lifespan(app: FastAPI):
     else:
         log.warning("TELEGRAM_BOT_TOKEN not set: Telegram disabled, reports go to the log")
 
-    async def ask_watchdog():  # agents waiting on agents: escalate to the operator when stuck
+    async def ask_watchdog():  # agents waiting on agents: escalate when stuck; expire lost leases
         while True:
             await asyncio.sleep(30)
             try:
                 await orch.asks.check()
+                orch.channel._expire()  # even when no agent polls (waiters only peek)
             except Exception:
                 log.exception("ask watchdog round failed")
 

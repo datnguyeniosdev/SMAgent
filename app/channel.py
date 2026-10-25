@@ -397,7 +397,7 @@ class ChannelHub:
     def _expire(self) -> None:
         """Delivered but unanswered past LEASE (the session lost it or died): back to the inbox,
         or after MAX_DELIVERIES expired with a note to the operator instead of lingering silently."""
-        # ponytail: runs on pull rounds and connects only; a push-only gateway expires on reconnect
+        # runs on pull rounds, connects and the gateway's 30 s watchdog (app/main.py)
         cutoff, projects = now() - LEASE, set()
         for msg in self.svc.store.list("channel_msg", states=["delivered"]):
             at = msg.get("delivered_at")

@@ -122,9 +122,10 @@ def build_mcp_server(svc) -> MCPServer:
         return {
             "task_id": task.task_id,
             "state": task.state.value,
-            "note": "the operator approves the cost, then reviews the model's preview on Telegram. Poll "
-            "get_task_result every ~30 s: review.state accepted -> models[0].path is the file; "
-            "changes_requested -> follow review.next_task_id; pending -> wait (3D takes a few minutes)",
+            "note": "the operator approves the cost, then reviews the model's preview on Telegram; with "
+            'your session_id the decision arrives through get_messages as an "answer" message (no '
+            "polling): accepted -> models[0].path in get_task_result is the file; changes_requested -> "
+            "a new version is made and reviewed. 3D takes a few minutes.",
         }
 
     def task_or_error(task_id: str):
@@ -146,7 +147,8 @@ def build_mcp_server(svc) -> MCPServer:
         session_id: str | None = None,
     ) -> dict[str, Any]:
         """Start a task. Known task types use their configured workflow. Returns the task id and state.
-        project / session_id label every Telegram message about the task."""
+        project / session_id label every Telegram message about the task; with session_id its end
+        arrives through get_messages as an "answer" message (no polling; get_task_result has details)."""
         ident = {k: v for k, v in (("project", project), ("session_id", session_id)) if v}
         try:
             req = TaskRequest(
@@ -286,8 +288,8 @@ def build_mcp_server(svc) -> MCPServer:
     ) -> dict[str, Any]:
         """Ask the operator a question via Telegram. Use it for every confirmation or decision (commit,
         push, merge, deploy, a choice), even when you also ask in the app: options = 2-4 short button
-        labels; pass your session_id so the answer arrives through get_messages (kind "answer").
-        Or poll get_human_response with the returned id."""
+        labels; pass your session_id so the answer arrives through get_messages (kind "answer"), no
+        polling; get_human_response(id) shows it too."""
         try:
             hi = await svc.collab.request_human_input(
                 question, task_id, options or [], ttl_s, project, session_id
@@ -453,7 +455,8 @@ def build_mcp_server(svc) -> MCPServer:
         64 px"); requirements = the exact output: style, palette, view/composition, background,
         what must or must not appear (e.g. "flat vector, gold #F5C542 with dark outline, front view,
         centered with 10% margin, solid #1B2A49 background, no text, no shadow").
-        Returns a task_id at once; poll get_task_status, then get_task_result -> images[].path is the
+        Returns a task_id at once; pass your session_id: the operator's decision arrives through
+        get_messages as an "answer" message (no polling), get_task_result -> images[].path is the
         PNG to copy into the repo. width/height 16-3840; transparent=true also requires an alpha
         channel (flux models produce opaque images, so the check fails for them).
         output="model3d": a 3D model with Meshy instead (props, characters, items). prompt describes
@@ -503,9 +506,10 @@ def build_mcp_server(svc) -> MCPServer:
         return {
             "task_id": task.task_id,
             "state": task.state.value,
-            "note": "the operator approves the cost, then reviews the image on Telegram. Poll "
-            "get_task_result every ~30 s: review.state accepted -> images[0].path is yours; "
-            "changes_requested -> follow review.next_task_id (the regenerated version); pending -> wait",
+            "note": "the operator approves the cost, then reviews the image on Telegram; with your "
+            'session_id the decision arrives through get_messages as an "answer" message (no '
+            "polling): accepted -> it lists the files (images[0].path in get_task_result); "
+            "changes_requested -> a new version is made and reviewed.",
         }
 
     @tool
@@ -595,7 +599,7 @@ def build_mcp_server(svc) -> MCPServer:
     @tool
     async def review_project(
         project: str, mode: str, role: str = "qa", agent: str = "claude", model: str | None = None,
-        evidence: str | None = None, ref: str | None = None,
+        evidence: str | None = None, ref: str | None = None, session_id: str | None = None,
     ) -> dict[str, Any]:  # fmt: skip
         """Independent review or research of a game/app with the game-review skill, by a fresh
         read-only agent (not you), in the project's folder. Use it whenever you need an evaluation,
@@ -605,14 +609,15 @@ def build_mcp_server(svc) -> MCPServer:
         agent: claude, droid, codex, gemini, opencode or all (every installed CLI, in parallel;
         different models disagree, which is the point). evidence: a folder of fresh screenshots of
         the build (ref_*.png = the original); without it visual findings are unverified. ref: names
-        or paths of the original/competitor apps. Takes minutes: poll get_review(review_id) every
-        ~60 s; the operator sees start and end on Telegram. Reports are read-only advice: turning
+        or paths of the original/competitor apps. Takes minutes: pass your session_id and do other
+        work; the result arrives through get_messages as an "answer" message (get_review(review_id)
+        shows it too). The operator sees start and end on Telegram. Reports are read-only advice: turning
         findings into code or issues needs the operator's approval."""
         from app.reviews import ReviewError
 
         try:
             r = svc.reviews.start(
-                project, mode, role, agent, model or "", evidence or "", ref or ""
+                project, mode, role, agent, model or "", evidence or "", ref or "", session_id or ""
             )
         except ReviewError as e:
             raise GatewayToolError(str(e)) from e
