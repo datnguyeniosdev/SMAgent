@@ -82,9 +82,10 @@ your answers. Two ways to receive them; the operator can switch a session off an
 - Push (terminal session opened with `agw session`): requests arrive as
   `<channel source="agent-gateway-channel">` events. Answer with the channel's `reply` tool, passing
   the event's `message_id`.
-- Pull (any session, e.g. the desktop app): a SessionStart hook asks you to start one recurring
-  job (every minute) that calls get_messages(project=`{project}`). Keep exactly one such job per
-  session. One request at a time: while one is unanswered the gateway hands out nothing new.
+- Pull (any session, e.g. the desktop app): a SessionStart hook asks you to start one background
+  waiter (`agw wait`, Bash run_in_background). It exits only when a request is queued and says how
+  to fetch it with get_messages(project=`{project}`); start it again after answering. Keep exactly
+  one per session. One request at a time: while one is unanswered the gateway hands out nothing new.
 
 Treat each request like a user request: do it here and confirm before commits, pushes, deploys or
 anything destructive.
@@ -176,31 +177,19 @@ def loop_prompt(project: str, client: str = "", agent: str = "claude_code") -> s
     )
 
 
-def health_prompt() -> str:
-    """Every 10 minutes: does this session still reach the local MCP servers? It never starts the
-    gateway: running it is the operator's call (agw dev / agw stop)."""
-    return (
-        "Check that this session still reaches the local MCP servers agent-gateway and agent-gateway-channel. "
-        "Run `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/health`. If it is not 200, the "
-        "gateway is not running: do nothing and say nothing (never start it; the operator does). If it is 200, "
-        "call the agent-gateway tool list_agents. The channel shim reconnects by itself every 3 seconds. If "
-        "list_agents is missing or fails, this session lost the gateway MCP server and cannot reconnect it "
-        "by itself: tell the user in one line to run /mcp and reconnect agent-gateway. If all is fine, do "
-        "nothing and say nothing."
-    )
+def session_start_hint(project: str, cwd: str = "") -> str:
+    """SessionStart hook output (added to Claude's context): start the background waiter (`agw wait`),
+    which wakes Claude only when Telegram work is queued; it replaces the old per-minute cron poll
+    and the 10-minute health check, which cost a full-context model run each time."""
+    from app.waiter import command
 
-
-def session_start_hint(project: str) -> str:
-    """SessionStart hook output (added to Claude's context): start the pull loop and the health check
-    once per session."""
+    cmd = command(project, cwd or os.getcwd(), client_kind())
     return (
         f"agent-gateway: this project ({project}) takes work from Telegram. Before anything else in "
-        "this session, call CronList. If no job's prompt mentions get_messages, create exactly one with "
-        "CronCreate, recurring every minute ('*/1 * * * *'), with this prompt: "
-        f"{loop_prompt(project, client_kind())} If no job's prompt mentions /health, create exactly one "
-        "with CronCreate, "
-        f"recurring every 10 minutes ('*/10 * * * *'), with this prompt: {health_prompt()} "
-        "Never create a second one of either. Then continue with the user's request."
+        "this session, call CronList and delete (CronDelete) every job whose prompt mentions "
+        "get_messages or /health: the waiter replaces them. Then start the gateway waiter once with the "
+        f"Bash tool, run_in_background true: `{cmd}`. It costs nothing while idle and exits only when "
+        "there is work; its output says what to do. Never run two. Then continue with the user's request."
     )
 
 

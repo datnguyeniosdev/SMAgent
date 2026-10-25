@@ -397,14 +397,14 @@ def test_session_start_hook_and_loop_prompt(tmp_path):
         and "hook-session-start --project '2048 Shooter (K05)'" in hooks[0]["hooks"][0]["command"]
     )
     assert "get_messages" in loop_prompt(PROJECT) and "busy" in loop_prompt(PROJECT)
-    from app.repo_setup import health_prompt, session_start_hint
+    from app.repo_setup import session_start_hint
 
-    hint = session_start_hint(PROJECT)
+    hint = session_start_hint(PROJECT, "/w/r")
     assert (
-        "*/10 * * * *" in hint
-        and health_prompt() in hint
-        and "never start it" in health_prompt()
-        and "agw dev" not in health_prompt()
+        "CronDelete" in hint
+        and "run_in_background" in hint
+        and "wait --project '2048 Shooter (K05)' --cwd /w/r" in hint
+        and "CronCreate" not in hint
     )
     assert main(["hook-session-start", "--project", PROJECT]) == 0
 

@@ -52,7 +52,7 @@ def test_hook_and_shim_follow_the_folder(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(root / "colorever/3_dev")  # any sub-folder belongs to the repo
     assert main(["hook-session-start"]) == 0
     out = capsys.readouterr().out
-    assert "Gem Mosaic (GMA)" in out and "CronCreate" in out and "agent-gateway skill" in out
+    assert "Gem Mosaic (GMA)" in out and " wait --project " in out and "agent-gateway skill" in out
 
     started = []
     monkeypatch.setattr(

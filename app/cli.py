@@ -594,6 +594,13 @@ def cmd_codex_relay(args) -> int:
     return relay(args.cwd, ENV_PORTS["prod"])
 
 
+def cmd_wait(args) -> int:
+    from app.config import ENV_PORTS, env_name
+    from app.waiter import wait
+
+    return wait(args.project, args.cwd, args.client, ENV_PORTS[env_name()])
+
+
 ENV_TEMPLATE = """# agw environment "{env}": runs beside prod on port {port}, own data in var/{env}.
 # Agent configs (Claude Code, OpenCode, Codex, ...) stay on prod; nothing here changes them.
 DATA_DIR=var/{env}
@@ -778,6 +785,11 @@ def main(argv: list[str] | None = None) -> int:
     sp = sub.add_parser("codex-relay")
     sp.add_argument("--cwd", required=True)
     sp.set_defaults(fn=cmd_codex_relay)
+    sp = sub.add_parser("wait")  # Claude Code pull loop, run in the background (app/waiter.py)
+    sp.add_argument("--project", required=True)
+    sp.add_argument("--cwd", required=True)
+    sp.add_argument("--client", default="")
+    sp.set_defaults(fn=cmd_wait)
 
     args, extra = p.parse_known_args(argv)
     if args.cmd == "session":  # everything unknown goes to claude (e.g. --continue, --resume <id>)

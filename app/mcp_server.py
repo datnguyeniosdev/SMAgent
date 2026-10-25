@@ -521,15 +521,16 @@ def build_mcp_server(svc) -> MCPServer:
         from other agents (ask_agent; meta.kind "request" -> answer with reply_message) plus answers to
         your own asks (meta.kind "answer" -> use them, no reply). agent: your tool, e.g. "claude_code";
         client: "app" when you run as a desktop app or in an IDE, "cli" in a terminal.
-        Call it from `/loop 1m` in any session. Each message: message_id, text (the request), meta.
+        Call it when the `agw wait` waiter wakes you (or from `/loop 1m`).
+        Each message: message_id, text (the request), meta.
         Do each request, then answer it with reply_message(message_id=..., session_id=...).
         The session stays registered while it polls (5 min); the operator can switch it off (/off)."""
         sess, msgs, busy = svc.channel.pull(
             project, session_id, cwd or "", max(1, min(limit, 20)), agent or "", client or ""
         )
         if sess.closing:
-            note = ("closed by the operator: delete the recurring get_messages job of this session "
-                    "(CronList, then CronDelete) and stop polling")  # fmt: skip
+            note = ("closed by the operator: do not restart the agw wait waiter, delete any recurring "
+                    "get_messages job of this session (CronList, then CronDelete) and stop polling")  # fmt: skip
         elif not sess.enabled:
             note = "this session is switched off by the operator (/on to resume); do nothing"
         elif busy:
