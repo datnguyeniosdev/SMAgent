@@ -314,9 +314,19 @@ async def lifespan(app: FastAPI):
                 log.exception("ask watchdog round failed")
 
     watchdog = asyncio.create_task(ask_watchdog())
+    background = [watchdog]
+    from app.config import env_name
+
+    if env_name() == "prod":  # Codex desktop hooks record their threads for the prod gateway
+        from app.codex_relay import push_loop
+
+        background.append(
+            asyncio.create_task(push_loop(orch.channel, settings.data_dir / "codex-relays"))
+        )
     yield
-    watchdog.cancel()
-    await asyncio.gather(watchdog, return_exceptions=True)
+    for t in background:
+        t.cancel()
+    await asyncio.gather(*background, return_exceptions=True)
     if poller:
         poller.cancel()
         await asyncio.gather(poller, return_exceptions=True)
@@ -860,15 +870,22 @@ def _local_only(request: Request) -> None:
 async def channel_peek(
     request: Request, project: str, agent: str, cwd: str = "", client: str = "cli"
 ):
-    """`agw session --agent X` and the Codex desktop relay: keep the pull session listed and say whether
-    there is anything to do (work: new or unfinished; queued: new only), so a paid model run starts
-    only when there is work."""
+    """`agw agent-loop`: keep the pull session listed and say whether there is anything to do (work:
+    new or unfinished; queued: new only), so a paid model run starts only when there is work."""
     _local_only(request)
-    s, _, busy = request.app.state.orch.channel.pull(project, None, cwd, 0, agent, client)
-    queued = s.enabled and not s.closing and not s.queue.empty()
-    nxt = s.queue._queue[0]["message_id"] if queued else None  # ponytail: asyncio.Queue internals
-    return {"closing": s.closing, "enabled": s.enabled, "queued": queued, "next": nxt,
-            "work": queued or (s.enabled and not s.closing and bool(busy))}  # fmt: skip
+    return request.app.state.orch.channel.peek(project, agent, cwd, client)
+
+
+@app.get("/api/v1/channel/wait", include_in_schema=False)
+async def channel_wait(
+    request: Request, project: str, agent: str, cwd: str = "", client: str = "cli", after: str = "",
+    hold: float = 25,
+):  # fmt: skip
+    """`agw wait`: peek held open until a message other than `after` is queued (or the session
+    closes), at most `hold` seconds: idle waiters cost one held request per 25 s and wake at once."""
+    _local_only(request)
+    hub = request.app.state.orch.channel
+    return await hub.wait(project, agent, cwd, client, after, max(0.0, min(hold, 55.0)))
 
 
 @app.get("/api/v1/channel/stream", include_in_schema=False)

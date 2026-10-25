@@ -1,8 +1,9 @@
 """`agw wait`: the pull loop of a Claude Code session without a paid model run per minute. Claude runs it
-with Bash `run_in_background`; it asks the gateway every 30 s (peek: no model, keeps the session listed)
-and exits only when a new request is queued, which wakes Claude with what to do. A gateway that is down
-is waited out silently (the operator starts it). The newest waiter of a session wins; an older one exits
-quietly. State: var/waiters/<session id>.json = {"pid": ..., "woke": <message id>, "at": <time>}."""
+with Bash `run_in_background`; it holds a long-poll to the gateway (/api/v1/channel/wait: no model,
+keeps the session listed) and exits only when a new request is queued, which wakes Claude with what to
+do. A gateway that is down is waited out silently (the operator starts it). The newest waiter of a
+session wins; an older one exits quietly.
+State: var/waiters/<session id>.json = {"pid": ..., "woke": <message id>, "at": <time>}."""
 
 from __future__ import annotations
 
@@ -50,10 +51,7 @@ def wait(project: str, cwd: str, client: str, port: int, interval: float = 30) -
     from app.channel import ChannelHub
 
     sid = ChannelHub.pull_id(project, "claude_code", cwd)
-    query = urllib.parse.urlencode(
-        {"project": project, "agent": "claude_code", "cwd": cwd, "client": client or "app"}
-    )
-    url = f"http://127.0.0.1:{port}/api/v1/channel/peek?{query}"
+    base = {"project": project, "agent": "claude_code", "cwd": cwd, "client": client or "app"}
     WAITERS.mkdir(parents=True, exist_ok=True)
     path = WAITERS / f"{sid}.json"
     path.write_text(json.dumps({**_read(path), "pid": os.getpid()}))
@@ -62,20 +60,24 @@ def wait(project: str, cwd: str, client: str, port: int, interval: float = 30) -
         if data.get("pid") != os.getpid():
             print("Replaced by a newer waiter for this session: do not restart this one.")
             return 0
+        # a message already woken for is waited past, until it is due for a reminder
+        recent = time.time() - data.get("at", 0) <= REMIND_S
+        query = urllib.parse.urlencode(
+            {**base, "after": (data.get("woke") or "") if recent else ""}
+        )
+        url = f"http://127.0.0.1:{port}/api/v1/channel/wait?{query}"
         try:
-            with urllib.request.urlopen(url, timeout=10) as r:  # noqa: S310 - fixed local URL
+            with urllib.request.urlopen(url, timeout=60) as r:  # noqa: S310 - fixed local URL
                 state = json.loads(r.read())
         except (OSError, ValueError):
-            state = {}  # gateway down or restarting: keep waiting, the operator starts it
+            time.sleep(interval)  # gateway down or restarting: keep waiting, the operator starts it
+            continue
         if state.get("closing"):
             path.unlink(missing_ok=True)
             print("The operator closed this session (/close): do not restart the waiter.")
             return 0
         nxt = state.get("next")
-        if state.get("queued") and (
-            nxt != data.get("woke") or time.time() - data.get("at", 0) > REMIND_S
-        ):
+        if state.get("queued") and (nxt != data.get("woke") or not recent):
             path.write_text(json.dumps({**data, "woke": nxt, "at": time.time()}))
             print(wake_text(project, cwd, client, sid, nxt), flush=True)
             return 0
-        time.sleep(interval)

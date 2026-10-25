@@ -63,3 +63,27 @@ def test_closed_session_and_newer_waiter_stop_quietly(tmp_path, monkeypatch, cap
     monkeypatch.setattr(w.urllib.request, "urlopen", replaced)
     assert w.wait("P", "/w/p", "", 8000) == 0
     assert "newer waiter" in capsys.readouterr().out
+
+
+async def test_long_poll_returns_on_new_work_and_waits_past_after(settings, cfg_dir):
+    import asyncio
+
+    from tests.test_config_gateway import make
+
+    orch, _ = make(settings, cfg_dir, [])
+    hub = orch.channel
+    idle = await hub.wait("P", "claude_code", "/w/p", "app", hold=1.2)  # nothing: held, then empty
+    assert idle["queued"] is False and idle["session_id"] in hub.sessions
+
+    async def later():
+        await asyncio.sleep(0.3)
+        return hub.send("P", "do it", session_id=idle["session_id"])[0]
+
+    sent = asyncio.create_task(later())
+    got = await hub.wait("P", "claude_code", "/w/p", "app", hold=5)
+    msg = await sent
+    assert got["next"] == msg["message_id"]  # woke on arrival, before the hold ran out
+    held = await hub.wait("P", "claude_code", "/w/p", "app", after=msg["message_id"], hold=1.2)
+    assert (
+        held["next"] == msg["message_id"]
+    )  # already woken for: held to the end, not returned early

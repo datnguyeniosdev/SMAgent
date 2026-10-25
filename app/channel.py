@@ -21,6 +21,7 @@ import os
 import re
 import signal
 import subprocess
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -515,6 +516,36 @@ class ChannelHub:
             self.delivered(msg, s.session_id)
             out.append(msg)
         return s, out, busy
+
+    @staticmethod
+    def _next(s: LiveSession) -> str | None:
+        """The queued message a pull would hand out next (None: nothing for this session now)."""
+        if not s.enabled or s.closing or s.queue.empty():
+            return None
+        return s.queue._queue[0]["message_id"]  # ponytail: asyncio.Queue internals
+
+    def peek(self, project: str, agent: str, cwd: str = "", client: str = "") -> dict:
+        """Keep a pull session listed and say whether it has work, handing nothing out (no model run):
+        queued = a new message waits, work = new or unfinished."""
+        s, _, busy = self.pull(project, None, cwd, 0, agent, client)
+        nxt = self._next(s)
+        return {"session_id": s.session_id, "closing": s.closing, "enabled": s.enabled,
+                "queued": nxt is not None, "next": nxt,
+                "work": nxt is not None or (s.enabled and not s.closing and bool(busy))}  # fmt: skip
+
+    async def wait(
+        self, project: str, agent: str, cwd: str = "", client: str = "", after: str = "",
+        hold: float = 25,
+    ) -> dict:  # fmt: skip
+        """Long-poll peek (`agw wait`): returns as soon as a message other than `after` is queued or
+        the session closes, else after `hold` seconds (under PULL_TTL, so the session stays listed)."""
+        state, end = self.peek(project, agent, cwd, client), time.monotonic() + hold
+        while not state["closing"] and state["next"] in (None, after) and time.monotonic() < end:
+            await asyncio.sleep(1)  # ponytail: in-process check each second, no event per queue
+            s = self.sessions.get(state["session_id"])
+            if s is None or self._next(s) not in (None, after):
+                state = self.peek(project, agent, cwd, client)  # closed, or new work
+        return state
 
     async def reply(
         self,

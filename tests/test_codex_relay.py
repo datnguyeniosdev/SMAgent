@@ -1,67 +1,70 @@
 """Codex desktop relay: the hook starts/stops a relay per folder; the relay pushes new work only."""
 
 import json
-import os
 
 from app import agents_setup as ag
 from app import codex_relay as cr
 
 
-def test_hook_starts_one_relay_per_folder_and_it_outlives_session_end(tmp_path, monkeypatch):
+def test_hook_records_the_newest_thread_and_it_outlives_session_end(tmp_path, monkeypatch):
     monkeypatch.setattr(cr, "RELAYS", tmp_path / "relays")
     monkeypatch.setattr("app.projects.project_for", lambda cwd: "Coinlets")
-    started = []
-
-    class Proc:
-        pid = os.getpid()  # "alive", so a second SessionStart starts nothing new
-
-    monkeypatch.setattr(cr.subprocess, "Popen", lambda *a, **k: started.append(a[0]) or Proc())
     out = cr.hook({"hook_event_name": "SessionStart", "session_id": "t1", "cwd": "/w/coin"})
     assert "Coinlets" in out["hookSpecificOutput"]["additionalContext"]
+    cr.state_file("/w/coin").write_text(json.dumps({"thread": "t1", "cwd": "/w/coin", "pid": 7}))
     cr.hook({"hook_event_name": "SessionStart", "session_id": "t2", "cwd": "/w/coin"})
-    assert len(started) == 1 and started[0][1:] == ["codex-relay", "--cwd", "/w/coin"]
     state = json.loads(cr.state_file("/w/coin").read_text())
-    assert state["thread"] == "t2"  # the newest thread gets the work
+    assert state == {"thread": "t2", "cwd": "/w/coin"}  # newest thread; an old relay's pid is gone
     cr.hook({"hook_event_name": "SessionEnd", "session_id": "t2", "cwd": "/w/coin"})
     assert cr.state_file("/w/coin").exists()  # work waits in the thread until it is reopened
 
 
-def test_relay_pushes_queued_work_into_the_thread(tmp_path, monkeypatch):
-    monkeypatch.setattr(cr, "RELAYS", tmp_path)
+class Proc:
+    def __init__(self, code, out=b""):
+        self.returncode, self.out = code, out
+
+    async def communicate(self):
+        return self.out, b""
+
+
+async def test_gateway_pushes_new_codex_work_once_and_drops_deleted_threads(
+    settings, cfg_dir, tmp_path, monkeypatch
+):
+    from tests.test_config_gateway import make
+
+    orch, _ = make(settings, cfg_dir, [])
+    hub = orch.channel
     monkeypatch.setattr("app.projects.project_for", lambda cwd: "Coin & Co")
     monkeypatch.setattr(cr, "codex_cli", lambda: "/bin/codex")
-    cr.state_file("/w/coin").write_text(json.dumps({"thread": "t9", "pid": 1}))
-
-    class Resp:
-        def __init__(self, body):
-            self.body = body
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-        def read(self):
-            return json.dumps(self.body).encode()
-
+    state = tmp_path / "x.json"
+    state.write_text(json.dumps({"thread": "t9", "cwd": "/w/coin"}))
     calls = []
-    monkeypatch.setattr(cr.urllib.request, "urlopen", lambda url, timeout: Resp({"queued": False}))
-    monkeypatch.setattr(cr.subprocess, "run", lambda cmd, **k: calls.append(cmd))
-    cr.relay("/w/coin", 8000, once=True)
-    assert calls == []  # nothing new: nothing pushed
 
-    class Done:
-        returncode, stdout, stderr = 0, "", ""
+    async def run(*cmd, **k):
+        calls.append(cmd)
+        return Proc(0)
 
-    monkeypatch.setattr(
-        cr.urllib.request, "urlopen", lambda url, timeout: Resp({"queued": True, "next": "chm_1"})
-    )
-    monkeypatch.setattr(cr.subprocess, "run", lambda cmd, **k: calls.append(cmd) or Done())
-    cr.relay("/w/coin", 8000, once=True)
-    assert calls[0][:4] == ["/bin/codex", "queue", "--thread", "t9"]
+    monkeypatch.setattr(cr.asyncio, "create_subprocess_exec", run)
+    await cr.push_round(hub, tmp_path, refresh=True)
+    sid = hub.pull_id("Coin & Co", "codex", "/w/coin")
+    assert sid in hub.sessions and calls == []  # listed, nothing to push
+    msg, _ = hub.send("Coin & Co", "test", session_id=sid)
+    await cr.push_round(hub, tmp_path, refresh=False)
+    await cr.push_round(hub, tmp_path, refresh=False)  # pushed once
+    assert len(calls) == 1 and calls[0][:4] == ("/bin/codex", "queue", "--thread", "t9")
     assert "agent 'codex'" in calls[0][5] and "/w/coin" in calls[0][5]
-    assert "session_id 'pull_coinco_codex_" in calls[0][5]  # the exact folder session
+    assert f"session_id '{sid}'" in calls[0][5]  # the exact folder session
+    assert json.loads(state.read_text())["pushed"] == msg["message_id"]
+
+    hub.pull("Coin & Co", sid, "/w/coin", 1, "codex", "app")  # the thread took the first one
+    hub.send("Coin & Co", "again", session_id=sid)
+
+    async def gone(*cmd, **k):
+        return Proc(1, b"no rollout found for thread id t9")
+
+    monkeypatch.setattr(cr.asyncio, "create_subprocess_exec", gone)
+    await cr.push_round(hub, tmp_path, refresh=False)
+    assert not state.exists()  # the thread was deleted: its record goes, a new thread records again
 
 
 def test_setup_adds_and_removes_only_its_codex_hooks(tmp_path):
@@ -113,43 +116,6 @@ async def test_stale_session_id_without_cwd_finds_the_folder_session(settings, c
     assert s.session_id == relay_s.session_id and [m["message_id"] for m in got] == [
         msg["message_id"]
     ]
-
-
-def test_relay_ends_when_the_thread_is_deleted_and_dev_restarts_dead_relays(tmp_path, monkeypatch):
-    monkeypatch.setattr(cr, "RELAYS", tmp_path)
-    monkeypatch.setattr("app.projects.project_for", lambda cwd: "Coinlets")
-    monkeypatch.setattr("app.projects.repo_for", lambda cwd: cwd)
-    monkeypatch.setattr(cr, "codex_cli", lambda: "/bin/codex")
-    state = cr.state_file("/w/coin")
-    state.write_text(json.dumps({"thread": "gone", "pid": 999999, "cwd": "/w/coin"}))
-
-    class Resp:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-        def read(self):
-            return json.dumps({"queued": True, "next": "chm_1"}).encode()
-
-    class Failed:
-        returncode, stdout, stderr = 1, "", "no rollout found for thread id gone"
-
-    monkeypatch.setattr(cr.urllib.request, "urlopen", lambda url, timeout: Resp())
-    monkeypatch.setattr(cr.subprocess, "run", lambda cmd, **k: Failed())
-    cr.relay("/w/coin", 8000, once=True)
-    assert not state.exists()
-
-    state.write_text(json.dumps({"thread": "t1", "pid": 999999, "cwd": "/w/coin"}))
-    started = []
-
-    class Proc:
-        pid = 4242
-
-    monkeypatch.setattr(cr.subprocess, "Popen", lambda *a, **k: started.append(a[0]) or Proc())
-    cr.resume_all()
-    assert started and json.loads(state.read_text())["pid"] == 4242
 
 
 async def test_codex_reports_and_replies_name_codex(settings, cfg_dir):

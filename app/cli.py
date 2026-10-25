@@ -259,12 +259,7 @@ def cmd_dev(args) -> int:
         return 0
     procs = []
     env = dict(os.environ)
-    from app.config import env_name
 
-    if env_name() == "prod":
-        from app.codex_relay import resume_all
-
-        resume_all()  # Codex desktop relays (they keep running across gateway restarts)
     if s.telegram_mode == "webhook" and not s.telegram_webhook_url:
         tunnel, url = start_tunnel(args.port)
         procs.append(tunnel)
@@ -574,7 +569,7 @@ def cmd_hook_session_start(args) -> int:
 
 
 def cmd_codex_hook(args) -> int:
-    """Codex SessionStart/SessionEnd hook: start or stop the desktop relay for this folder."""
+    """Codex SessionStart/SessionEnd hook: record this folder's desktop thread for the gateway's push."""
     from app.codex_relay import hook
 
     try:
@@ -585,13 +580,6 @@ def cmd_codex_hook(args) -> int:
     if out:
         print(json.dumps(out))
     return 0
-
-
-def cmd_codex_relay(args) -> int:
-    from app.codex_relay import relay
-    from app.config import ENV_PORTS
-
-    return relay(args.cwd, ENV_PORTS["prod"])
 
 
 def cmd_wait(args) -> int:
@@ -782,9 +770,6 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--project")
     sp.set_defaults(fn=cmd_hook_session_start)
     sub.add_parser("codex-hook").set_defaults(fn=cmd_codex_hook)  # Codex SessionStart/End
-    sp = sub.add_parser("codex-relay")
-    sp.add_argument("--cwd", required=True)
-    sp.set_defaults(fn=cmd_codex_relay)
     sp = sub.add_parser("wait")  # Claude Code pull loop, run in the background (app/waiter.py)
     sp.add_argument("--project", required=True)
     sp.add_argument("--cwd", required=True)
