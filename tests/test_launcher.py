@@ -197,3 +197,27 @@ def test_open_skips_repo_setup_when_installed_globally(tmp_path, monkeypatch):
     repos(tmp_path, "k09-coin-sort-fun")
     status, _ = open_project(tmp_path, "k09", launch=lambda repo: None)
     assert status == "opened" and not (tmp_path / "k09-coin-sort-fun/.mcp.json").exists()
+
+
+def test_open_prefers_the_disconnected_app_session(tmp_path, monkeypatch):
+    """ball-shot is open in Claude desktop but its waiter stopped: /open points there, no 2nd session."""
+    import json
+    import time
+
+    root, apps = tmp_path / "Working", tmp_path / "app"
+    root.mkdir()
+    repos(root, "ball-shot")
+    monkeypatch.setattr(launcher, "APP_SESSIONS", apps)
+    (apps / "a/b").mkdir(parents=True)
+    rec = {"sessionId": "local_1", "cwd": str(root / "ball-shot"), "title": "Ball Shot work",
+           "isArchived": False, "lastActivityAt": time.time() * 1000}  # fmt: skip
+    (apps / "a/b/local_1.json").write_text(json.dumps(rec))
+    opened = []
+    launch = opened.append
+    status, _ = open_project(root, "ball-shot", [], launch=launch)
+    assert status == "open_in_app" and opened == []
+    assert launcher.app_sessions(root / "ball-shot")[0]["title"] == "Ball Shot work"
+    status, _ = open_project(root, "ball-shot", [], new=True, launch=launch)
+    assert status.startswith("opened") and len(opened) == 1  # "new" still opens a Terminal one
+    (apps / "a/b/local_1.json").write_text(json.dumps({**rec, "isArchived": True}))
+    assert launcher.app_sessions(root / "ball-shot") == []  # archived: not open

@@ -13,9 +13,29 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 CHANNEL = "agent-gateway-channel"
+# Claude desktop's Code-tab sessions (one JSON per session; the app's own files, only read here)
+APP_SESSIONS = Path.home() / "Library/Application Support/Claude/claude-code-sessions"
+APP_RECENT_S = 2 * 86400  # a session used in the last 2 days counts as open in the app
+
+
+def app_sessions(repo: Path) -> list[dict]:
+    """Claude desktop sessions in this folder that are not archived and were used recently, newest
+    first: the project is open in the app even when its gateway waiter stopped (an app restart)."""
+    out, now_ms = [], time.time() * 1000
+    for f in APP_SESSIONS.glob("**/local_*.json") if APP_SESSIONS.is_dir() else []:
+        try:
+            d = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        cwd, at = d.get("cwd") or "", float(d.get("lastActivityAt") or 0)
+        inside = cwd == str(repo) or cwd.startswith(f"{repo}/")
+        if inside and not d.get("isArchived") and now_ms - at < APP_RECENT_S * 1000:
+            out.append({"id": d.get("sessionId"), "title": d.get("title") or "", "at": at / 1000})
+    return sorted(out, key=lambda x: -x["at"])
 
 
 def _norm(text: str) -> str:
@@ -75,7 +95,9 @@ def open_in_terminal(repo: Path, agent: str = "") -> None:
 
 def open_project(root: Path, query: str, live_cwds=(), new: bool = False, token: bool = True,
                  launch=None, agent: str = "") -> tuple[str, list[Path]]:  # fmt: skip
-    """-> (status, matches). status: none | many | already_open | opened | opened_connected."""
+    """-> (status, matches). status: none | many | already_open | open_in_app | opened |
+    opened_connected. open_in_app: a Claude desktop session is open in the folder but not connected
+    (its waiter stopped): reconnect that one instead of starting a second session."""
     hits = find_projects(root, query)
     if not hits:
         return "none", []
@@ -84,6 +106,8 @@ def open_project(root: Path, query: str, live_cwds=(), new: bool = False, token:
     repo = hits[0]
     if not new and str(repo) in {c.rstrip("/") for c in live_cwds}:
         return "already_open", hits
+    if not new and agent in ("", "claude_code") and app_sessions(repo):
+        return "open_in_app", hits
     status = "opened"
     from app.global_setup import installed as global_installed
 

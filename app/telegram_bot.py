@@ -1050,6 +1050,18 @@ class TelegramGateway:
                 f"or <code>/open {escape(repo.name)} new</code> for another session."
             )
             return
+        if status == "open_in_app":
+            from app.launcher import app_sessions
+
+            s = app_sessions(repo)[0]
+            when = time.strftime("%H:%M %d/%m", time.localtime(s["at"]))
+            await answer(
+                f"{escape(repo.name)} is open in Claude desktop (<b>{escape(s['title'][:80])}</b>, last "
+                f"active {when}) but not connected: its waiter stopped (the app restarted?). Send any "
+                "message in that session and it reconnects by itself; /send reaches it after that. "
+                f"Or <code>/open {escape(repo.name)} new</code> for a Terminal session."
+            )
+            return
         flag = f" --agent {agent}" if agent else ""
         body = (
             f"Opening a Terminal window on the Mac with <code>agw session{flag}</code>; "

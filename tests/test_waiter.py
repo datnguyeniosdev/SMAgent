@@ -87,3 +87,53 @@ async def test_long_poll_returns_on_new_work_and_waits_past_after(settings, cfg_
     assert (
         held["next"] == msg["message_id"]
     )  # already woken for: held to the end, not returned early
+
+
+def test_prompt_hook_restarts_a_dead_waiter_unless_closed(tmp_path, monkeypatch, capsys):
+    """After an app restart the waiter is gone: the next prompt tells Claude to start it again."""
+    from app import projects
+    from app.cli import main
+
+    monkeypatch.setattr(w, "WAITERS", tmp_path / "waiters")
+    (tmp_path / "ball-shot").mkdir()
+    (tmp_path / "ball-shot/AGENTS.md").write_text("x")
+    (tmp_path / "ball-shot/README.md").write_text("# Ball Shot (K10)\n")
+    monkeypatch.setattr(projects, "projects_root", lambda: tmp_path)
+    monkeypatch.chdir(tmp_path / "ball-shot")
+    cwd = str(tmp_path / "ball-shot")
+    assert main(["hook-prompt"]) == 0
+    out = capsys.readouterr().out
+    assert "not running" in out and "wait --project 'Ball Shot (K10)'" in out
+
+    from app.channel import ChannelHub
+
+    state = w.WAITERS / f"{ChannelHub.pull_id('Ball Shot (K10)', 'claude_code', cwd)}.json"
+    state.parent.mkdir(parents=True)
+    state.write_text(json.dumps({"pid": os.getpid()}))  # alive
+    assert main(["hook-prompt"]) == 0 and capsys.readouterr().out == ""
+    state.write_text(json.dumps({"pid": 999999}))  # its process is gone
+    assert w.missing("Ball Shot (K10)", cwd)
+    state.write_text(json.dumps({"closed": True}))  # /close: not brought back
+    assert main(["hook-prompt"]) == 0 and capsys.readouterr().out == ""
+    monkeypatch.chdir(tmp_path)  # outside a project: silent
+    assert main(["hook-prompt"]) == 0 and capsys.readouterr().out == ""
+
+
+async def test_watchdog_prune_reports_a_dropped_session(settings, cfg_dir, monkeypatch):
+    from datetime import timedelta
+
+    from app import channel as ch
+    from tests.test_config_gateway import make
+
+    orch, _ = make(settings, cfg_dir, [])
+    hub, notes = orch.channel, []
+    monkeypatch.setattr(hub, "_ops", notes.append)
+    s, _, _ = hub.pull("Ball Shot (K10)", None, "/w/ball", 0, "claude_code", "app")
+    hub._prune()
+    assert s.session_id in hub.sessions and not any("left" in n for n in notes)  # seen recently
+    s.last_seen -= ch.PULL_TTL + timedelta(seconds=1)
+    hub._prune()
+    assert s.session_id not in hub.sessions
+    assert (
+        "left" in notes[-1] and "app restarted" in notes[-1] and "restarts its waiter" in notes[-1]
+    )

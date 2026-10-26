@@ -18,7 +18,10 @@ import sys
 from pathlib import Path
 
 from app.mcp_server import TOOL_NAMES
-from app.projects import detect_project  # noqa: F401 - re-exported (tests, cli)
+from app.projects import (
+    client_kind,  # noqa: F401 - re-exported (tests, hooks)
+    detect_project,  # noqa: F401 - re-exported (tests, cli)
+)
 
 SERVER = "agent-gateway"
 CHANNEL = "agent-gateway-channel"  # stdio shim spawned by Claude Code; pushes work into `agw session` sessions
@@ -152,14 +155,6 @@ once the command has finished, call `report_deployment`:
     web build or store page). Name it in `notes` when there are several.
 - For failures, add a short `error` (the failing step and its last error line). No secrets.
 """
-
-
-def client_kind() -> str:
-    """How the Claude Code running this hook was started: "app" (desktop app, IDE extension) or "cli"."""
-    entry = os.environ.get("CLAUDE_CODE_ENTRYPOINT", "")
-    if not entry:
-        return ""
-    return "cli" if entry == "cli" or entry.startswith("sdk") else "app"
 
 
 def loop_prompt(project: str, client: str = "", agent: str = "claude_code") -> str:

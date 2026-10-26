@@ -46,8 +46,16 @@ def hook_command() -> str:
     return f'"{_agw()}" hook-session-start'
 
 
+def prompt_hook_command() -> str:
+    return f'"{_agw()}" hook-prompt'
+
+
+HOOKS = {"SessionStart": hook_command, "UserPromptSubmit": prompt_hook_command}
+
+
 def _ours(entry: dict) -> bool:
-    return any(h.get("command") == hook_command() for h in entry.get("hooks", []))
+    mine = {fn() for fn in HOOKS.values()}
+    return any(h.get("command") in mine for h in entry.get("hooks", []))
 
 
 def permission_rules() -> list[str]:
@@ -114,12 +122,13 @@ def install(
     data = _load(path)
     allow = data.setdefault("permissions", {}).setdefault("allow", [])
     allow += [r for r in permission_rules() if r not in allow]
-    hooks = data.setdefault("hooks", {}).setdefault("SessionStart", [])
-    hooks[:] = [h for h in hooks if not _ours(h)]
-    hooks.append({"hooks": [{"type": "command", "command": hook_command(), "timeout": 10}]})
+    for event, cmd in HOOKS.items():  # the hint at start; a waiter check on every prompt
+        hooks = data.setdefault("hooks", {}).setdefault(event, [])
+        hooks[:] = [h for h in hooks if not _ours(h)]
+        hooks.append({"hooks": [{"type": "command", "command": cmd(), "timeout": 10}]})
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + "\n")
-    done.append(f"{path}: gateway tools allowed, SessionStart hook added")
+    done.append(f"{path}: gateway tools allowed, SessionStart and UserPromptSubmit hooks added")
     skill_file().parent.mkdir(parents=True, exist_ok=True)
     skill_file().write_text(skill_text())
     done.append(f"skill: {skill_file()}")
@@ -164,10 +173,11 @@ def remove(register_mcp: bool = True) -> list[str]:
         if "allow" in perms:
             perms["allow"] = [r for r in perms["allow"] if r not in rules]
         hooks = data.get("hooks", {})
-        if "SessionStart" in hooks:
-            hooks["SessionStart"] = [h for h in hooks["SessionStart"] if not _ours(h)]
-            if not hooks["SessionStart"]:
-                del hooks["SessionStart"]
+        for event in HOOKS:
+            if event in hooks:
+                hooks[event] = [h for h in hooks[event] if not _ours(h)]
+                if not hooks[event]:
+                    del hooks[event]
         if "hooks" in data and not data["hooks"]:
             del data["hooks"]
         path.write_text(json.dumps(data, indent=2) + "\n")

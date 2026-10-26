@@ -40,6 +40,30 @@ def wake_text(project: str, cwd: str, client: str, sid: str, message_id: str) ->
     )
 
 
+def missing(project: str, cwd: str) -> bool:
+    """The session's waiter is not running (the app restarted, or it was never started), and the
+    operator did not close the session. Cheap: a file read and a signal 0, no gateway call."""
+    from app.channel import ChannelHub
+
+    data = _read(WAITERS / f"{ChannelHub.pull_id(project, 'claude_code', cwd)}.json")
+    if data.get("closed"):
+        return False
+    try:
+        os.kill(int(data["pid"]), 0)
+        return False
+    except (KeyError, TypeError, ValueError, OSError):
+        return True
+
+
+def reminder(project: str, cwd: str, client: str = "") -> str:
+    """UserPromptSubmit hook output when the waiter is gone: Claude starts it before the request."""
+    return (
+        f"agent-gateway: the waiter of this session ('{project}') is not running (the app restarted?), "
+        "so Telegram work cannot wake you. Before anything else, start it once with the Bash tool, "
+        f"run_in_background true: `{command(project, cwd, client)}`. Then do the user's request."
+    )
+
+
 def _read(path: Path) -> dict:
     try:
         return json.loads(path.read_text())
@@ -54,7 +78,8 @@ def wait(project: str, cwd: str, client: str, port: int, interval: float = 30) -
     base = {"project": project, "agent": "claude_code", "cwd": cwd, "client": client or "app"}
     WAITERS.mkdir(parents=True, exist_ok=True)
     path = WAITERS / f"{sid}.json"
-    path.write_text(json.dumps({**_read(path), "pid": os.getpid()}))
+    old = {k: v for k, v in _read(path).items() if k != "closed"}  # started again: open again
+    path.write_text(json.dumps({**old, "pid": os.getpid()}))
     while True:
         data = _read(path)
         if data.get("pid") != os.getpid():
@@ -73,7 +98,7 @@ def wait(project: str, cwd: str, client: str, port: int, interval: float = 30) -
             time.sleep(interval)  # gateway down or restarting: keep waiting, the operator starts it
             continue
         if state.get("closing"):
-            path.unlink(missing_ok=True)
+            path.write_text(json.dumps({"closed": True}))  # the prompt hook must not restart it
             print("The operator closed this session (/close): do not restart the waiter.")
             return 0
         nxt = state.get("next")

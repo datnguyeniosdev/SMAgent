@@ -573,6 +573,19 @@ def cmd_hook_session_start(args) -> int:
     return 0
 
 
+def cmd_hook_prompt(args) -> int:
+    """UserPromptSubmit hook (global): if this session's `agw wait` is gone (the app restarted and
+    stopped background tasks), its stdout tells Claude to start it again before the request."""
+    from app.projects import client_kind, project_for  # light imports: this runs on every prompt
+    from app.waiter import missing, reminder
+
+    cwd = str(Path.cwd())
+    project = project_for(Path(cwd))
+    if project and missing(project, cwd):
+        print(reminder(project, cwd, client_kind()))
+    return 0
+
+
 def cmd_codex_hook(args) -> int:
     """Codex SessionStart/SessionEnd hook: record this folder's desktop thread for the gateway's push."""
     from app.codex_relay import hook
@@ -774,6 +787,7 @@ def main(argv: list[str] | None = None) -> int:
     sp = sub.add_parser("hook-session-start")
     sp.add_argument("--project")
     sp.set_defaults(fn=cmd_hook_session_start)
+    sub.add_parser("hook-prompt").set_defaults(fn=cmd_hook_prompt)  # UserPromptSubmit
     sub.add_parser("codex-hook").set_defaults(fn=cmd_codex_hook)  # Codex SessionStart/End
     sp = sub.add_parser("wait")  # Claude Code pull loop, run in the background (app/waiter.py)
     sp.add_argument("--project", required=True)

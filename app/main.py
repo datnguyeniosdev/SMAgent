@@ -311,6 +311,7 @@ async def lifespan(app: FastAPI):
             try:
                 await orch.asks.check()
                 orch.channel._expire()  # even when no agent polls (waiters only peek)
+                orch.channel._prune()  # a session whose waiter died is reported within a minute
             except Exception:
                 log.exception("ask watchdog round failed")
 

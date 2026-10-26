@@ -7,6 +7,7 @@ contains this gateway). A session in such a repo, or in any sub-folder of it, be
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -72,3 +73,11 @@ def project_for(cwd: Path) -> str | None:
     """Project name for a session started in cwd, or None when cwd is not in a connected repo."""
     repo = repo_for(cwd)
     return detect_project(repo) if repo else None
+
+
+def client_kind() -> str:
+    """How the Claude Code running this hook was started: "app" (desktop app, IDE extension) or "cli"."""
+    entry = os.environ.get("CLAUDE_CODE_ENTRYPOINT", "")
+    if not entry:
+        return ""
+    return "cli" if entry == "cli" or entry.startswith("sdk") else "app"

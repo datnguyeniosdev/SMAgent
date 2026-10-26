@@ -20,6 +20,8 @@ def test_install_is_idempotent_and_remove_restores_user_settings(tmp_path, monke
     assert len(data["permissions"]["allow"]) == 1 + len(global_setup.permission_rules())
     cmds = [h["hooks"][0]["command"] for h in data["hooks"]["SessionStart"]]
     assert cmds == ["echo mine", global_setup.hook_command()]
+    prompt = [h["hooks"][0]["command"] for h in data["hooks"]["UserPromptSubmit"]]
+    assert prompt == [global_setup.prompt_hook_command()]  # the waiter check, once
     assert json.loads((tmp_path / ".claude/settings.json.agw-backup").read_text()) == mine
     skill = global_setup.skill_file().read_text()
     assert skill.startswith("---\nname: agent-gateway\n") and "generate_art" in skill

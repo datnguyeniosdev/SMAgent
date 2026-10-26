@@ -24,6 +24,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from app.models import new_id, now
 
@@ -167,13 +168,13 @@ class ChannelHub:
                 "enabled": s.enabled, "agent": s.agent, "client": s.client}  # fmt: skip
         self.svc.store.put("channel_session", s.session_id, body, task_id=s.task_id, state="open")
 
-    def disconnect(self, s: LiveSession) -> None:
+    def disconnect(self, s: LiveSession, why: str = "") -> None:
         if (
             self.sessions.get(s.session_id) is s
         ):  # a newer stream for the same id may have replaced it
             del self.sessions[s.session_id]
             self._release(s)
-            self._ops(f"⚪ {self._label(s)} left")
+            self._ops(f"⚪ {self._label(s)} left" + (f": {why}" if why else ""))
             self.svc.store.event("channel.disconnected", task_id=s.task_id, session=s.session_id)
             log.info("%s session %s disconnected", s.mode, s.session_id)
 
@@ -189,7 +190,10 @@ class ChannelHub:
         for s in [s for s in self.sessions.values() if s.mode == "pull" and s.last_seen < cutoff]:
             if self.in_progress(s.session_id):  # still working on a message within its lease
                 continue
-            self.disconnect(s)
+            how = ("open the thread in Codex desktop" if s.agent == "codex"
+                   else "send any message in that session (it restarts its waiter)")  # fmt: skip
+            self.disconnect(s, f"not seen for {int(PULL_TTL.total_seconds() // 60)} min (app restarted or "
+                            f"session closed). To reconnect, {how}.")  # fmt: skip
 
     def live(self) -> list[LiveSession]:
         self._prune()
@@ -316,6 +320,13 @@ class ChannelHub:
             )
         if mine and not any(s.enabled for s in mine):
             return "its sessions are turned off (/on <session>)"
+        folder = self.project_dir(project)
+        if not mine and folder:
+            from app.launcher import app_sessions
+
+            if app := app_sessions(Path(folder)):
+                return (f"it is open in Claude desktop ('{app[0]['title'][:60]}') but not connected (its "
+                        "waiter stopped); send any message in that session to reconnect it")  # fmt: skip
         return ""
 
     def blocked_for(self, project: str) -> bool:
