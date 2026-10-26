@@ -81,8 +81,8 @@ ANTIGRAVITY_WAKE = """
   under `~/Working`, start the gateway waiter once as a background terminal command you do not wait
   for: `{agw} wait --agent antigravity --cwd <the workspace folder>`. It keeps running and sends a
   message into this conversation when Telegram work arrives; then call `get_messages` with the
-  session_id that message names, do the request and answer with `reply_message`. Never start a
-  second one in the same conversation.
+  session_id that message names, do the request and answer with `reply_message`, then start the
+  waiter again the same way (the new turn stops it). Never run two at once.
 """
 
 

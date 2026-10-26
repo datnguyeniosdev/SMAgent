@@ -41,8 +41,9 @@ def wake_text(project: str, cwd: str, client: str, sid: str, message_id: str,
 
     prompt = loop_prompt(project, client, agent).replace("this folder", f"'{cwd}'")
     prompt = prompt.replace("reusing the session_id it returned before", f"session_id '{sid}'")
-    again = (
-        "The waiter keeps running: do not start another."
+    again = (  # Antigravity stops a background command when its conversation takes a new turn
+        "When you have answered, start this waiter again as a background terminal command you do "
+        f"not wait for: `{command(project, cwd, client, agent)}`."
         if agent == "antigravity"
         else "When you have answered, start this waiter again with the Bash tool, run_in_background "
         f"true: `{command(project, cwd, client)}`."
@@ -63,8 +64,12 @@ def antigravity_notify():
         return None
 
     def notify(text: str) -> bool:
+        cmd = [exe]
+        if Path(exe).name == "language_server":
+            cmd.append("agentapi")
+        cmd.extend(["send-message", "--title=Telegram work", conv, text])
         r = subprocess.run(  # noqa: S603 - Antigravity's own CLI
-            [exe, "send-message", "--title=Telegram work", conv, text],
+            cmd,
             capture_output=True, text=True, timeout=60,
         )  # fmt: skip
         ok = r.returncode == 0 and '"error"' not in r.stdout

@@ -171,7 +171,7 @@ def test_antigravity_waiter_wakes_its_conversation_and_keeps_running(tmp_path, m
                   notify=lambda t: woke.append(t) or True) == 0  # fmt: skip
     assert len(woke) == 2 and "chm_1" in woke[0] and "chm_2" in woke[1]  # once each, never exits
     assert "agent 'antigravity'" in woke[0] and "pull_glazedgemsgma_antigravity_" in woke[0]
-    assert "do not start another" in woke[0]
+    assert "start this waiter again" in woke[0] and "--agent antigravity" in woke[0]
 
 
 def test_antigravity_notify_needs_its_terminal(monkeypatch):
@@ -189,3 +189,28 @@ def test_antigravity_notify_needs_its_terminal(monkeypatch):
     assert w.antigravity_notify()("work") and calls == [
         ["/x/agentapi", "send-message", "--title=Telegram work", "conv-1", "work"]
     ]
+
+    calls.clear()
+    monkeypatch.setenv("ANTIGRAVITY_AGENTAPI_EXE", "/bin/language_server")
+    assert w.antigravity_notify()("work2") and calls == [
+        ["/bin/language_server", "agentapi", "send-message", "--title=Telegram work", "conv-1", "work2"]
+    ]
+
+
+async def test_reply_message_tells_antigravity_to_restart_its_waiter(settings, cfg_dir):
+    from mcp.client import Client
+
+    from app.mcp_server import build_mcp_server
+    from tests.test_config_gateway import make
+
+    orch, _ = make(settings, cfg_dir, [])
+    kw = {"project": "Agent Gateway", "agent": "antigravity", "cwd": "/w/gw", "client": "app"}
+    async with Client(build_mcp_server(orch)) as c:
+        sid = (await c.call_tool("get_messages", kw)).structured_content["session_id"]
+        msg, _ = orch.channel.send("Agent Gateway", "xin chào", session_id=sid)
+        await c.call_tool("get_messages", {**kw, "session_id": sid})
+        rep = (await c.call_tool("reply_message", {"session_id": sid, "text": "Dạ, chào anh ạ",
+                                                    "message_id": msg["message_id"]})).structured_content  # fmt: skip
+    assert (
+        "wait --project 'Agent Gateway' --cwd /w/gw --client app --agent antigravity" in rep["next"]
+    )

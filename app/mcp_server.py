@@ -600,6 +600,11 @@ def build_mcp_server(svc) -> MCPServer:
 
             out["next"] = ("start your gateway waiter again now with the Bash tool, run_in_background "
                            f"true: `{command(s.project, s.cwd, s.client)}`")  # fmt: skip
+        elif s and s.mode == "pull" and s.cwd and s.agent == "antigravity":
+            from app.waiter import command  # Antigravity stopped it when the wake-up started a turn
+
+            out["next"] = ("start your gateway waiter again now as a background terminal command you "
+                           f"do not wait for: `{command(s.project, s.cwd, 'app', 'antigravity')}`")  # fmt: skip
         return out
 
     @tool
