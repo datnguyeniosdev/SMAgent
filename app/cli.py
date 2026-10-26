@@ -618,6 +618,22 @@ def cmd_wait(args) -> int:
                 "Run this from an Antigravity agent terminal (it needs ANTIGRAVITY_CONVERSATION_ID)."
             )
             return 2
+        if not os.environ.get("AGW_WAIT_DETACHED"):  # Antigravity stops its terminal commands
+            from app.channel import ChannelHub
+            from app.waiter import WAITERS
+
+            WAITERS.mkdir(parents=True, exist_ok=True)
+            log = WAITERS / f"{ChannelHub.pull_id(project, 'antigravity', cwd)}.log"
+            agw = Path(sys.executable).parent / "agw"
+            with open(log, "a") as out:
+                proc = subprocess.Popen(  # noqa: S603 - our own CLI, same arguments
+                    [str(agw), "wait", "--agent", "antigravity", "--cwd", cwd, "--project", project],
+                    stdin=subprocess.DEVNULL, stdout=out, stderr=out, start_new_session=True,
+                    env={**os.environ, "AGW_WAIT_DETACHED": "1"},
+                )  # fmt: skip
+            print(f"Gateway waiter running in the background (pid {proc.pid}); it wakes this "
+                  f"conversation when Telegram work arrives. Log: {log}")  # fmt: skip
+            return 0
     return wait(project, cwd, args.client or "app", ENV_PORTS[env_name()], agent=args.agent,
                 notify=notify)  # fmt: skip
 

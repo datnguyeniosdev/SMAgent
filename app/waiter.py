@@ -41,9 +41,9 @@ def wake_text(project: str, cwd: str, client: str, sid: str, message_id: str,
 
     prompt = loop_prompt(project, client, agent).replace("this folder", f"'{cwd}'")
     prompt = prompt.replace("reusing the session_id it returned before", f"session_id '{sid}'")
-    again = (  # Antigravity stops a background command when its conversation takes a new turn
-        "When you have answered, start this waiter again as a background terminal command you do "
-        f"not wait for: `{command(project, cwd, client, agent)}`."
+    again = (  # detached, it outlives the turn; running it again just replaces it
+        "The waiter keeps running by itself. If you are unsure it still runs, run "
+        f"`{command(project, cwd, client, agent)}` again (it returns at once and replaces the old one)."
         if agent == "antigravity"
         else "When you have answered, start this waiter again with the Bash tool, run_in_background "
         f"true: `{command(project, cwd, client)}`."
@@ -122,6 +122,7 @@ def wait(project: str, cwd: str, client: str, port: int, interval: float = 30,
     path = WAITERS / f"{sid}.json"
     old = {k: v for k, v in _read(path).items() if k != "closed"}  # started again: open again
     path.write_text(json.dumps({**old, "pid": os.getpid()}))
+    failures = 0  # wake-ups in a row that did not reach the agent (notify mode)
     while True:
         data = _read(path)
         if data.get("pid") != os.getpid():
@@ -152,5 +153,12 @@ def wait(project: str, cwd: str, client: str, port: int, interval: float = 30,
                 return 0
             if notify(text):  # woken in place; a failed one is tried again next round
                 path.write_text(json.dumps({**data, "woke": nxt, "at": time.time()}))
+                failures = 0
             else:
+                failures += 1
+                if failures >= 3:  # the conversation or the app is gone: nothing left to wake
+                    print(
+                        "Could not wake the conversation 3 times: stopping (start it again from there)."
+                    )
+                    return 1
                 time.sleep(interval)

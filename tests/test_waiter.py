@@ -171,7 +171,7 @@ def test_antigravity_waiter_wakes_its_conversation_and_keeps_running(tmp_path, m
                   notify=lambda t: woke.append(t) or True) == 0  # fmt: skip
     assert len(woke) == 2 and "chm_1" in woke[0] and "chm_2" in woke[1]  # once each, never exits
     assert "agent 'antigravity'" in woke[0] and "pull_glazedgemsgma_antigravity_" in woke[0]
-    assert "start this waiter again" in woke[0] and "--agent antigravity" in woke[0]
+    assert "keeps running by itself" in woke[0] and "--agent antigravity" in woke[0]
 
 
 def test_antigravity_notify_needs_its_terminal(monkeypatch):
@@ -193,7 +193,14 @@ def test_antigravity_notify_needs_its_terminal(monkeypatch):
     calls.clear()
     monkeypatch.setenv("ANTIGRAVITY_AGENTAPI_EXE", "/bin/language_server")
     assert w.antigravity_notify()("work2") and calls == [
-        ["/bin/language_server", "agentapi", "send-message", "--title=Telegram work", "conv-1", "work2"]
+        [
+            "/bin/language_server",
+            "agentapi",
+            "send-message",
+            "--title=Telegram work",
+            "conv-1",
+            "work2",
+        ]
     ]
 
 
@@ -214,3 +221,35 @@ async def test_reply_message_tells_antigravity_to_restart_its_waiter(settings, c
     assert (
         "wait --project 'Agent Gateway' --cwd /w/gw --client app --agent antigravity" in rep["next"]
     )
+
+
+def test_antigravity_waiter_detaches_and_stops_when_its_conversation_is_gone(
+    tmp_path, monkeypatch, capsys
+):
+    from app import cli, projects
+
+    monkeypatch.setattr(w, "WAITERS", tmp_path / "waiters")
+    (tmp_path / "mario").mkdir()
+    (tmp_path / "mario/AGENTS.md").write_text("x")
+    (tmp_path / "mario/README.md").write_text("# Mario Clone (K10)\n")
+    monkeypatch.setattr(projects, "projects_root", lambda: tmp_path)
+    monkeypatch.setenv("ANTIGRAVITY_CONVERSATION_ID", "conv-1")
+    monkeypatch.setenv("ANTIGRAVITY_LS_ADDRESS", "127.0.0.1:1")
+    monkeypatch.delenv("AGW_WAIT_DETACHED", raising=False)
+    spawned = []
+
+    class Proc:
+        pid = 4242
+
+    monkeypatch.setattr(
+        cli.subprocess, "Popen", lambda cmd, **k: spawned.append((cmd, k)) or Proc()
+    )
+    assert cli.main(["wait", "--agent", "antigravity", "--cwd", str(tmp_path / "mario")]) == 0
+    cmd, k = spawned[0]
+    assert cmd[1:4] == ["wait", "--agent", "antigravity"] and "Mario Clone (K10)" in cmd
+    assert k["start_new_session"] and k["env"]["AGW_WAIT_DETACHED"] == "1"
+    assert "pid 4242" in capsys.readouterr().out  # returns at once: Antigravity cannot stop it
+
+    m1 = {"queued": True, "next": "chm_1"}
+    feed(monkeypatch, [m1, m1, m1])
+    assert w.wait("P", "/w/p", "app", 8000, agent="antigravity", notify=lambda t: False) == 1

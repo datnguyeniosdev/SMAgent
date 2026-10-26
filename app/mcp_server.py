@@ -603,8 +603,9 @@ def build_mcp_server(svc) -> MCPServer:
         elif s and s.mode == "pull" and s.cwd and s.agent == "antigravity":
             from app.waiter import command  # Antigravity stopped it when the wake-up started a turn
 
-            out["next"] = ("start your gateway waiter again now as a background terminal command you "
-                           f"do not wait for: `{command(s.project, s.cwd, 'app', 'antigravity')}`")  # fmt: skip
+            out["next"] = ("make sure your gateway waiter runs: run "
+                           f"`{command(s.project, s.cwd, 'app', 'antigravity')}` (returns at once, "
+                           "replaces the old one)")  # fmt: skip
         return out
 
     @tool

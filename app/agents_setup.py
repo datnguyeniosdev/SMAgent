@@ -78,11 +78,10 @@ title, else the folder name.
 
 ANTIGRAVITY_WAKE = """
 - **Telegram work wakes you (Antigravity)**: at the start of each conversation in a project folder
-  under `~/Working`, start the gateway waiter once as a background terminal command you do not wait
-  for: `{agw} wait --agent antigravity --cwd <the workspace folder>`. It keeps running and sends a
-  message into this conversation when Telegram work arrives; then call `get_messages` with the
-  session_id that message names, do the request and answer with `reply_message`, then start the
-  waiter again the same way (the new turn stops it). Never run two at once.
+  under `~/Working`, run once: `{agw} wait --agent antigravity --cwd <the workspace folder>`. It
+  returns at once and keeps running by itself; it sends a message into this conversation when
+  Telegram work arrives. Then call `get_messages` with the session_id that message names, do the
+  request and answer with `reply_message`. Running it again replaces the old one (never two).
 """
 
 
