@@ -206,12 +206,12 @@ class Shim:
 
 
 def main(project: str | None = None) -> int:
-    """project=None (global install): the project of the session's folder; outside a connected repo
+    """The project of the session's folder (its README now, so a rename takes effect); `project`
+    (pinned in an older repo .mcp.json) only outside a connected folder. Outside a connected repo
     the shim just answers MCP requests and never listens."""
-    if not project:
-        from app.projects import project_for
+    from app.projects import project_for
 
-        project = project_for(Path.cwd())
+    project = project_for(Path.cwd()) or project
     Shim(
         project or "unconnected",
         os.environ.get("AGW_URL", "http://127.0.0.1:8000"),

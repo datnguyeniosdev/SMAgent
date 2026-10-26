@@ -555,10 +555,14 @@ def cmd_global_setup(args) -> int:
 
 def cmd_hook_session_start(args) -> int:
     """SessionStart hook (from .claude/settings.local.json): its stdout becomes Claude's context."""
+    from app import global_setup
     from app.projects import project_for
     from app.repo_setup import session_start_hint
 
-    project = args.project or project_for(Path.cwd())
+    if args.project and global_setup.installed():
+        return 0  # an older repo hook: the global hook says it once, with the current name
+    # the folder's README now (a renamed project takes its new name); a pinned name only outside
+    project = project_for(Path.cwd()) or args.project
     if project is None:  # global hook in a folder that is not a connected repo: stay silent
         return 0
     print(session_start_hint(project))

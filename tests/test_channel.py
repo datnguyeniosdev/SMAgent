@@ -409,6 +409,25 @@ def test_session_start_hook_and_loop_prompt(tmp_path):
     assert main(["hook-session-start", "--project", PROJECT]) == 0
 
 
+def test_repo_hook_follows_a_renamed_project(tmp_path, monkeypatch, capsys):
+    """An older repo hook pins the old name (Gem Mosaic); the README now says Glazed Gems."""
+    from app import global_setup, projects
+    from app.cli import main
+
+    (tmp_path / "colorever").mkdir()
+    (tmp_path / "colorever/AGENTS.md").write_text("x")
+    (tmp_path / "colorever/README.md").write_text("# Glazed Gems (GMA)\n")
+    monkeypatch.setattr(projects, "projects_root", lambda: tmp_path)
+    monkeypatch.chdir(tmp_path / "colorever")
+    monkeypatch.setattr(global_setup, "installed", lambda: False)
+    assert main(["hook-session-start", "--project", "Gem Mosaic (GMA)"]) == 0
+    out = capsys.readouterr().out
+    assert "Glazed Gems (GMA)" in out and "Gem Mosaic" not in out
+    monkeypatch.setattr(global_setup, "installed", lambda: True)
+    assert main(["hook-session-start", "--project", "Gem Mosaic (GMA)"]) == 0
+    assert capsys.readouterr().out == ""  # the global hook says it once
+
+
 def test_stop_claude_only_kills_claude_processes():
     import subprocess as sp
     import sys as _sys
