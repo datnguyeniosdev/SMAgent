@@ -598,7 +598,7 @@ def build_mcp_server(svc) -> MCPServer:
         hub = svc.channel
         agents = []
         for s in hub.live():
-            a = {"id": f"s{s.num}", "project": s.project, "agent": s.agent or None, "mode": s.mode,
+            a = {"id": f"s{s.num}", "name": s.title, "project": s.project, "agent": s.agent or None, "mode": s.mode,
                  "folder": s.cwd.rstrip("/").rsplit("/", 1)[-1]}  # fmt: skip
             if not s.deliverable:
                 a["can_take_work"] = False

@@ -31,7 +31,7 @@ async def test_asks_and_answers_are_copied_and_sessions_announced(settings, cfg_
     b, _, _ = hub.pull(B, None, agent="opencode")
     await settle()
     assert sum("connected" in t for t in texts(gw)) == 2 and any(
-        "opencode (CLI)" in t for t in texts(gw)
+        "OpenCode(CLI)-" in t for t in texts(gw)
     )
 
     ask = orch.asks.create("agent:opencode", "Coin size?", from_session=a.session_id)

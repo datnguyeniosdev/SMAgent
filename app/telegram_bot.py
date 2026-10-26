@@ -138,12 +138,10 @@ KIND_ICON = {"app": "🖥", "cli": "⌨️"}
 def session_line(s) -> str:
     """One /live row: mode, state, project, id, folder."""
     mode = "⚡ push" if s.mode == "push" else "🔄 pull"
-    who = (
-        f"{KIND_ICON[s.kind]} {escape(s.agent or ('claude_code' if s.mode == 'push' else 'agent'))}"
-    )
+    who = f"{KIND_ICON[s.kind]} <b>{escape(s.title)}</b>"  # e.g. ClaudeCode(App)-Coinlets
     state = "🚫 blocked (org policy)" if s.blocked else ("🟢 on" if s.enabled else "⏸ off")
     folder = escape(s.cwd.rstrip("/").rsplit("/", 1)[-1]) if s.cwd else "-"
-    return (f"<b>s{s.num}</b> · {who} · {state} · {mode} · {escape(s.project)} · {folder}"
+    return (f"<b>s{s.num}</b> · {who} · {state} · {mode} · {folder}"
             f" · since {s.connected_at.astimezone():%H:%M} · <code>{escape(s.session_id)}</code>")  # fmt: skip
 
 

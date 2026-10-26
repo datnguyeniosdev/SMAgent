@@ -160,7 +160,8 @@ async def test_open_by_project_id_and_buttons(settings, cfg_dir, tmp_path, monke
     s = hub.connect(
         "cc_k", "PocketSort", str(root / "k09-coin-sort-fun")
     )  # earlier session -> p1 + folder
-    hub.connect("cc_x", "Elsewhere", "/somewhere/else")  # p2, folder outside the root
+    (tmp_path / "elsewhere").mkdir()
+    hub.connect("cc_x", "Elsewhere", str(tmp_path / "elsewhere"))  # p2, folder outside the root
     hub.disconnect(s)
 
     await gw.on_open(m, SimpleNamespace(args=""))  # menu: one button per project with a folder
@@ -221,3 +222,21 @@ def test_open_prefers_the_disconnected_app_session(tmp_path, monkeypatch):
     assert status.startswith("opened") and len(opened) == 1  # "new" still opens a Terminal one
     (apps / "a/b/local_1.json").write_text(json.dumps({**rec, "isArchived": True}))
     assert launcher.app_sessions(root / "ball-shot") == []  # archived: not open
+
+
+def test_project_dir_follows_a_renamed_folder(settings, cfg_dir, tmp_path, monkeypatch):
+    """colorever -> ok03-colorever-gem-art-puzzle: /open p# finds the folder by its README name."""
+    from app import projects
+    from tests.test_config_gateway import make
+
+    orch, _ = make(settings, cfg_dir, [])
+    root = tmp_path / "Working"
+    root.mkdir()
+    repos(root, "ok03-colorever-gem-art-puzzle")
+    (root / "ok03-colorever-gem-art-puzzle/README.md").write_text("# Glazed Gems (GMA)\n")
+    monkeypatch.setattr(projects, "projects_root", lambda: root)
+    s, _, _ = orch.channel.pull("Glazed Gems (GMA)", None, str(root / "colorever"))  # old folder
+    orch.channel.disconnect(s)
+    assert orch.channel.project_dir("Glazed Gems (GMA)") == str(
+        root / "ok03-colorever-gem-art-puzzle"
+    )

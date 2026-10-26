@@ -60,6 +60,19 @@ APP_AGENTS = {"cursor", "windsurf", "vscode", "copilot", "cline", "roo", "kilo",
               "junie", "kiro", "trae", "claude_desktop"}  # fmt: skip
 
 
+# display names of the agent tools in session titles (ClaudeCode(App)-Coinlets)
+TOOL_TITLES = {"claude_code": "ClaudeCode", "codex": "Codex", "opencode": "OpenCode",
+               "antigravity": "Antigravity", "gemini": "Gemini", "droid": "Droid",
+               "cursor": "Cursor", "claude_desktop": "ClaudeDesktop"}  # fmt: skip
+
+
+def short_project(name: str) -> str:
+    """'Coinlets: Stack & Merge (formerly "Tini Coin") (TCN)' -> 'Coinlets'; 'Glazed Gems (GMA)' ->
+    'GlazedGems': the name before a subtitle or code, without spaces."""
+    head = re.split(r"[:(—–]| - ", name, maxsplit=1)[0]
+    return re.sub(r"[^0-9A-Za-z]+", "", head.title() if head.islower() else head) or name
+
+
 @dataclass
 class LiveSession:
     session_id: str
@@ -84,6 +97,15 @@ class LiveSession:
         if self.client in ("app", "cli"):
             return self.client
         return "app" if self.agent in APP_AGENTS else "cli"
+
+    @property
+    def title(self) -> str:
+        """Tool(App|CLI)-Project, e.g. ClaudeCode(App)-Coinlets, Codex(App)-GlazedGems."""
+        agent = self.agent or ("claude_code" if self.mode == "push" else "")
+        tool = TOOL_TITLES.get(agent) or (
+            agent.replace("_", " ").title().replace(" ", "") or "Agent"
+        )
+        return f"{tool}({'App' if self.kind == 'app' else 'CLI'})-{short_project(self.project)}"
 
     @property
     def deliverable(self) -> bool:
@@ -123,9 +145,7 @@ class ChannelHub:
     def _label(self, s: LiveSession) -> str:
         from html import escape
 
-        kind = "app" if s.kind == "app" else "CLI"
-        agent = s.agent or ("claude_code" if s.mode == "push" else "agent")
-        return f"<b>s{s.num}</b> {escape(agent)} ({kind}) · {escape(s.project)}"
+        return f"<b>s{s.num}</b> {escape(s.title)}"
 
     def connect(
         self,
@@ -215,13 +235,23 @@ class ChannelHub:
         return num
 
     def project_dir(self, project: str) -> str | None:
-        """Folder of the project's most recent session (where /open p# starts a new one)."""
+        """Folder of the project's most recent session (where /open p# starts a new one). A folder
+        that no longer exists (renamed) is skipped; then the project folder whose README names it."""
         dirs = [r["cwd"] for r in self.svc.store.list("channel_session")
                 if r.get("cwd") and _norm(r["project"]) == _norm(project)]  # fmt: skip
         live = [
             s.cwd for s in self.sessions.values() if s.cwd and _norm(s.project) == _norm(project)
         ]
-        return (live or dirs or [None])[-1]
+        found = [d for d in live + dirs if Path(d).is_dir()]
+        if found:
+            return (([d for d in live if Path(d).is_dir()]) or found)[-1]
+        from app.launcher import project_dirs
+        from app.projects import detect_project, projects_root
+
+        renamed = [
+            d for d in project_dirs(projects_root()) if _norm(detect_project(d)) == _norm(project)
+        ]
+        return str(renamed[0]) if renamed else None
 
     def projects(self) -> list[tuple[int, str]]:
         """(p-number, name) of every project a session ever opened for, by number."""

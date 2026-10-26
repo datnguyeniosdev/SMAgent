@@ -135,7 +135,7 @@ async def test_agents_panel_groups_and_controls(settings, cfg_dir, monkeypatch):
     await gw.on_agents(tg(answers))
     text, kb = answers[-1]
     app_part, cli_part = text.split("⌨️ <b>CLI</b>")[0], text.split("⌨️ <b>CLI</b>")[1].split("☁️")[0]
-    assert "claude_code" in app_part and "cursor" in app_part and "codex" in cli_part
+    assert "ClaudeCode(App)" in app_part and "Cursor(App)" in app_part and "Codex(CLI)" in cli_part
     assert "🟢 <b>openai</b> · on" in text and "y:sw:api:openai" in [d for _, d in buttons(kb)]
 
     await gw.on_agents_button(
