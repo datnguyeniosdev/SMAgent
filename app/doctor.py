@@ -34,7 +34,7 @@ def collect(
 ) -> list[Check]:
     from app import global_setup
     from app.config import env_file, env_name
-    from app.projects import projects_root
+    from app.projects import is_project, projects_root
 
     out = [
         Check(True, "environment", f"{env_name()} ({env_file()}, data in {s.data_dir})"),
@@ -80,8 +80,8 @@ def collect(
         )
     )
     root = projects_root()
-    repos = [d for d in root.iterdir() if (d / ".git").exists()] if root.is_dir() else []
-    out.append(Check(bool(repos), "projects", f"{len(repos)} git repos in {root}"))
+    repos = [d for d in root.iterdir() if is_project(d)] if root.is_dir() else []
+    out.append(Check(bool(repos), "projects", f"{len(repos)} projects in {root}"))
     done = global_setup.installed()
     out.append(
         Check(done, "global setup", "skill + hook + permissions" if done else "not installed")

@@ -362,13 +362,14 @@ def cmd_mcp_setup(args) -> int:
 
 
 def cmd_repo_setup(args) -> int:
+    from app.projects import is_project
     from app.repo_setup import setup_repo
 
     url = f"{_gateway_url(args.host, args.port)}/mcp"
     for raw in args.repos:
         repo = Path(raw).expanduser().resolve()
-        if not (repo / ".git").exists():
-            print(f"-- {repo}: not a git repository, skipped")
+        if not is_project(repo):
+            print(f"-- {repo}: not a project (no .git, AGENTS.md or CLAUDE.md), skipped")
             continue
         r = setup_repo(
             repo,

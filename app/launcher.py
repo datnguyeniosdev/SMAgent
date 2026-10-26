@@ -23,15 +23,13 @@ def _norm(text: str) -> str:
 
 
 def project_dirs(root: Path) -> list[Path]:
-    """Candidate projects: direct sub-folders of the root that are git repositories."""
+    """Candidate projects: direct sub-folders of the root that are projects (projects.is_project)."""
+    from app.projects import is_project
+
     if not root.is_dir():
         return []
     return sorted(
-        (
-            d
-            for d in root.iterdir()
-            if d.is_dir() and not d.name.startswith(".") and (d / ".git").exists()
-        ),
+        (d for d in root.iterdir() if not d.name.startswith(".") and is_project(d)),
         key=lambda d: d.name.lower(),
     )
 

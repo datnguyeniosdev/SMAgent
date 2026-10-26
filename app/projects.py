@@ -28,10 +28,17 @@ def projects_root() -> Path:
     return GATEWAY_DIR.parent
 
 
+def is_project(folder: Path) -> bool:
+    """A git repo, or a folder made from the project template before its `git init` (AGENTS.md or
+    CLAUDE.md at the top): a new project is attached and listed from its first session."""
+    return folder.is_dir() and any(
+        (folder / m).exists() for m in (".git", "AGENTS.md", "CLAUDE.md")
+    )
+
+
 def repo_for(cwd: Path, root: Path | None = None) -> Path | None:
     """The project folder directly under the projects root that contains cwd, or None (not
-    connected). A project is a git repo, or a folder made from the project template before its
-    `git init` (AGENTS.md or CLAUDE.md at the top), so a new project is attached from its first session."""
+    connected; see is_project)."""
     root = (root or projects_root()).resolve()
     try:
         rel = cwd.resolve().relative_to(root)
@@ -40,7 +47,7 @@ def repo_for(cwd: Path, root: Path | None = None) -> Path | None:
     if not rel.parts:
         return None
     repo = root / rel.parts[0]
-    return repo if any((repo / m).exists() for m in (".git", "AGENTS.md", "CLAUDE.md")) else None
+    return repo if is_project(repo) else None
 
 
 def detect_project(repo: Path) -> str:

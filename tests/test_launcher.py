@@ -20,6 +20,9 @@ def test_find_projects(tmp_path):
     assert (
         names("ios") == ["ios-quotes", "ios-user-app"] and names("notes") == [] and names("") == []
     )
+    (tmp_path / "mario").mkdir()  # a new project from the template, before `git init`
+    (tmp_path / "mario/AGENTS.md").write_text("# Agents\n")
+    assert names("mario") == ["mario"]
 
 
 def test_open_project_connects_once_and_avoids_duplicates(tmp_path, monkeypatch):
