@@ -41,7 +41,11 @@ def test_hook_and_shim_follow_the_folder(tmp_path, monkeypatch, capsys):
         "# T\n\n| Game code | `GMA` |\n| Game name | `Gem Mosaic` |\n"
     )
     (root / "notes").mkdir()  # not a git repo
+    (root / "mario").mkdir()  # a new project from the template, before `git init`
+    (root / "mario/AGENTS.md").write_text("# Agents\n")
+    (root / "mario/README.md").write_text("# Mario Run\n")
     monkeypatch.setattr(projects, "projects_root", lambda: root)
+    assert projects.project_for(root / "mario") == "Mario Run"
 
     monkeypatch.chdir(root / "notes")
     assert (

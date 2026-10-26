@@ -29,7 +29,9 @@ def projects_root() -> Path:
 
 
 def repo_for(cwd: Path, root: Path | None = None) -> Path | None:
-    """The git repo directly under the projects root that contains cwd, or None (not connected)."""
+    """The project folder directly under the projects root that contains cwd, or None (not
+    connected). A project is a git repo, or a folder made from the project template before its
+    `git init` (AGENTS.md or CLAUDE.md at the top), so a new project is attached from its first session."""
     root = (root or projects_root()).resolve()
     try:
         rel = cwd.resolve().relative_to(root)
@@ -38,7 +40,7 @@ def repo_for(cwd: Path, root: Path | None = None) -> Path | None:
     if not rel.parts:
         return None
     repo = root / rel.parts[0]
-    return repo if (repo / ".git").exists() else None
+    return repo if any((repo / m).exists() for m in (".git", "AGENTS.md", "CLAUDE.md")) else None
 
 
 def detect_project(repo: Path) -> str:
