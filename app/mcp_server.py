@@ -307,6 +307,17 @@ def build_mcp_server(svc) -> MCPServer:
         }
 
     @tool
+    async def close_question(request_id: str, answer: str) -> dict[str, Any]:
+        """The operator answered your request_human_input question in this session (app or terminal)
+        instead of on Telegram: close the Telegram copy so it is not reminded or answered twice.
+        answer: what they said, in a few words."""
+        try:
+            hi = await svc.collab.close_human_input(request_id, answer)
+        except CollaborationError as e:
+            raise GatewayToolError(str(e)) from e
+        return {"request_id": hi.request_id, "status": hi.status}
+
+    @tool
     async def get_human_response(request_id: str) -> dict[str, Any]:
         """Status (pending | answered | expired) and the answer, if any."""
         try:
@@ -716,6 +727,7 @@ TOOL_NAMES = [
     "cancel_task",
     "request_human_input",
     "get_human_response",
+    "close_question",
     "submit_report",
     "get_messages",
     "reply_message",

@@ -855,6 +855,28 @@ class CollaborationService:
             self.store.put("human_input", hi.request_id, hi, task_id=hi.task_id, state=hi.status)
         return hi
 
+    async def close_human_input(self, request_id: str, answer: str) -> HumanInput:
+        """Answered in the agent's session, not on Telegram: closed (no reminder, no double answer,
+        not pushed back to the agent, which has it) and the operator sees that on Telegram."""
+        from app import formatting as fmt
+
+        hi = self.get_human_input(request_id)
+        if hi.status != "pending":
+            return hi  # answered on Telegram first, expired or locked: nothing to close
+        hi.status, hi.responder, hi.answered_at = "answered", "session", now()
+        hi.response = f"(trả lời trong session) {answer.strip()[:300]}"
+        self.store.put("human_input", hi.request_id, hi, task_id=hi.task_id, state=hi.status)
+        self.store.event("human_input.closed_in_session", task_id=hi.task_id, request_id=request_id)
+        n = self.svc.notifier
+        if hasattr(n, "send_control"):
+            try:
+                said = fmt.escape(answer.strip()[:200])
+                await n.send_control(f"✅ <code>{request_id}</code> đã được trả lời trong session: "
+                                     f"{said}. Câu hỏi trên Telegram đã đóng ạ.")  # fmt: skip
+            except Exception:
+                log.exception("close notice for %s failed", request_id)
+        return hi
+
     def check_passcode(self, request_id: str, text: str, responder: str) -> str:
         """A reply to a secure question: approved | wrong (tries left in the text) | locked |
         no_passcode. The passcode itself is never stored or logged."""

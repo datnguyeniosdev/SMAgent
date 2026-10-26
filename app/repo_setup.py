@@ -76,7 +76,9 @@ anything destructive.
   yes/no), even when you also ask in the app or terminal: call `request_human_input` with `project`,
   your `session_id` and `options` (2-4 short button labels), in polite Vietnamese. The operator taps
   a button (or types `/answer <id> <text>`); the answer arrives through `get_messages` as
-  `meta.kind: "answer"` and wakes you. Act on whichever answer comes first (app or Telegram).
+  `meta.kind: "answer"` and wakes you. Act on whichever answer comes first (app or Telegram). When
+  the operator answers here in the session first, call `close_question(request_id, answer)` right
+  away, so the Telegram copy is closed (no reminder, no second answer).
 - **Important confirmations** (release, deploy, commit, push, merge, git pull): add `secure=true`. On
   Telegram the operator approves them only with a passcode, so go ahead only on the answer "✅ Duyệt
   (đã xác minh passcode)" or an approval in this session. "❌ Từ chối" refuses; a 🔒 locked answer

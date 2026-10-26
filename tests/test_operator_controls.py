@@ -244,3 +244,28 @@ async def test_secure_confirmation_needs_the_passcode_and_locks_after_3_tries(se
         "SELECT body FROM records UNION ALL SELECT body FROM events"
     ).fetchall()
     assert not any("Pa55-kode!" in r[0] for r in rows)  # the passcode is never stored
+
+
+async def test_question_answered_in_session_closes_the_telegram_copy(settings, cfg_dir):
+    from datetime import timedelta
+
+    from mcp.client import Client
+
+    from app.collaboration import HumanInput
+    from app.mcp_server import build_mcp_server
+
+    orch, _ = make(settings, cfg_dir, [])
+    gw = gateway(orch)
+    s, _, _ = orch.channel.pull(A, None)
+    hi = await orch.collab.request_human_input("Merge vào main?", options=["Có", "Không"], project=A,
+                                               session_id=s.session_id)  # fmt: skip
+    async with Client(build_mcp_server(orch)) as c:
+        out = (await c.call_tool("close_question", {"request_id": hi.request_id,
+                                                    "answer": "Có, merge đi"})).structured_content  # fmt: skip
+    assert out["status"] == "answered" and "trả lời trong session" in gw.bot.sent[-1][1]["text"]
+    rec = HumanInput.model_validate(orch.store.get("human_input", hi.request_id))
+    rec.created_at -= timedelta(hours=1)
+    orch.store.put("human_input", hi.request_id, rec, state=rec.status)
+    assert await orch.collab.remind_questions() == 0  # no reminder for a closed question
+    _, msgs, _ = orch.channel.pull(A, s.session_id, limit=5)
+    assert msgs == []  # not pushed back to the agent that already has it

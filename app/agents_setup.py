@@ -63,7 +63,8 @@ title, else the folder name.
   `get_messages` as an "answer" message, no polling (`get_review(review_id)` shows it too).
 - **Every confirmation or decision** (commit, push, merge, deploy, a choice, a yes/no) also goes to
   Telegram: `request_human_input(question, project, session_id, options=[2-4 short button labels])`
-  in polite Vietnamese; the answer comes back through `get_messages` (`meta.kind: "answer"`).
+  in polite Vietnamese; the answer comes back through `get_messages` (`meta.kind: "answer"`). If the
+  user answers in your session first, call `close_question(request_id, answer)` at once.
   Release, deploy, commit, push, merge and git pull: add `secure=true` (Telegram approval needs the
   operator's passcode); go ahead only on "✅ Duyệt (đã xác minh passcode)" or an approval in your
   session; a 🔒 locked answer is not approval.
