@@ -137,3 +137,26 @@ async def test_watchdog_prune_reports_a_dropped_session(settings, cfg_dir, monke
     assert (
         "left" in notes[-1] and "app restarted" in notes[-1] and "restarts its waiter" in notes[-1]
     )
+
+
+async def test_reply_message_tells_an_app_session_to_restart_its_waiter(settings, cfg_dir):
+    """The waiter exited to wake Claude; right after answering is when it must start again."""
+    from mcp.client import Client
+
+    from app.mcp_server import build_mcp_server
+    from tests.test_config_gateway import make
+
+    orch, _ = make(settings, cfg_dir, [])
+    async with Client(build_mcp_server(orch)) as c:
+        kw = {"project": "Mario Clone (K10)", "agent": "claude_code", "cwd": "/w/mario"}
+        for client, restart in (("app", True), ("cli", False)):
+            sid = (await c.call_tool("get_messages", {**kw, "client": client})).structured_content[
+                "session_id"
+            ]
+            msg, _ = orch.channel.send("Mario Clone (K10)", "plan the characters", session_id=sid)
+            await c.call_tool("get_messages", {**kw, "client": client, "session_id": sid})
+            rep = (await c.call_tool("reply_message", {"session_id": sid, "text": "Dạ, xong ạ",
+                                                        "message_id": msg["message_id"]})).structured_content  # fmt: skip
+            assert (
+                "wait --project 'Mario Clone (K10)' --cwd /w/mario" in rep.get("next", "")
+            ) is restart

@@ -387,8 +387,8 @@ class SoftwarePlugin:
         from app import formatting as fmt
 
         await ctx.approval(
-            f"🔐 <b>{conn.name}</b> will {what} for {fmt.task_line(ctx.task)}\n"
-            "Edits stay in an isolated worktree; nothing is merged. Approve?"
+            f"🔐 Dạ, <b>{conn.name}</b> sẽ {what} cho {fmt.task_line(ctx.task)}\n"
+            "Mọi thay đổi nằm trong worktree riêng, không merge gì cả. Anh duyệt ạ?"
         )
         return await ctx.svc.workspaces.create(ctx.task_id)
 
@@ -400,9 +400,7 @@ class SoftwarePlugin:
 
     async def op_implement(self, ctx, inputs: dict) -> StepOutput:
         conn = self._implementer(ctx)
-        ws = await self._approve_and_worktree(
-            ctx, conn, "edit files in a new isolated git worktree"
-        )
+        ws = await self._approve_and_worktree(ctx, conn, "sửa file trong một git worktree riêng")
         agents = ctx.agents()
         _, impl = await agents.implement(ctx.task, ws, ctx.objective, "Implement", connector=conn)
         qa = await agents.qa(ctx.task, ws)
@@ -414,7 +412,7 @@ class SoftwarePlugin:
     async def op_implement_reviewed(self, ctx, inputs: dict) -> StepOutput:
         conn = self._implementer(ctx)
         ws = await self._approve_and_worktree(
-            ctx, conn, "implement, then an independent reviewer checks the diff"
+            ctx, conn, "làm, rồi một reviewer độc lập kiểm tra diff"
         )
         agents = ctx.agents()
         step, impl = await agents.implement(

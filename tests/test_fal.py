@@ -254,7 +254,9 @@ async def test_agents_generate_art_via_mcp(settings, cfg_dir):
         assert "Canvas: 64x32 px" in brief
         approval = orch.store.list("approval", task_id=task.task_id)[0]
         assert (
-            "Brief" in approval["text"] and "flat vector" in approval["text"]
+            "Brief" in approval["text"]
+            and "anh duyệt" in approval["text"]
+            and "flat vector" in approval["text"]
         )  # shown before paying
         bad = await c.call_tool("generate_art", {"prompt": "coin", "purpose": "icon",
                                                  "requirements": "flat vector, no text", "width": 8, "height": 8})  # fmt: skip
@@ -401,7 +403,7 @@ async def test_art_feedback_regenerates_without_a_second_cost_approval(settings,
         "prompt": "gold coin\n\nPurpose: icon", "width": 64, "height": 32, "transparent": False}))  # fmt: skip
     await wait_done(orch, first)
     report = orch.collab.reports_for(first.task_id)[-1]
-    assert "what to change" in str(
+    assert "điểm cần sửa" in str(
         await orch.apply_action(action(orch, "art_feedback", first.task_id), "11")
     )
 

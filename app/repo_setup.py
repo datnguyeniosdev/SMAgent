@@ -77,6 +77,10 @@ anything destructive.
   your `session_id` and `options` (2-4 short button labels), in polite Vietnamese. The operator taps
   a button (or types `/answer <id> <text>`); the answer arrives through `get_messages` as
   `meta.kind: "answer"` and wakes you. Act on whichever answer comes first (app or Telegram).
+- **Important confirmations** (release, deploy, commit, push, merge, git pull): add `secure=true`. On
+  Telegram the operator approves them only with a passcode, so go ahead only on the answer "✅ Duyệt
+  (đã xác minh passcode)" or an approval in this session. "❌ Từ chối" refuses; a 🔒 locked answer
+  (3 wrong passcodes) is NOT approval: ask the operator to confirm here, in this session.
 - Use `delegate_task` (with `project` and your `session_id`) only when the user asks to hand work to
   the gateway. Its end arrives as an "answer" message; `get_task_result` has the details.
 {deploy}

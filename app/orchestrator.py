@@ -752,11 +752,9 @@ class Orchestrator:
             return f"Retrying as {new.task_id}"
         if a.kind == "art_accept":
             self._set_review(task.task_id, state="accepted", by=str(actor))
-            return "Accepted: the agent can use this image"
+            return "Đã chấp nhận: agent được dùng ảnh này"
         if a.kind == "art_feedback":
-            return (
-                "Reply to the image post with what to change; the new version comes back for review"
-            )
+            return "Dạ, anh trả lời bài ảnh với điểm cần sửa; bản mới sẽ gửi lại để anh duyệt ạ"
         if a.kind == "view_report":
             body, files = self._report_message(task)
             await self._notify(task, body, fmt.STATE_KIND.get(task.state, "info"), files)
@@ -796,7 +794,7 @@ class Orchestrator:
             by=str(actor),
         )
         fut.set_result((approved, str(actor)))
-        return "Approved" if approved else "Rejected"
+        return "Đã duyệt" if approved else "Đã từ chối"
 
     def pending_approvals(self, task_id: str | None = None) -> list[dict]:
         return [
@@ -1016,12 +1014,12 @@ class Orchestrator:
         reply = "Reply to this post to send feedback"
         if task.task_type in ART_TASK_TYPES and task.state == TaskState.succeeded and photos:
             acts += [  # the operator reviews generated art before an agent may use it
-                self.actions.create("art_accept", task.task_id, "✅ Accept", TERMINAL),
-                self.actions.create("art_feedback", task.task_id, "✏️ Feedback", TERMINAL),
+                self.actions.create("art_accept", task.task_id, "✅ Chấp nhận", TERMINAL),
+                self.actions.create("art_feedback", task.task_id, "✏️ Góp ý", TERMINAL),
             ]
             self._set_review(task.task_id, state="pending")
             reply = (
-                "✅ Accept, or reply to this post with what to change (a new version is generated)"
+                "Dạ, anh bấm ✅ Chấp nhận, hoặc trả lời bài này với điểm cần sửa (em tạo bản mới) ạ"
             )
         run = self.load_run(task.run_id) if task.run_id else None
         if (
@@ -1372,20 +1370,20 @@ class Orchestrator:
         if task.task_type in ART_TASK_TYPES and data.get("operator_requested"):
             rec.approved_by = "operator (asked for this revision on Telegram)"
             return True
-        desc = {
-            "tool": f"run tool <code>{step.ref}</code>",
-            "agent": "let an agent modify a workspace",
-            "approval": "continue past this checkpoint",
-            "plugin": f"run <code>{step.ref}</code>",
+        desc = {  # every question to the operator is in polite Vietnamese
+            "tool": f"chạy tool <code>{step.ref}</code>",
+            "agent": "cho agent sửa workspace",
+            "approval": "tiếp tục qua bước kiểm tra này",
+            "plugin": f"chạy <code>{step.ref}</code>",
         }
         msg = step.inputs.get("message") if step.executor == "approval" else None
         html = (
-            f"Approve to {desc.get(step.executor, step.executor)} (step <code>{step.id}</code>)"
+            f"Dạ, anh duyệt để {desc.get(step.executor, step.executor)} (bước <code>{step.id}</code>) ạ?"
             + (f"\n{fmt.escape(str(msg))}" if msg else "")
         )
         brief = ((task.request or {}).get("data") or {}).get("prompt")
         if brief:  # paid generation: show exactly what will be generated before approval
-            html += "\n\n<b>Brief</b>\n" + fmt.escape(fmt.truncate(str(brief), 900))
+            html += "\n\n<b>Mô tả sẽ tạo (Brief)</b>\n" + fmt.escape(fmt.truncate(str(brief), 900))
         try:
             approved, actor = await self._approval_wait(
                 task, html, run_id=run.run_id, step_id=step.id
@@ -1759,7 +1757,7 @@ class Orchestrator:
             self.actions.create(
                 "approve",
                 task.task_id,
-                "Approve",
+                "✅ Duyệt",
                 states,
                 group,
                 payload={"approval_id": approval_id},
@@ -1767,12 +1765,12 @@ class Orchestrator:
             self.actions.create(
                 "reject",
                 task.task_id,
-                "Reject",
+                "❌ Từ chối",
                 states,
                 group,
                 payload={"approval_id": approval_id},
             ),
-            self.actions.create("stop", task.task_id, "Stop", states),
+            self.actions.create("stop", task.task_id, "🛑 Dừng", states),
         ]
         await self._safe_report(
             task,
@@ -1782,7 +1780,7 @@ class Orchestrator:
                 html,
                 title=task.title,
                 ref=approval_id,
-                reply="Use the buttons below",
+                reply="Anh bấm nút bên dưới ạ",
             ),  # fmt: skip
             actions=acts,
             photos=photos,

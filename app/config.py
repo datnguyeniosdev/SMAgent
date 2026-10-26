@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     telegram_mode: Literal["polling", "webhook"] = "polling"
     telegram_webhook_url: str | None = None
     telegram_webhook_secret: SecretStr | None = None
+    # Important confirmations (release, deploy, commit/push, git pull) approved from Telegram need
+    # this passcode as a reply; the reply is deleted at once and 3 wrong tries lock the question
+    # (confirm on the machine). Unset: such confirmations can only be refused from Telegram.
+    telegram_confirm_passcode: SecretStr | None = None
 
     # REST control API. Control endpoints are disabled when unset.
     api_token: SecretStr | None = None
@@ -189,6 +193,7 @@ class Settings(BaseSettings):
                 self.deepseek_api_key,
                 self.opencode_password,
                 self.telegram_webhook_secret,
+                self.telegram_confirm_passcode,
             )
             if s
         ]

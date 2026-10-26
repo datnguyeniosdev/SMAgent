@@ -241,6 +241,13 @@ class ChannelHub:
             hits = [s for s in live if _norm(s.project) == _norm(project)]
         return hits[0] if len(hits) == 1 else None
 
+    def session_record(self, num: int) -> tuple[str, dict] | None:
+        """(session id, stored record) of s<num> even when it is not live (its waiter stopped)."""
+        for r in self.svc.store.list("channel_snum"):
+            if r.get("num") == num and (rec := self.svc.store.get("channel_session", r["key"])):
+                return r["key"], rec
+        return None
+
     def close(self, s: LiveSession) -> str:
         """/close: push -> stop its Claude Code process; pull -> its loop stops at the next round."""
         self.svc.store.event("channel.close", task_id=s.task_id, session=s.session_id, mode=s.mode)

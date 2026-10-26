@@ -278,8 +278,8 @@ class UnityPlugin:
         designer = svc.router.route(svc_caps(atts) | {Cap.structured_output}, svc._pref("designer"))
         implementer = svc.router.route({Cap.workspace_write}, svc._pref("implementer"), task.agent)
         await ctx.approval(
-            f"🔐 Design ({designer.name}) → implement ({implementer.name}, isolated worktree) → "
-            f"QA → independent review for {fmt.task_line(task)}. Approve?"
+            f"🔐 Dạ, thiết kế ({designer.name}) → làm ({implementer.name}, worktree riêng) → "
+            f"QA → review độc lập cho {fmt.task_line(task)}. Anh duyệt ạ?"
         )
         d_step = svc._child(task, "designer", "Design spec")
         req = AgentRequest(
@@ -318,7 +318,7 @@ class UnityPlugin:
         problems = check_manifest(entries, [s["name"] for s in specs])
         report = fmt.manifest_report(entries) + ("\n" + fmt.bullet(problems) if problems else "")
         if images:
-            await ctx.approval(report + "\n\nApprove these assets for integration?", images)
+            await ctx.approval(report + "\n\nDạ, anh duyệt đưa các asset này vào game ạ?", images)
             for e in entries:
                 e.approval_status = "approved"
         else:

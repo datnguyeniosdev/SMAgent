@@ -835,10 +835,37 @@ class TelegramGateway:
             [InlineKeyboardButton(text=o[:60], callback_data=f"h:{hi.request_id}:{i}")]
             for i, o in enumerate(hi.options)
         ]) if hi.options else None  # fmt: skip
+        if getattr(
+            hi, "secure", False
+        ):  # approving needs the passcode reply; a button only refuses
+            from app.collaboration import REFUSE
+
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=REFUSE, callback_data=f"h:{hi.request_id}:r")]])  # fmt: skip
         msg = await self._send(self.bot.send_message, chat_id=self.s.telegram_control_chat_id, text=html,
                                reply_markup=kb)  # fmt: skip
         if msg is None:
             raise RuntimeError("Telegram did not take the question")
+
+    async def _passcode_reply(self, m: TgMessage, request_id: str, text: str, user_id: str) -> None:
+        """A reply to a secure question: deleted at once (the passcode must not stay in the chat),
+        then checked. Never echoed, logged or stored."""
+        try:
+            await m.delete()
+        except Exception as e:  # noqa: BLE001 - the bot may lack the right to delete: say so
+            log.warning("could not delete a passcode reply: %s", type(e).__name__)
+            await self._send(self.bot.send_message, chat_id=m.chat.id,
+                             text="⚠️ Em không xoá được tin passcode (bot cần quyền xoá tin); anh hãy tự xoá "
+                                  "và đổi passcode ạ.")  # fmt: skip
+        result = self.orch.collab.check_passcode(request_id, text, user_id)
+        note = {
+            "approved": f"✅ Đã duyệt <code>{request_id}</code> (passcode đúng).",
+            "locked": f"🔒 Sai passcode 3 lần: <code>{request_id}</code> bị khoá, anh xác nhận trực tiếp trên máy ạ.",
+            "no_passcode": "Chưa cài passcode (TELEGRAM_CONFIRM_PASSCODE): anh xác nhận trực tiếp trên máy ạ.",
+        }.get(
+            result
+        ) or f"❌ Sai passcode cho <code>{request_id}</code>, còn {result.split()[-2]} lần thử."
+        await self._send(self.bot.send_message, chat_id=m.chat.id, text=note)
 
     async def on_question_button(self, q: CallbackQuery):
         chat_id = q.message.chat.id if q.message else None
@@ -849,10 +876,11 @@ class TelegramGateway:
         from app.collaboration import CollaborationError
 
         try:
+            from app.collaboration import REFUSE
+
             hi = self.orch.collab.get_human_input(request_id)
-            hi = self.orch.collab.answer_human_input(
-                request_id, hi.options[int(idx)], str(q.from_user.id)
-            )
+            choice = REFUSE if idx == "r" else hi.options[int(idx)]
+            hi = self.orch.collab.answer_human_input(request_id, choice, str(q.from_user.id))
         except (CollaborationError, IndexError, ValueError) as e:
             await q.answer(str(e)[:190] or "Not available.", show_alert=True)
             return
@@ -1111,13 +1139,17 @@ class TelegramGateway:
             return
         session = hub.find(ref) if re.fullmatch(r"[sS]\d+", ref) else None
         project = session.project if session else hub.resolve_project(ref)
+        offline = None  # s# of a session that is gone (waiter stopped): its project's inbox, its id
+        if project is None and (num := re.fullmatch(r"[sS](\d+)", ref)):
+            if found := hub.session_record(int(num.group(1))):
+                offline, project = found[0], found[1]["project"]
         if project is None:
             await m.answer(f"Unknown session or project {escape(ref)}.\n\n" + self._list_text())
             return
         sender = m.from_user.full_name if m.from_user else ""
         msg, target = hub.send(
             project, f"Request from {sender} (Telegram):\n{text.strip()}", sender=sender,
-            session_id=session.session_id if session else None,
+            session_id=session.session_id if session else offline,
         )  # fmt: skip
         if target is not None:
             how = "pushed into" if target.mode == "push" else "queued for the next get_messages of"
@@ -2136,6 +2168,9 @@ class TelegramGateway:
             from app.collaboration import CollaborationError
 
             try:  # a reply to an agent's question is the answer
+                if self.orch.collab.get_human_input(ids["hin"]).secure:
+                    await self._passcode_reply(m, ids["hin"], text, str(user_id))
+                    return
                 self.orch.collab.answer_human_input(ids["hin"], text, str(user_id), free=True)
                 await m.reply(f"✅ Answered <code>{ids['hin']}</code>.")
             except CollaborationError as e:

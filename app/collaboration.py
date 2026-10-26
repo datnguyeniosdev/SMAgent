@@ -69,6 +69,9 @@ class Feedback(BaseModel):
     created_at: datetime = Field(default_factory=now)
 
 
+REFUSE = "❌ Từ chối"  # the one answer a secure question takes without the passcode
+
+
 class HumanInput(BaseModel):
     request_id: str = Field(default_factory=lambda: new_id("hin"))
     task_id: str | None = None
@@ -76,12 +79,17 @@ class HumanInput(BaseModel):
     options: list[str] = []
     project: str | None = None
     session_id: str | None = None  # who asked: the answer is pushed there too
-    status: Literal["pending", "answered", "expired"] = "pending"
+    status: Literal["pending", "answered", "expired", "locked"] = "pending"
     response: str | None = None
     responder: str | None = None
     created_at: datetime = Field(default_factory=now)
     expires_at: datetime
     answered_at: datetime | None = None
+    reminded_at: datetime | None = None  # last time the unanswered question was sent again
+    secure: bool = (
+        False  # release/deploy/commit/pull: approved from Telegram only with the passcode
+    )
+    attempts: int = 0  # wrong passcodes so far (3: locked, confirm on the machine)
 
 
 class Handoff(BaseModel):
@@ -749,9 +757,8 @@ class CollaborationService:
         ttl_s: int | None = None,
         project: str | None = None,
         session_id: str | None = None,
+        secure: bool = False,
     ) -> HumanInput:
-        from app import formatting as fmt
-
         if task_id and task_id not in self.svc.tasks:
             raise CollaborationError("unknown_task", f"unknown task {task_id}")
         hi = HumanInput(
@@ -760,36 +767,14 @@ class CollaborationService:
             options=list(options)[:6],
             project=project,
             session_id=session_id,
+            secure=secure,
             expires_at=now()
             + timedelta(seconds=self.svc.s.action_ttl_s if ttl_s is None else ttl_s),
         )
         self.store.put("human_input", hi.request_id, hi, task_id=task_id, state=hi.status)
         self.store.event("human_input.requested", task_id=task_id, request_id=hi.request_id)
-        anchor = self.svc.tasks.get(task_id) if task_id else None
-        body = fmt.escape(hi.question)
-        if hi.options:
-            body += "\n" + fmt.bullet([fmt.escape(o) for o in hi.options])
-        reply = (
-            "Tap an option or reply to this message"
-            if hi.options
-            else "Reply to this message to answer"
-        )
-        if anchor is not None and not project:
-            html = self.svc.msg("question", anchor, body, ref=hi.request_id, reply=reply)
-        else:
-            html = fmt.envelope(
-                "question", body,
-                project=project or (self.svc.project_of(anchor) if anchor else self.svc.default_project),
-                task_id=task_id, session=session_id, ref=hi.request_id, reply=reply,
-            )  # fmt: skip
-        n = self.svc.notifier
         try:
-            if hasattr(n, "send_question"):
-                await n.send_question(hi, html)
-            elif anchor is not None:
-                await n.report(anchor, html, control=True)
-            elif hasattr(n, "send_control"):
-                await n.send_control(html)
+            await self._post_question(hi)
         except Exception as e:
             log.exception("human input delivery failed")
             hi.status = "expired"  # nobody can answer a question that never arrived
@@ -799,6 +784,66 @@ class CollaborationService:
                 f"the question did not reach Telegram ({type(e).__name__}); try again later",
             ) from e
         return hi
+
+    async def _post_question(self, hi: HumanInput, prefix: str = "") -> None:
+        """The question on Telegram (its buttons too); raises when it does not get there."""
+        from app import formatting as fmt
+
+        task_id, project, session_id = hi.task_id, hi.project, hi.session_id
+        anchor = self.svc.tasks.get(task_id) if task_id else None
+        body = fmt.escape(prefix) + fmt.escape(hi.question)
+        if hi.options:
+            body += "\n" + fmt.bullet([fmt.escape(o) for o in hi.options])
+        reply = (
+            "Tap an option or reply to this message"
+            if hi.options
+            else "Reply to this message to answer"
+        )
+        if hi.secure:  # approving needs the passcode; the buttons can only refuse
+            body = "🔐 " + body
+            reply = (
+                "Xác nhận quan trọng: anh trả lời tin này bằng passcode để duyệt (tin sẽ bị xoá ngay), "
+                "hoặc bấm ❌ Từ chối. Sai 3 lần: phải xác nhận trực tiếp trên máy"
+                if self.svc.s.telegram_confirm_passcode
+                else "Xác nhận quan trọng: chưa cài passcode (TELEGRAM_CONFIRM_PASSCODE trong .env), "
+                "nên chỉ duyệt được trực tiếp trên máy; ở đây anh chỉ có thể ❌ Từ chối"
+            )
+        if anchor is not None and not project:
+            html = self.svc.msg("question", anchor, body, ref=hi.request_id, reply=reply)
+        else:
+            html = fmt.envelope(
+                "question", body,
+                project=project or (self.svc.project_of(anchor) if anchor else self.svc.default_project),
+                task_id=task_id, session=session_id, ref=hi.request_id, reply=reply,
+            )  # fmt: skip
+        n = self.svc.notifier
+        if hasattr(n, "send_question"):
+            await n.send_question(hi, html)
+        elif anchor is not None:
+            await n.report(anchor, html, control=True)
+        elif hasattr(n, "send_control"):
+            await n.send_control(html)
+
+    async def remind_questions(self, after: timedelta = timedelta(minutes=30)) -> int:
+        """Watchdog: a question still unanswered `after` it was asked (or last sent again) is sent
+        again, so an agent waiting on the operator is not forgotten. Returns how many were sent."""
+        sent = 0
+        for body in self.store.list("human_input", states=["pending"]):
+            hi = HumanInput.model_validate(body)
+            if now() > hi.expires_at or now() - (hi.reminded_at or hi.created_at) < after:
+                continue
+            mins = int((now() - hi.created_at).total_seconds() // 60)
+            try:
+                await self._post_question(
+                    hi, f"🔁 Dạ, nhắc lại câu hỏi (chưa có trả lời sau {mins} phút):\n"
+                )
+            except Exception:
+                log.exception("question reminder %s failed", hi.request_id)
+                continue
+            hi.reminded_at = now()
+            self.store.put("human_input", hi.request_id, hi, task_id=hi.task_id, state=hi.status)
+            sent += 1
+        return sent
 
     def get_human_input(self, request_id: str) -> HumanInput:
         body = self.store.get("human_input", request_id)
@@ -810,14 +855,66 @@ class CollaborationService:
             self.store.put("human_input", hi.request_id, hi, task_id=hi.task_id, state=hi.status)
         return hi
 
-    def answer_human_input(
-        self, request_id: str, text: str, responder: str, free: bool = False
-    ) -> HumanInput:
-        """free: a typed reply on Telegram, accepted even when the question offered options."""
+    def check_passcode(self, request_id: str, text: str, responder: str) -> str:
+        """A reply to a secure question: approved | wrong (tries left in the text) | locked |
+        no_passcode. The passcode itself is never stored or logged."""
+        import hmac
+
         hi = self.get_human_input(request_id)
         if hi.status != "pending":
             raise CollaborationError("duplicate", f"request {request_id} is {hi.status}")
-        if hi.options and text not in hi.options and not free:
+        code = self.svc.s.telegram_confirm_passcode
+        if code is None:
+            return "no_passcode"
+        if hmac.compare_digest(text.strip().encode(), code.get_secret_value().encode()):
+            self.answer_human_input(request_id, "✅ Duyệt (đã xác minh passcode)", responder, free=True,
+                                    passcode_ok=True)  # fmt: skip
+            self.store.event("human_input.passcode_ok", task_id=hi.task_id, request_id=request_id)
+            return "approved"
+        hi.attempts += 1
+        self.store.event("human_input.passcode_wrong", task_id=hi.task_id, request_id=request_id,
+                         attempts=hi.attempts)  # fmt: skip
+        if hi.attempts < 3:
+            self.store.put("human_input", hi.request_id, hi, task_id=hi.task_id, state=hi.status)
+            return f"wrong: {3 - hi.attempts} left"
+        hi.status, hi.responder, hi.answered_at = "locked", responder, now()
+        hi.response = "🔒 Locked after 3 wrong passcodes on Telegram"
+        self.store.put("human_input", hi.request_id, hi, task_id=hi.task_id, state=hi.status)
+        self._tell_asker(hi, f"🔒 Your question {request_id} is locked: 3 wrong passcodes on Telegram. "
+                         "It is NOT approved. Ask the operator to confirm directly on the machine (in your "
+                         "session), and do not go ahead until they do.")  # fmt: skip
+        return "locked"
+
+    def _tell_asker(self, hi: HumanInput, text: str, responder: str = "gateway") -> None:
+        """Push to the agent session that asked (it is woken), else its project's session."""
+        hub = getattr(self.svc, "channel", None)
+        rec = self.store.get("channel_session", hi.session_id or "") or {}
+        project = hi.project or rec.get("project")
+        if hub is not None and project:
+            hub.send(project, f"{text}\n\n(Continue the work that needed it. It needs no reply.)",
+                     session_id=hi.session_id, sender=responder, source="operator",
+                     extra={"kind": "answer", "human_input": hi.request_id})  # fmt: skip
+
+    def answer_human_input(
+        self,
+        request_id: str,
+        text: str,
+        responder: str,
+        free: bool = False,
+        passcode_ok: bool = False,
+    ) -> HumanInput:
+        """free: a typed reply on Telegram, accepted even when the question offered options.
+        A secure question takes only a refusal here; approving it needs the passcode."""
+        hi = self.get_human_input(request_id)
+        if hi.status != "pending":
+            raise CollaborationError("duplicate", f"request {request_id} is {hi.status}")
+        if hi.secure and not passcode_ok and text.strip() != REFUSE:
+            raise CollaborationError(
+                "passcode_required",
+                "this confirmation needs the passcode (reply with it) or ❌ Từ chối",
+            )
+        refusal = hi.secure and text.strip() == REFUSE  # its own button, beside the agent's options
+        if hi.options and text not in hi.options and not free and not refusal:
             raise CollaborationError("invalid", f"answer must be one of {hi.options}")
         hi.status, hi.response, hi.responder, hi.answered_at = (
             "answered",
@@ -829,16 +926,9 @@ class CollaborationService:
         self.store.event(
             "human_input.answered", task_id=hi.task_id, request_id=request_id, by=responder
         )
-        hub = getattr(self.svc, "channel", None)
-        rec = self.store.get("channel_session", hi.session_id or "") or {}
-        project = hi.project or rec.get("project")
-        if hub is not None and project:  # the asker gets it without polling
-            hub.send(
-                project, f"💬 The operator answered your question {request_id}:\n{hi.response}\n\n"
-                "(Continue the work that needed it. It needs no reply.)",
-                session_id=hi.session_id, sender=responder, source="operator",
-                extra={"kind": "answer", "human_input": request_id},
-            )  # fmt: skip
+        # the asker gets it without polling
+        self._tell_asker(hi, f"💬 The operator answered your question {request_id}:\n{hi.response}",
+                         responder)  # fmt: skip
         return hi
 
     # ---- handoffs ----

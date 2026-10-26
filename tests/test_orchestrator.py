@@ -89,7 +89,7 @@ async def test_code_workflow_isolated_and_not_merged(settings, repo):
     diff = [a for a in orch._all_artifacts(task) if a.kind == "diff"][0]
     assert "+x = 1" in diff.path.read_text()
     assert "NOT run" in notes.texts()
-    assert any(c["control"] and "Approve" in c["html"] for c in notes.calls)
+    assert any(c["control"] and "Anh duyệt" in c["html"] for c in notes.calls)
 
 
 async def test_approval_reject_cancels(settings):
@@ -107,7 +107,7 @@ async def test_duplicate_quick_action(settings):
     assert task.state == TaskState.waiting_for_approval
     approve = next(a for c in notes.calls for a in c["actions"] if a.kind == "approve")
     reject = next(a for c in notes.calls for a in c["actions"] if a.kind == "reject")
-    assert await orch.apply_action(approve.token, 1) == "Approved"
+    assert await orch.apply_action(approve.token, 1) == "Đã duyệt"
     with pytest.raises(ActionError):
         await orch.apply_action(approve.token, 1)
     with pytest.raises(ActionError):

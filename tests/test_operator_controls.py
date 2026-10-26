@@ -51,6 +51,37 @@ async def test_operator_answer_is_pushed_to_the_asker(settings, cfg_dir):
     assert msgs[0]["kind"] == "answer" and "prod, after the smoke test" in msgs[0]["text"]
 
 
+async def test_unanswered_question_is_sent_again_after_30_minutes(settings, cfg_dir):
+    from datetime import timedelta
+
+    from app.collaboration import HumanInput
+
+    orch, _ = make(settings, cfg_dir, [])
+    gw = gateway(orch)
+    hi = await orch.collab.request_human_input(
+        "Deploy lên UAT?", options=["Có", "Không"], project=A
+    )
+    assert await orch.collab.remind_questions() == 0  # just asked
+    rec = HumanInput.model_validate(orch.store.get("human_input", hi.request_id))
+    rec.created_at -= timedelta(minutes=31)
+    orch.store.put("human_input", hi.request_id, rec, state="pending")
+    before = len(gw.bot.sent)
+    assert await orch.collab.remind_questions() == 1
+    sent = gw.bot.sent[-1][1]
+    assert (
+        len(gw.bot.sent) == before + 1
+        and "nhắc lại" in sent["text"]
+        and "Deploy lên UAT?" in sent["text"]
+    )
+    assert sent["reply_markup"] is not None  # the option buttons come again
+    assert await orch.collab.remind_questions() == 0  # next one 30 min later, not every round
+    orch.collab.answer_human_input(hi.request_id, "Có", "1")
+    rec = HumanInput.model_validate(orch.store.get("human_input", hi.request_id))
+    rec.reminded_at -= timedelta(hours=1)
+    orch.store.put("human_input", hi.request_id, rec, state=rec.status)
+    assert await orch.collab.remind_questions() == 0  # answered: never again
+
+
 async def test_idle_session_is_preferred_and_fresh_runs_see_their_work(settings, cfg_dir):
     orch, _ = make(settings, cfg_dir, [])
     hub = orch.channel
@@ -162,3 +193,54 @@ async def test_unverified_reports_hide_the_gateway_label(settings, cfg_dir):
     )
     sent = gw.bot.sent[-1][1]["text"]
     assert "từ codex (pull session)" in sent and "gateway:" not in sent
+
+
+async def test_secure_confirmation_needs_the_passcode_and_locks_after_3_tries(settings, cfg_dir):
+    from types import SimpleNamespace
+
+    from pydantic import SecretStr
+
+    from app.collaboration import REFUSE, CollaborationError
+
+    orch, _ = make(settings, cfg_dir, [])
+    gw = gateway(orch)
+    orch.s.telegram_confirm_passcode = SecretStr("Pa55-kode!")
+    s, _, _ = orch.channel.pull(A, None)
+    ask = lambda: orch.collab.request_human_input(  # noqa: E731
+        "Release lên prod?", options=["Release", "Huỷ"], project=A, session_id=s.session_id,
+        secure=True)  # fmt: skip
+    hi = await ask()
+    kb = gw.bot.sent[-1][1]["reply_markup"].inline_keyboard
+    assert [b.text for row in kb for b in row] == [REFUSE]  # no approving button
+    assert "passcode" in gw.bot.sent[-1][1]["text"]
+    try:  # a typed "Release" or the option itself does not approve it
+        orch.collab.answer_human_input(hi.request_id, "Release", "1", free=True)
+        raise AssertionError("approved without the passcode")
+    except CollaborationError as e:
+        assert e.code == "passcode_required"
+
+    deleted = []
+
+    async def delete():
+        deleted.append(True)
+
+    m = SimpleNamespace(chat=SimpleNamespace(id=1), delete=delete)
+    await gw._passcode_reply(m, hi.request_id, "Pa55-kode!", "1")  # right passcode, message deleted
+    assert deleted and "Đã duyệt" in gw.bot.sent[-1][1]["text"]
+    _, msgs, _ = orch.channel.pull(A, s.session_id, limit=5)
+    assert "đã xác minh passcode" in msgs[-1]["text"]
+
+    hi = await ask()
+    assert orch.collab.check_passcode(hi.request_id, "0000", "1") == "wrong: 2 left"
+    assert orch.collab.check_passcode(hi.request_id, "1111", "1") == "wrong: 1 left"
+    assert orch.collab.check_passcode(hi.request_id, "9999", "1") == "locked"
+    assert orch.collab.get_human_input(hi.request_id).status == "locked"
+    _, msgs, _ = orch.channel.pull(A, s.session_id, limit=5)
+    assert "locked" in msgs[-1]["text"] and "NOT approved" in msgs[-1]["text"]
+
+    hi = await ask()
+    orch.collab.answer_human_input(hi.request_id, REFUSE, "1")  # refusing needs no passcode
+    rows = orch.store._db.execute(
+        "SELECT body FROM records UNION ALL SELECT body FROM events"
+    ).fetchall()
+    assert not any("Pa55-kode!" in r[0] for r in rows)  # the passcode is never stored

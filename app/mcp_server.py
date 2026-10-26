@@ -285,14 +285,18 @@ def build_mcp_server(svc) -> MCPServer:
         ttl_s: int | None = None,
         project: str | None = None,
         session_id: str | None = None,
+        secure: bool = False,
     ) -> dict[str, Any]:
         """Ask the operator a question via Telegram. Use it for every confirmation or decision (commit,
         push, merge, deploy, a choice), even when you also ask in the app: options = 2-4 short button
         labels; pass your session_id so the answer arrives through get_messages (kind "answer"), no
-        polling; get_human_response(id) shows it too."""
+        polling; get_human_response(id) shows it too. secure=true for release, deploy, commit/push/merge
+        and git pull: on Telegram it is approved only with the operator's passcode (answer "✅ Duyệt (đã
+        xác minh passcode)"); "❌ Từ chối" refuses; a 🔒 locked answer means 3 wrong passcodes: it is
+        not approved, ask the operator to confirm in your session. An approval in your session works too."""
         try:
             hi = await svc.collab.request_human_input(
-                question, task_id, options or [], ttl_s, project, session_id
+                question, task_id, options or [], ttl_s, project, session_id, secure
             )
         except CollaborationError as e:
             raise GatewayToolError(str(e)) from e
@@ -578,7 +582,14 @@ def build_mcp_server(svc) -> MCPServer:
             raise GatewayToolError(str(e)) from e
         except CollaborationError as e:
             raise GatewayToolError(str(e)) from e
-        return reply_result(rep)
+        out = reply_result(rep)
+        s = svc.channel.sessions.get(session_id)
+        if s and s.mode == "pull" and s.cwd and s.kind == "app" and s.agent in ("", "claude_code"):
+            from app.waiter import command  # its waiter exited to wake it: the moment to restart it
+
+            out["next"] = ("start your gateway waiter again now with the Bash tool, run_in_background "
+                           f"true: `{command(s.project, s.cwd, s.client)}`")  # fmt: skip
+        return out
 
     @tool
     async def list_agents() -> dict[str, Any]:

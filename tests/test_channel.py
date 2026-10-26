@@ -330,6 +330,12 @@ async def test_list_ids_and_send_by_id(settings, cfg_dir):
     await gw.on_send(*msg("x9 hello"))
     assert "Unknown session or project" in answers[-1] and "SESSIONS" in answers[-1]
 
+    hub.disconnect(b)  # s2's waiter stopped: /send s2 waits for it instead of "unknown session"
+    await gw.on_send(*msg("s2 plan the characters"))
+    assert "queued" in answers[-1] and "Unknown" not in answers[-1]
+    b2, got, _ = hub.pull("Coinlets: Stack & Merge (TCN)", None, "/w/tini-coin", 1)  # it reconnects
+    assert b2.num == 2 and got[0]["text"].endswith("plan the characters")
+
 
 async def test_one_job_at_a_time_queue_and_cancel(settings, cfg_dir):
     from types import SimpleNamespace
