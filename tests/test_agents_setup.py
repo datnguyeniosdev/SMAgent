@@ -59,6 +59,7 @@ def test_each_agent_gets_its_documented_shape_and_removal_restores(home):
     assert (
         gem.startswith("my own notes") and gem.count(ag.START) == 1 and 'agent="antigravity"' in gem
     )
+    assert "wait --agent antigravity" in gem  # its conversations wake themselves (agentapi)
     assert 'agent="codex"' in (home / ".codex/AGENTS.md").read_text()
     assert (home / ".codex/config.toml.agw-backup").read_text() == CODEX  # backup of the original
     assert all(ag.configured(a) for a in ag.AGENTS)

@@ -75,6 +75,16 @@ title, else the folder name.
 """
 
 
+ANTIGRAVITY_WAKE = """
+- **Telegram work wakes you (Antigravity)**: at the start of each conversation in a project folder
+  under `~/Working`, start the gateway waiter once as a background terminal command you do not wait
+  for: `{agw} wait --agent antigravity --cwd <the workspace folder>`. It keeps running and sends a
+  message into this conversation when Telegram work arrives; then call `get_messages` with the
+  session_id that message names, do the request and answer with `reply_message`. Never start a
+  second one in the same conversation.
+"""
+
+
 def home() -> Path:
     return Path.home()
 
@@ -272,7 +282,12 @@ def install(agent: str, url: str = "http://127.0.0.1:8000/mcp", token: bool | No
     rules = p["rules"]
     if rules is not None:
         _backup(rules)
-        _block(rules, INSTRUCTIONS.format(agent=agent))
+        text = INSTRUCTIONS.format(agent=agent)
+        if (
+            agent == "antigravity"
+        ):  # its desktop agent wakes itself through agentapi (app/waiter.py)
+            text += ANTIGRAVITY_WAKE.format(agw=Path(sys.executable).parent / "agw")
+        _block(rules, text)
         skills = (
             f", skills ({', '.join(link_skills(p['skills']))}) in {p['skills']}"
             if p.get("skills")

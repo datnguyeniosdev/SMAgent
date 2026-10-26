@@ -3,6 +3,9 @@ with Bash `run_in_background`; it holds a long-poll to the gateway (/api/v1/chan
 keeps the session listed) and exits only when a new request is queued, which wakes Claude with what to
 do. A gateway that is down is waited out silently (the operator starts it). The newest waiter of a
 session wins; an older one exits quietly.
+Antigravity (`--agent antigravity`, started by its agent in its own terminal): instead of exiting, the
+waiter wakes the conversation with `agentapi send-message` ($ANTIGRAVITY_CONVERSATION_ID) and keeps
+waiting, so the agent never has to start it again.
 State: var/waiters/<session id>.json = {"pid": ..., "woke": <message id>, "at": <time>}."""
 
 from __future__ import annotations
@@ -10,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import subprocess
 import sys
 import time
 import urllib.parse
@@ -20,24 +24,55 @@ WAITERS = Path(__file__).resolve().parents[1] / "var" / "waiters"
 REMIND_S = 600  # a request still queued after a wake-up (ignored or lost) wakes Claude again
 
 
-def command(project: str, cwd: str, client: str = "") -> str:
+AGENTAPI = Path.home() / ".gemini/antigravity/bin/agentapi"
+
+
+def command(project: str, cwd: str, client: str = "", agent: str = "claude_code") -> str:
     """The shell command Claude runs in the background (absolute agw: hooks run outside the venv)."""
     agw = Path(sys.executable).parent / "agw"
     cmd = f"{shlex.quote(str(agw))} wait --project {shlex.quote(project)} --cwd {shlex.quote(cwd)}"
-    return f"{cmd} --client {client}" if client else cmd
+    cmd = f"{cmd} --client {client}" if client else cmd
+    return cmd if agent == "claude_code" else f"{cmd} --agent {agent}"
 
 
-def wake_text(project: str, cwd: str, client: str, sid: str, message_id: str) -> str:
+def wake_text(project: str, cwd: str, client: str, sid: str, message_id: str,
+              agent: str = "claude_code") -> str:  # fmt: skip
     from app.repo_setup import loop_prompt
 
-    prompt = loop_prompt(project, client, "claude_code").replace("this folder", f"'{cwd}'")
+    prompt = loop_prompt(project, client, agent).replace("this folder", f"'{cwd}'")
     prompt = prompt.replace("reusing the session_id it returned before", f"session_id '{sid}'")
-    return (
-        f"agent-gateway has work for '{project}' (message {message_id}). {prompt} When you have "
-        f"answered, start this waiter again with the Bash tool, run_in_background true: "
-        f"`{command(project, cwd, client)}`. If the get_messages tool is missing or fails, tell the "
-        "user in one line to run /mcp and reconnect agent-gateway."
+    again = (
+        "The waiter keeps running: do not start another."
+        if agent == "antigravity"
+        else "When you have answered, start this waiter again with the Bash tool, run_in_background "
+        f"true: `{command(project, cwd, client)}`."
     )
+    return (
+        f"agent-gateway has work for '{project}' (message {message_id}). {prompt} {again} If the "
+        "get_messages tool is missing or fails, tell the user in one line that the agent-gateway MCP "
+        "server is not connected."
+    )
+
+
+def antigravity_notify():
+    """A wake-up for the Antigravity conversation this waiter was started from, or None outside one
+    (agentapi needs the address and token Antigravity gives its own terminals)."""
+    conv = os.environ.get("ANTIGRAVITY_CONVERSATION_ID")
+    exe = os.environ.get("ANTIGRAVITY_AGENTAPI_EXE") or str(AGENTAPI)
+    if not conv or not os.environ.get("ANTIGRAVITY_LS_ADDRESS"):
+        return None
+
+    def notify(text: str) -> bool:
+        r = subprocess.run(  # noqa: S603 - Antigravity's own CLI
+            [exe, "send-message", "--title=Telegram work", conv, text],
+            capture_output=True, text=True, timeout=60,
+        )  # fmt: skip
+        ok = r.returncode == 0 and '"error"' not in r.stdout
+        print(f"{time.strftime('%H:%M:%S')} woke conversation {conv[:8]}: {'ok' if ok else r.stdout[-200:]}",
+              flush=True)  # fmt: skip
+        return ok
+
+    return notify
 
 
 def missing(project: str, cwd: str) -> bool:
@@ -71,11 +106,13 @@ def _read(path: Path) -> dict:
         return {}
 
 
-def wait(project: str, cwd: str, client: str, port: int, interval: float = 30) -> int:
+def wait(project: str, cwd: str, client: str, port: int, interval: float = 30,
+         agent: str = "claude_code", notify=None) -> int:  # fmt: skip
+    """notify(text) -> bool: wake the agent and keep waiting (Antigravity); None: print and exit."""
     from app.channel import ChannelHub
 
-    sid = ChannelHub.pull_id(project, "claude_code", cwd)
-    base = {"project": project, "agent": "claude_code", "cwd": cwd, "client": client or "app"}
+    sid = ChannelHub.pull_id(project, agent, cwd)
+    base = {"project": project, "agent": agent, "cwd": cwd, "client": client or "app"}
     WAITERS.mkdir(parents=True, exist_ok=True)
     path = WAITERS / f"{sid}.json"
     old = {k: v for k, v in _read(path).items() if k != "closed"}  # started again: open again
@@ -103,6 +140,12 @@ def wait(project: str, cwd: str, client: str, port: int, interval: float = 30) -
             return 0
         nxt = state.get("next")
         if state.get("queued") and (nxt != data.get("woke") or not recent):
-            path.write_text(json.dumps({**data, "woke": nxt, "at": time.time()}))
-            print(wake_text(project, cwd, client, sid, nxt), flush=True)
-            return 0
+            text = wake_text(project, cwd, client, sid, nxt, agent)
+            if notify is None:
+                path.write_text(json.dumps({**data, "woke": nxt, "at": time.time()}))
+                print(text, flush=True)
+                return 0
+            if notify(text):  # woken in place; a failed one is tried again next round
+                path.write_text(json.dumps({**data, "woke": nxt, "at": time.time()}))
+            else:
+                time.sleep(interval)

@@ -160,3 +160,32 @@ async def test_reply_message_tells_an_app_session_to_restart_its_waiter(settings
             assert (
                 "wait --project 'Mario Clone (K10)' --cwd /w/mario" in rep.get("next", "")
             ) is restart
+
+
+def test_antigravity_waiter_wakes_its_conversation_and_keeps_running(tmp_path, monkeypatch):
+    monkeypatch.setattr(w, "WAITERS", tmp_path)
+    m1, m2 = {"queued": True, "next": "chm_1"}, {"queued": True, "next": "chm_2"}
+    feed(monkeypatch, [m1, m1, m2, {"closing": True}])
+    woke = []
+    assert w.wait("Glazed Gems (GMA)", "/w/ok03", "app", 8000, agent="antigravity",
+                  notify=lambda t: woke.append(t) or True) == 0  # fmt: skip
+    assert len(woke) == 2 and "chm_1" in woke[0] and "chm_2" in woke[1]  # once each, never exits
+    assert "agent 'antigravity'" in woke[0] and "pull_glazedgemsgma_antigravity_" in woke[0]
+    assert "do not start another" in woke[0]
+
+
+def test_antigravity_notify_needs_its_terminal(monkeypatch):
+    calls = []
+    monkeypatch.delenv("ANTIGRAVITY_CONVERSATION_ID", raising=False)
+    assert w.antigravity_notify() is None  # outside Antigravity: nothing to wake
+    monkeypatch.setenv("ANTIGRAVITY_CONVERSATION_ID", "conv-1")
+    monkeypatch.setenv("ANTIGRAVITY_LS_ADDRESS", "127.0.0.1:1")
+    monkeypatch.setenv("ANTIGRAVITY_AGENTAPI_EXE", "/x/agentapi")
+
+    class Done:
+        returncode, stdout = 0, "{}"
+
+    monkeypatch.setattr(w.subprocess, "run", lambda cmd, **k: calls.append(cmd) or Done())
+    assert w.antigravity_notify()("work") and calls == [
+        ["/x/agentapi", "send-message", "--title=Telegram work", "conv-1", "work"]
+    ]

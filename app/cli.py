@@ -602,9 +602,24 @@ def cmd_codex_hook(args) -> int:
 
 def cmd_wait(args) -> int:
     from app.config import ENV_PORTS, env_name
-    from app.waiter import wait
+    from app.projects import project_for
+    from app.waiter import antigravity_notify, wait
 
-    return wait(args.project, args.cwd, args.client, ENV_PORTS[env_name()])
+    cwd = str(Path(args.cwd).resolve())
+    project = args.project or project_for(Path(cwd))
+    if not project:
+        print(f"{cwd} is not a project folder under the projects root; nothing to wait for.")
+        return 2
+    notify = None
+    if args.agent == "antigravity":
+        notify = antigravity_notify()
+        if notify is None:
+            print(
+                "Run this from an Antigravity agent terminal (it needs ANTIGRAVITY_CONVERSATION_ID)."
+            )
+            return 2
+    return wait(project, cwd, args.client or "app", ENV_PORTS[env_name()], agent=args.agent,
+                notify=notify)  # fmt: skip
 
 
 ENV_TEMPLATE = """# agw environment "{env}": runs beside prod on port {port}, own data in var/{env}.
@@ -789,10 +804,11 @@ def main(argv: list[str] | None = None) -> int:
     sp.set_defaults(fn=cmd_hook_session_start)
     sub.add_parser("hook-prompt").set_defaults(fn=cmd_hook_prompt)  # UserPromptSubmit
     sub.add_parser("codex-hook").set_defaults(fn=cmd_codex_hook)  # Codex SessionStart/End
-    sp = sub.add_parser("wait")  # Claude Code pull loop, run in the background (app/waiter.py)
-    sp.add_argument("--project", required=True)
-    sp.add_argument("--cwd", required=True)
+    sp = sub.add_parser("wait")  # pull loop run in the background (app/waiter.py)
+    sp.add_argument("--project", default="")  # default: the folder's project (README)
+    sp.add_argument("--cwd", default=".")
     sp.add_argument("--client", default="")
+    sp.add_argument("--agent", default="claude_code", choices=["claude_code", "antigravity"])
     sp.set_defaults(fn=cmd_wait)
 
     args, extra = p.parse_known_args(argv)
