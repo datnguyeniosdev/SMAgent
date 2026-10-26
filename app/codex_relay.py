@@ -76,7 +76,8 @@ def codex_prompt(project: str, cwd: str) -> str:
 
     sid = ChannelHub.pull_id(project, "codex", cwd)
     prompt = loop_prompt(project, "app", "codex").replace("this folder", cwd)
-    return prompt.replace("reusing the session_id it returned before", f"session_id '{sid}'")
+    prompt = prompt.replace("reusing the session_id it returned before", f"session_id '{sid}'")
+    return prompt + " Then call get_messages again the same way until it has no new requests."
 
 
 async def push_round(hub, relays: Path, refresh: bool) -> None:
@@ -96,8 +97,14 @@ async def push_round(hub, relays: Path, refresh: bool) -> None:
             if hub.peek(project, "codex", cwd, "app")["closing"]:
                 path.unlink(missing_ok=True)
                 continue
-        nxt = hub._next(hub.sessions[sid]) if sid in hub.sessions else None
-        if nxt is None or nxt == data.get("pushed") or exe is None:
+        s = hub.sessions.get(sid)
+        nxt = hub._next(s) if s is not None else None
+        # pushed once per (oldest, newest) queued pair: the thread taking one (oldest changes) or a
+        # new request behind an unanswered push (newest changes) pushes again
+        mark = (
+            nxt and f"{nxt}|{s.queue._queue[-1]['message_id']}"
+        )  # ponytail: asyncio.Queue internals
+        if nxt is None or mark == data.get("pushed") or exe is None:
             continue
         proc = await asyncio.create_subprocess_exec(
             exe, "queue", "--thread", thread, "--message", codex_prompt(project, cwd),
@@ -114,7 +121,7 @@ async def push_round(hub, relays: Path, refresh: bool) -> None:
         if "no rollout found" in out:  # the thread was deleted: a new thread records itself again
             path.unlink(missing_ok=True)
         elif proc.returncode == 0:
-            _record(path, pushed=nxt)  # pushed once, also across gateway restarts
+            _record(path, pushed=mark)  # pushed once, also across gateway restarts
 
 
 async def push_loop(hub, relays: Path, every: float = 2, refresh_every: int = 30) -> None:

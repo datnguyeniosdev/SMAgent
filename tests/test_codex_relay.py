@@ -54,7 +54,14 @@ async def test_gateway_pushes_new_codex_work_once_and_drops_deleted_threads(
     assert len(calls) == 1 and calls[0][:4] == ("/bin/codex", "queue", "--thread", "t9")
     assert "agent 'codex'" in calls[0][5] and "/w/coin" in calls[0][5]
     assert f"session_id '{sid}'" in calls[0][5]  # the exact folder session
-    assert json.loads(state.read_text())["pushed"] == msg["message_id"]
+    assert json.loads(state.read_text())["pushed"] == f"{msg['message_id']}|{msg['message_id']}"
+    assert "until it has no new requests" in calls[0][5]
+
+    # the thread has not run it yet (closed) and a new /send arrives behind it: pushed again
+    hub.send("Coin & Co", "wakeup", session_id=sid)
+    await cr.push_round(hub, tmp_path, refresh=False)
+    await cr.push_round(hub, tmp_path, refresh=False)
+    assert len(calls) == 2
 
     hub.pull("Coin & Co", sid, "/w/coin", 1, "codex", "app")  # the thread took the first one
     hub.send("Coin & Co", "again", session_id=sid)
