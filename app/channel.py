@@ -332,14 +332,19 @@ class ChannelHub:
         partial = [p for p in projects if key and key in _norm(p)]
         return partial[0] if len(partial) == 1 else None
 
-    def session_for(self, project: str, exclude: str | None = None) -> LiveSession | None:
+    def session_for(
+        self, project: str, exclude: str | None = None, agent: str | None = None
+    ) -> LiveSession | None:
         """An idle session of the project before a busy one, then push (instant) before pull, then the
         newest. exclude: the asking session (an agent's request never goes back to itself)."""
         self._prune()
         matches = [
             s
             for s in self.sessions.values()
-            if _norm(s.project) == _norm(project) and s.deliverable and s.session_id != exclude
+            if _norm(s.project) == _norm(project)
+            and s.deliverable
+            and s.session_id != exclude
+            and (agent is None or _norm(s.agent) == _norm(agent))
         ]
 
         def rank(s: LiveSession):
@@ -376,7 +381,9 @@ class ChannelHub:
         for msg in sorted(waiting, key=lambda m: m.get("created_at", "")):  # oldest first
             if _norm(msg["project"]) != _norm(project):
                 continue
-            target = self.session_for(project, exclude=msg.get("from_session"))
+            target = self.session_for(
+                project, exclude=msg.get("from_session"), agent=msg.get("for_agent")
+            )
             if target is not None:
                 target.queue.put_nowait(msg)
                 self._set(msg, "queued")
@@ -403,8 +410,14 @@ class ChannelHub:
         extra: e.g. {"ask_id": ..., "kind": "request" | "answer"} for agent-to-agent messages."""
         exclude = (extra or {}).get("from_session")
         target = self.sessions.get(session_id or "")
+        # an answer belongs to the agent tool that asked: never to another tool's session of the
+        # project (a Claude question answered into a Codex thread); it waits for that tool instead
+        rec = self.svc.store.get("channel_session", session_id or "") or {}
+        for_agent = (extra or {}).get("kind") == "answer" and (
+            target.agent if target else rec.get("agent")
+        )
         if target is None or not target.deliverable or target.session_id == exclude:
-            target = self.session_for(project, exclude=exclude)
+            target = self.session_for(project, exclude=exclude, agent=for_agent or None)
         msg = {
             "message_id": new_id("chm"),
             "project": target.project if target else project,
@@ -414,6 +427,8 @@ class ChannelHub:
         }
         msg["meta"]["message_id"] = msg["message_id"]
         msg.update(extra or {})
+        if for_agent:
+            msg["for_agent"] = for_agent
         if msg.get("kind"):
             msg["meta"]["kind"] = msg["kind"]
         msg["num"] = self._number("channel_mnum", msg["message_id"])  # short id m<num>
@@ -536,6 +551,15 @@ class ChannelHub:
         Nothing new while it still has an unanswered message (no duplicate or parallel jobs).
         Returns (session, new messages, messages still in progress)."""
         sid = session_id or self.pull_id(project, agent, cwd)
+        if (
+            cwd
+            and agent
+            and sid.startswith("pull_")
+            and sid != (own := self.pull_id(project, agent, cwd))
+        ):
+            # a stale id (remembered from before a folder rename or a restart): the folder's session,
+            # the one its waiter and the gateway's pushes use
+            sid = own
         if not cwd and sid not in self.sessions:
             # the agent forgot cwd, or reused a stale id (Codex desktop does both): its project's one
             # open session of that tool
@@ -554,6 +578,8 @@ class ChannelHub:
         s.client = client if client in ("app", "cli") else s.client
         if new:  # announced once the agent and its kind are known
             self._ops(f"🔌 {self._label(s)} connected")
+            if agent:  # waiting work for this tool (an answer to its question) can go now
+                self._flush_pending(s.project)
         if agent or client:
             self._save(s)
         self._expire()

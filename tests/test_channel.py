@@ -617,3 +617,21 @@ async def test_old_delivered_message_without_timestamp_expires_not_redelivered(s
     assert got2 == [] and busy == []
     assert orch.store.get("channel_msg", old["message_id"])["state"] == "expired"
     assert hub.in_progress(s.session_id) == []
+
+
+async def test_stale_pull_id_and_answers_stay_with_their_tool(settings, cfg_dir):
+    """ok03: the Claude agent kept its pre-rename id; its waiter uses the folder's. And an answer for
+    the Claude session never lands in the project's Codex thread."""
+    from tests.test_config_gateway import make
+
+    orch, _ = make(settings, cfg_dir, [])
+    hub, p, ok03 = orch.channel, "Glazed Gems (GMA)", "/w/ok03-colorever"
+    stale = hub.pull_id(p, "claude_code", "/w/colorever")  # remembered from the old folder
+    s, _, _ = hub.pull(p, stale, ok03, 0, "claude_code", "app")
+    assert s.session_id == hub.pull_id(p, "claude_code", ok03)  # the folder's session
+    codex, _, _ = hub.pull(p, None, ok03, 0, "codex", "app")
+    hub.disconnect(s)  # the Claude session is offline when the operator answers
+    msg, target = hub.send(p, "💬 answer", session_id=s.session_id, extra={"kind": "answer"})
+    assert target is None and codex.queue.empty()  # waits for Claude, not Codex
+    s2, got, _ = hub.pull(p, stale, ok03, 5, "claude_code", "app")  # Claude is back
+    assert [m["message_id"] for m in got] == [msg["message_id"]]
