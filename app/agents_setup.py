@@ -8,7 +8,7 @@ instructions), using each agent's documented format (checked 2026-10-22):
   antigravity  ~/.gemini/config/mcp_config.json   mcpServers.<name> = {serverUrl}  (Gemini CLI's successor;
                ~/.gemini/GEMINI.md                                                  url/httpUrl are not read)
   cursor       ~/.cursor/mcp.json                 mcpServers.<name> = {url}
-               (global rules are UI-only: the instructions are printed to paste into Cursor > Rules)
+               ~/.cursor/hooks.json               sessionStart + stop -> `agw cursor-hook`
 
 Every file is backed up once (<file>.agw-backup) before the first change; remove() takes out only the
 gateway's own entries. Claude Code is handled by app.global_setup.
@@ -245,7 +245,11 @@ def configured(agent: str) -> bool:
     if not p.exists():
         return False
     text = p.read_text()
-    return (TOML_START in text) if agent == "codex" else (f'"{SERVER}"' in text)
+    ok = (TOML_START in text) if agent == "codex" else (f'"{SERVER}"' in text)
+    if agent == "cursor" and ok:  # MCP-only leftover from before hooks: not connected
+        hooks = paths(agent).get("hooks")
+        return bool(hooks and hooks.exists() and "cursor-hook" in hooks.read_text())
+    return ok
 
 
 def install(agent: str, url: str = "http://127.0.0.1:8000/mcp", token: bool | None = None) -> str:

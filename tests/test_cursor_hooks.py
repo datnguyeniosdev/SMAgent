@@ -1,6 +1,7 @@
 """Cursor: sessionStart gives each conversation the gateway rules; stop waits for Telegram work and
 returns it as a followup_message, which Cursor submits so the conversation picks it up by itself."""
 
+import io
 import json
 
 from app import cursor_hooks as ch
@@ -49,3 +50,12 @@ def test_stop_returns_new_work_as_a_followup_once(tmp_path, monkeypatch):
 def test_stop_after_the_user_aborted_does_not_continue(tmp_path, monkeypatch):
     ev = folder(tmp_path, monkeypatch)
     assert ch.hook({**ev, "hook_event_name": "stop", "status": "aborted"}, 8000) == {}
+
+
+def test_cli_reads_the_event_from_stdin(tmp_path, monkeypatch, capsys):
+    from app.cli import main
+
+    ev = {**folder(tmp_path, monkeypatch), "hook_event_name": "sessionStart"}
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(ev)))
+    assert main(["cursor-hook"]) == 0
+    assert "Mario Clone (K10)" in json.loads(capsys.readouterr().out)["additional_context"]

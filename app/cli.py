@@ -773,7 +773,7 @@ def main(argv: list[str] | None = None) -> int:
         help="connect other agents: opencode,codex,antigravity,cursor | detected | all",
     )  # fmt: skip
     sp.add_argument(
-        "--print-rules", action="store_true", help="with --agents cursor: print rules to paste"
+        "--print-rules", action="store_true", help="print the gateway rules text (no install)"
     )
     sp.set_defaults(fn=cmd_setup)
     sp = sub.add_parser("dev", help="start OpenCode (if enabled) + the gateway")

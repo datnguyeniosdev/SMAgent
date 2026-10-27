@@ -103,6 +103,15 @@ def test_names_and_cli(home, capsys):
     assert "cursor-hook" not in (home / ".cursor/hooks.json").read_text()  # our hooks removed
 
 
+def test_cursor_with_mcp_only_is_not_configured(home):
+    (home / ".cursor").mkdir()
+    (home / ".cursor/mcp.json").write_text(json.dumps({"mcpServers": {ag.SERVER: {"url": URL}}}))
+    assert not ag.configured("cursor")
+    ag.install("cursor", URL, token=False)
+    assert ag.configured("cursor")
+    assert "cursor-hook" in (home / ".cursor/hooks.json").read_text()
+
+
 def test_token_header_names_the_variable_never_the_secret(home):
     for agent in ("opencode", "codex", "antigravity", "cursor"):
         ag.install(agent, URL, token=True)
