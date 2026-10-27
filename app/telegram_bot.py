@@ -37,6 +37,7 @@ from aiogram.types import Message as TgMessage
 
 from app import formatting as fmt
 from app.actions import Action, ActionError, ActionRegistry
+from app.channel import _norm as channel_norm
 from app.collaboration import CollaborationError
 from app.config import Settings, env_name
 from app.connectors.base import ConnectorError
@@ -324,6 +325,65 @@ class TelegramGateway:
     async def send_control(self, html: str) -> None:
         await self._send(self.bot.send_message, chat_id=self.s.telegram_control_chat_id, text=html)
 
+    async def send_stalled(self, msgs: list[dict], back: bool) -> None:
+        """Work its agent dropped (rate limit, API error, no answer): the operator moves it to another
+        session, waits, or cancels. back: that session works again, so going on there is offered."""
+        hub = self.orch.channel
+        for m in msgs:
+            rec = self.orch.store.get("channel_session", m.get("stalled_session") or "") or {}
+            s = hub.sessions.get(m.get("stalled_session") or "")
+            who = hub._label(s) if s else escape(rec.get("project") or m["project"])
+            mid, Btn = m["message_id"], InlineKeyboardButton  # noqa: N806
+            others = [x for x in hub.live() if x.deliverable and x.session_id != m.get("stalled_session")
+                      and channel_norm(x.project) == channel_norm(m["project"])]  # fmt: skip
+            rows = [[Btn(text="✅ Xử lý tiếp ở đây", callback_data=f"st:go:{mid}")]] if back else []
+            rows += [[Btn(text=f"↪️ s{x.num} {x.title}"[:60], callback_data=f"st:to:{mid}:{x.num}")]
+                     for x in others[:4]]  # fmt: skip
+            if not back:
+                rows.append([Btn(text="⏳ Chờ session hồi phục", callback_data=f"st:wait:{mid}")])
+            rows.append([Btn(text="❌ Huỷ", callback_data=f"st:cancel:{mid}")])
+            head = (f"🔄 {who} hoạt động lại; m{m.get('num')} vẫn chưa xử lý. Xử lý tiếp chứ ạ?" if back
+                    else f"⚠️ m{m.get('num')} bị kẹt ở {who}: {escape(m.get('stall_reason') or '')}")  # fmt: skip
+            tail = (
+                ""
+                if others or back
+                else "\nChưa có session khác của project này đang mở (/open để mở)."
+            )
+            html = f"{head}\n<blockquote>{escape(fmt.truncate(m.get('text') or '', 400))}</blockquote>{tail}"
+            await self._send(self.bot.send_message, chat_id=self.s.telegram_control_chat_id, text=html,
+                             reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))  # fmt: skip
+
+    async def on_stalled_button(self, q: CallbackQuery):
+        chat_id = q.message.chat.id if q.message else None
+        if not self.authorized(q.from_user.id, chat_id):
+            await q.answer("Not authorized.", show_alert=True)
+            return
+        _, verb, mid, *rest = q.data.split(":")
+        hub = self.orch.channel
+        msg = self.orch.store.get("channel_msg", mid)
+        if msg is None or msg.get("state") != "stalled":
+            await q.answer(f"m{msg.get('num') if msg else '?'} không còn chờ ạ.", show_alert=True)
+            return
+        num = msg.get("num")
+        if verb == "wait":
+            await q.answer(f"Đợi: khi session hoạt động lại em sẽ hỏi lại m{num} ạ.")
+            return
+        if verb == "cancel":
+            hub.cancel(mid)
+            await q.answer(f"Đã huỷ m{num}.")
+            return
+        to = msg.get("stalled_session") if verb == "go" else next(
+            (x.session_id for x in hub.live() if rest and x.num == int(rest[0])), None)  # fmt: skip
+        _, target = hub.resume(mid, to)
+        where = (
+            hub._label(target)
+            if target
+            else "hàng chờ (session đầu tiên của project mở ra sẽ nhận)"
+        )
+        await q.answer()
+        if q.message:
+            await q.message.answer(f"↪️ m{num} → {where}")
+
     @property
     def discussion_chat_id(self) -> int | None:
         cfg = self.orch.gateway_cfg
@@ -483,6 +543,7 @@ class TelegramGateway:
         r.callback_query(F.data.startswith("a:"))(self.on_callback)
         r.callback_query(F.data.startswith("o:"))(self.on_open_button)
         r.callback_query(F.data.startswith("k:"))(self.on_ask_button)
+        r.callback_query(F.data.startswith("st:"))(self.on_stalled_button)
         r.callback_query(F.data.startswith("h:"))(self.on_question_button)
         r.callback_query(F.data.startswith("rv:"))(self.on_review_button)
         r.callback_query(F.data.startswith("m:"))(self.on_menu_button)

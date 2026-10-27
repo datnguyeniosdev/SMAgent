@@ -543,7 +543,7 @@ def test_mcp_is_stateless_so_restarts_break_no_client(tmp_path, monkeypatch, cfg
         get_settings.cache_clear()
 
 
-async def test_restart_requeues_and_lease_expiry_redelivers_then_drops(settings, cfg_dir):
+async def test_restart_requeues_and_lease_expiry_stalls_for_the_operator(settings, cfg_dir):
     from datetime import timedelta
 
     from app.channel import LEASE, ChannelHub
@@ -567,14 +567,16 @@ async def test_restart_requeues_and_lease_expiry_redelivers_then_drops(settings,
         msg["delivered_at"] = (now() - LEASE - timedelta(minutes=1)).isoformat()
         orch.store.put("channel_msg", mid, msg, state=msg["state"])
 
-    age(m1["message_id"])  # m1 never answered: handed out again (m1 is older, so first)
-    _, got, _ = hub.pull(PROJECT, s.session_id)
-    assert [m["message_id"] for m in got] == [m1["message_id"]] and got[0]["deliveries"] == 2
-
-    age(m1["message_id"])  # still unanswered after its second delivery: expired, m2 is next
-    _, got, _ = hub.pull(PROJECT, s.session_id)
-    assert orch.store.get("channel_msg", m1["message_id"])["state"] == "expired"
+    age(m1["message_id"])  # m1 never answered: held for the operator, not handed out silently
+    _, got, _ = hub.pull(PROJECT, s.session_id, limit=0)
+    assert orch.store.get("channel_msg", m1["message_id"])["state"] == "stalled"
+    _, got, _ = hub.pull(PROJECT, s.session_id)  # the session is free for m2
     assert [m["message_id"] for m in got] == [m2["message_id"]]
+    await hub.reply(s.session_id, "m2 done", m2["message_id"])
+    msg, target = hub.resume(f"m{m1['num']}")  # ↪️ on Telegram: out again
+    assert (
+        target.session_id == s.session_id and msg["state"] == "queued" and "stall_reason" not in msg
+    )
 
 
 async def test_reply_and_report_attach_images_by_path(settings, cfg_dir, tmp_path):

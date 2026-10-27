@@ -16,15 +16,22 @@ class Resp:
     def __exit__(self, *a):
         return False
 
+    def close(self):
+        pass
+
     def read(self):
         return json.dumps(self.body).encode()
 
 
 def feed(monkeypatch, states):
-    """Peek answers in order; an OSError entry is a gateway that is down."""
-    it = iter(states)
+    """Peek answers in order; an OSError entry is a gateway that is down. Hook POSTs (tell) are
+    recorded in the returned list and take no answer."""
+    it, posts = iter(states), []
 
     def urlopen(url, timeout):
+        if not isinstance(url, str):  # a Request: tell() posting stalled / active
+            posts.append(url.full_url)
+            return Resp({})
         s = next(it)
         if isinstance(s, Exception):
             raise s
@@ -32,6 +39,7 @@ def feed(monkeypatch, states):
 
     monkeypatch.setattr(w.urllib.request, "urlopen", urlopen)
     monkeypatch.setattr(w.time, "sleep", lambda s: None)
+    return posts
 
 
 def test_wakes_once_per_new_message(tmp_path, monkeypatch, capsys):

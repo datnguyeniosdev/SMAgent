@@ -164,3 +164,13 @@ def wait(project: str, cwd: str, client: str, port: int, interval: float = 30,
                     )
                     return 1
                 time.sleep(interval)
+
+
+def tell(path: str, port: int, **query) -> None:
+    """Fire-and-forget POST to the local gateway from a hook (failure, active again); a gateway that
+    is down is ignored: hooks never block or fail the agent."""
+    url = f"http://127.0.0.1:{port}{path}?{urllib.parse.urlencode(query)}"
+    try:
+        urllib.request.urlopen(urllib.request.Request(url, method="POST"), timeout=2).close()  # noqa: S310
+    except OSError:
+        pass

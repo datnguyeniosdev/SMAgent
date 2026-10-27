@@ -891,6 +891,26 @@ async def channel_wait(
     return await hub.wait(project, agent, cwd, client, after, max(0.0, min(hold, 55.0)))
 
 
+@app.post("/api/v1/channel/stalled", include_in_schema=False)
+async def channel_stalled(
+    request: Request, project: str, agent: str, cwd: str = "", reason: str = ""
+):
+    """An agent's failure hook (Claude StopFailure, Cursor stop with an error): its work is held for
+    the operator on Telegram instead of waiting out the lease."""
+    _local_only(request)
+    hub = request.app.state.orch.channel
+    held = hub.stall(hub.pull_id(project, agent, cwd), reason or "error")
+    return {"stalled": [m["message_id"] for m in held]}
+
+
+@app.post("/api/v1/channel/active", include_in_schema=False)
+async def channel_active(request: Request, project: str, agent: str, cwd: str = ""):
+    """The agent's model runs again (a prompt): work it left stalled is put to the operator."""
+    _local_only(request)
+    hub = request.app.state.orch.channel
+    return {"asked": [m["message_id"] for m in hub.active(hub.pull_id(project, agent, cwd))]}
+
+
 @app.get("/api/v1/channel/stream", include_in_schema=False)
 async def channel_stream(
     request: Request,

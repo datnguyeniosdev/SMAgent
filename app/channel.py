@@ -32,7 +32,8 @@ log = logging.getLogger(__name__)
 PULL_TTL = timedelta(minutes=5)  # a pull session is open while it polled this recently (/loop 1m)
 LEASE = timedelta(minutes=60)  # an unanswered handed-over message keeps its session busy this long
 MAX_DELIVERIES = 2  # an unanswered message is handed out again once after its lease, then expires
-OPEN_STATES = ("pending", "queued", "delivered")  # waiting, assigned to a session, in progress
+# waiting, assigned to a session, in progress, held because its session failed (operator decides)
+OPEN_STATES = ("pending", "queued", "delivered", "stalled")
 
 
 def stop_claude(pid: int) -> bool:
@@ -90,6 +91,7 @@ class LiveSession:
     agent: str = ""  # which agent tool runs the session (claude_code, opencode, codex, ...)
     closing: bool = False  # pull: /close asked its loop to stop at the next round
     client: str = ""  # "app" (desktop app / IDE) or "cli", as the session reports it
+    stalled: str = ""  # why its agent stopped (rate limit, API error, no answer): no new work
 
     @property
     def kind(self) -> str:
@@ -109,7 +111,7 @@ class LiveSession:
 
     @property
     def deliverable(self) -> bool:
-        return self.enabled and not self.blocked and not self.closing
+        return self.enabled and not self.blocked and not self.closing and not self.stalled
 
 
 class ChannelHub:
@@ -127,20 +129,7 @@ class ChannelHub:
 
     def _ops(self, html: str) -> None:
         """A short notice to the operator's group (sessions coming and going, late deliveries)."""
-        fn = getattr(getattr(self.svc, "notifier", None), "send_control", None)
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        if fn is not None:
-
-            async def go():
-                try:
-                    await fn(html)
-                except Exception:  # noqa: BLE001 - a notice never breaks delivery
-                    log.exception("operator notice failed")
-
-            loop.create_task(go())
+        self._notify("send_control", html)
 
     def _label(self, s: LiveSession) -> str:
         from html import escape
@@ -471,6 +460,13 @@ class ChannelHub:
                 continue
             elif holder is not None and holder.mode == "push":
                 continue  # Claude has it on screen; pushing it again would start it twice
+            elif not msg.get("ask_id"):  # nobody answered within the lease: the operator decides
+                self._stall(
+                    [msg],
+                    msg.get("session_id") or "",
+                    f"no answer within {int(LEASE.total_seconds() // 60)} min",
+                )
+                continue
             msg["deliveries"] = msg.get("deliveries", 1) + 1
             if msg["deliveries"] > MAX_DELIVERIES:
                 self._set(msg, "expired")
@@ -497,6 +493,99 @@ class ChannelHub:
             html = (f"⌛ m{msg.get('num')} was never answered after {MAX_DELIVERIES} deliveries; "
                     "dropped. Send it again if it is still needed.")  # fmt: skip
             loop.create_task(self.svc._notify(task, html, "info"))
+
+    # ---- stuck work: the agent failed (rate limit, API error) or went silent ----
+
+    def stall(self, session_id: str, reason: str) -> list[dict]:
+        """The session's agent stopped (StopFailure hook, Cursor error, lease over): its unanswered and
+        queued work is held as "stalled" and shown on Telegram, where the operator moves it to another
+        session, waits, or cancels. The session takes no new work until it is active again."""
+        msgs = [m for m in self.in_progress(session_id) if m.get("kind") != "answer"]
+        if s := self.sessions.get(session_id):
+            s.stalled = reason[:200] or "error"
+            keep = []
+            while not s.queue.empty():
+                m = s.queue.get_nowait()
+                (keep if m.get("kind") == "answer" else msgs).append(m)
+            for m in keep:
+                s.queue.put_nowait(m)
+        self._stall(msgs, session_id, reason)
+        return msgs
+
+    def _stall(self, msgs: list[dict], session_id: str, reason: str) -> None:
+        for m in msgs:
+            m.update(stalled_session=session_id, stall_reason=reason[:200], stalled_at=now().isoformat(),
+                     back_asked=False)  # fmt: skip
+            self._set(m, "stalled")
+            self.svc.store.event("channel.stalled", message_id=m["message_id"], session=session_id,
+                                 reason=reason[:200])  # fmt: skip
+        if msgs:
+            self._notify("send_stalled", msgs, back=False)
+
+    def active(self, session_id: str) -> list[dict]:
+        """The session's agent works again (a prompt, get_messages): it takes work again, and work it
+        left stalled is put to the operator once: go on here, move it, or cancel."""
+        if s := self.sessions.get(session_id):
+            s.stalled = ""
+        msgs = [m for m in self.svc.store.list("channel_msg", states=["stalled"])
+                if m.get("stalled_session") == session_id and not m.get("back_asked")]  # fmt: skip
+        for m in msgs:
+            m["back_asked"] = True
+            self._set(m, "stalled")
+        if msgs:
+            self._notify("send_stalled", msgs, back=True)
+        return msgs
+
+    def resume(
+        self, ref: str, to_session: str | None = None
+    ) -> tuple[dict, LiveSession | None] | None:
+        """A stalled message goes out again: to that session, else the best open one of the project."""
+        msg = next((m for m in self.svc.store.list("channel_msg", states=["stalled"])
+                    if ref in (m["message_id"], f"m{m.get('num')}")), None)  # fmt: skip
+        if msg is None:
+            return None
+        target = self.sessions.get(to_session or "")
+        if (
+            target is not None
+            and target.stalled
+            and target.session_id == msg.get("stalled_session")
+        ):
+            target.stalled = ""  # the operator says its own session may go on
+        for k in (
+            "stalled_session",
+            "stall_reason",
+            "stalled_at",
+            "back_asked",
+            "session_id",
+            "delivered_at",
+        ):
+            msg.pop(k, None)
+        if target is None or not target.deliverable:
+            target = self.session_for(msg["project"], exclude=msg.get("from_session"))
+        if target is None:
+            self._set(msg, "pending")  # the next session of the project to connect takes it
+            return msg, None
+        target.queue.put_nowait(msg)
+        self._set(msg, "queued")
+        self._assigned(msg, target)
+        return msg, target
+
+    def _notify(self, name: str, *args, **kw) -> None:
+        """Call an async notifier method (Telegram) without blocking delivery; failures are logged."""
+        fn = getattr(getattr(self.svc, "notifier", None), name, None)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if fn is not None:
+
+            async def go():
+                try:
+                    await fn(*args, **kw)
+                except Exception:  # noqa: BLE001 - a notice never breaks delivery
+                    log.exception("operator notice %s failed", name)
+
+            loop.create_task(go())
 
     def open_messages(self) -> list[dict]:
         """/queue: everything not answered or cancelled yet, oldest first."""
@@ -582,6 +671,8 @@ class ChannelHub:
                 self._flush_pending(s.project)
         if agent or client:
             self._save(s)
+        if limit > 0:  # get_messages: the agent's model is running again
+            self.active(s.session_id)
         self._expire()
         busy = self.in_progress(s.session_id)
         out = []

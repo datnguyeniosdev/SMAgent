@@ -576,13 +576,42 @@ def cmd_hook_session_start(args) -> int:
 def cmd_hook_prompt(args) -> int:
     """UserPromptSubmit hook (global): if this session's `agw wait` is gone (the app restarted and
     stopped background tasks), its stdout tells Claude to start it again before the request."""
+    from app.config import ENV_PORTS
     from app.projects import client_kind, project_for  # light imports: this runs on every prompt
-    from app.waiter import missing, reminder
+    from app.waiter import missing, reminder, tell
 
     cwd = str(Path.cwd())
     project = project_for(Path(cwd))
+    if project:  # the model runs again: work it left stalled (rate limit) is put to the operator
+        tell(
+            "/api/v1/channel/active",
+            ENV_PORTS["prod"],
+            project=project,
+            agent="claude_code",
+            cwd=cwd,
+        )
     if project and missing(project, cwd):
         print(reminder(project, cwd, client_kind()))
+    return 0
+
+
+def cmd_hook_failure(args) -> int:
+    """StopFailure hook (global): the turn ended on an API error (rate limit, billing, overload...).
+    The session's unanswered Telegram work goes to the operator to move, wait for, or cancel."""
+    from app.config import ENV_PORTS
+    from app.projects import project_for
+    from app.waiter import tell
+
+    try:
+        event = json.loads(sys.stdin.read() or "{}")
+    except ValueError:
+        event = {}
+    cwd = event.get("cwd") or str(Path.cwd())
+    project = project_for(Path(cwd))
+    if project:
+        reason = " · ".join(str(event[k])[:120] for k in ("error", "error_details") if event.get(k))
+        tell("/api/v1/channel/stalled", ENV_PORTS["prod"], project=project, agent="claude_code",
+             cwd=cwd, reason=reason or "API error")  # fmt: skip
     return 0
 
 
@@ -833,6 +862,7 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--project")
     sp.set_defaults(fn=cmd_hook_session_start)
     sub.add_parser("hook-prompt").set_defaults(fn=cmd_hook_prompt)  # UserPromptSubmit
+    sub.add_parser("hook-failure").set_defaults(fn=cmd_hook_failure)  # StopFailure
     sub.add_parser("codex-hook").set_defaults(fn=cmd_codex_hook)  # Codex SessionStart/End
     sub.add_parser("cursor-hook").set_defaults(fn=cmd_cursor_hook)  # Cursor sessionStart/stop
     sp = sub.add_parser("wait")  # pull loop run in the background (app/waiter.py)

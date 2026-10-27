@@ -50,7 +50,12 @@ def prompt_hook_command() -> str:
     return f'"{_agw()}" hook-prompt'
 
 
-HOOKS = {"SessionStart": hook_command, "UserPromptSubmit": prompt_hook_command}
+def failure_hook_command() -> str:
+    return f'"{_agw()}" hook-failure'
+
+
+HOOKS = {"SessionStart": hook_command, "UserPromptSubmit": prompt_hook_command,
+         "StopFailure": failure_hook_command}  # fmt: skip
 
 
 def _ours(entry: dict) -> bool:
@@ -128,7 +133,9 @@ def install(
         hooks.append({"hooks": [{"type": "command", "command": cmd(), "timeout": 10}]})
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + "\n")
-    done.append(f"{path}: gateway tools allowed, SessionStart and UserPromptSubmit hooks added")
+    done.append(
+        f"{path}: gateway tools allowed, SessionStart, UserPromptSubmit and StopFailure hooks added"
+    )
     skill_file().parent.mkdir(parents=True, exist_ok=True)
     skill_file().write_text(skill_text())
     done.append(f"skill: {skill_file()}")

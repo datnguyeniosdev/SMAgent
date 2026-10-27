@@ -312,3 +312,60 @@ async def test_question_answered_in_session_closes_the_telegram_copy(settings, c
     assert await orch.collab.remind_questions() == 0  # no reminder for a closed question
     _, msgs, _ = orch.channel.pull(A, s.session_id, limit=5)
     assert msgs == []  # not pushed back to the agent that already has it
+
+
+async def test_stalled_work_goes_to_the_operator_and_is_asked_again_when_back(settings, cfg_dir):
+    """A rate-limited agent (StopFailure) leaves its work stalled, not stuck: Telegram shows it with
+    move / wait / cancel; when the agent runs again the operator confirms before it goes on."""
+    from types import SimpleNamespace
+
+    from tests.test_config_gateway import CONTROL, USER
+
+    orch, _ = make(settings, cfg_dir, [])
+    gw, hub = gateway(orch), orch.channel
+    claude, _, _ = hub.pull(A, None, "/w/k05", 0, "claude_code")
+    codex, _, _ = hub.pull(A, None, "/w/k05", 0, "codex")
+    m1, _ = hub.send(A, "fix the HUD", session_id=claude.session_id)
+    m2, _ = hub.send(A, "then the menu", session_id=claude.session_id)
+    hub.pull(A, claude.session_id, "/w/k05", 1, "claude_code")  # m1 in progress, m2 queued
+
+    held = hub.stall(claude.session_id, "rate_limit · 429 Too Many Requests")
+    assert {m["message_id"] for m in held} == {m1["message_id"], m2["message_id"]}
+    assert not claude.deliverable and hub.session_for(A).session_id == codex.session_id
+    await asyncio.sleep(0)
+    notes = [kw for _, kw, _ in gw.bot.sent if "bị kẹt" in kw.get("text", "")]
+    assert (
+        len(notes) == 2 and "rate_limit" in notes[0]["text"] and "fix the HUD" in notes[0]["text"]
+    )
+    labels = [b.text for row in notes[0]["reply_markup"].inline_keyboard for b in row]
+    assert any(t.startswith(f"↪️ s{codex.num}") for t in labels) and "❌ Huỷ" in labels
+
+    answers = []
+
+    async def q_answer(text=None, show_alert=False):
+        answers.append(text)
+
+    async def msg_answer(text, reply_markup=None):
+        answers.append(text)
+
+    def press(data):
+        return SimpleNamespace(data=data, from_user=SimpleNamespace(id=USER), answer=q_answer,
+                               message=SimpleNamespace(chat=SimpleNamespace(id=CONTROL), answer=msg_answer))  # fmt: skip
+
+    await gw.on_stalled_button(press(f"st:to:{m2['message_id']}:{codex.num}"))  # m2 → Codex
+    _, got, _ = hub.pull(A, codex.session_id, "/w/k05", 1, "codex")
+    assert [m["message_id"] for m in got] == [m2["message_id"]]
+
+    hub.pull(A, claude.session_id, "/w/k05", 1, "claude_code")  # Claude runs again: asked, once
+    await asyncio.sleep(0)
+    back = [kw for _, kw, _ in gw.bot.sent if "hoạt động lại" in kw.get("text", "")]
+    assert len(back) == 1 and f"m{m1['num']}" in back[0]["text"]
+    assert claude.deliverable and hub.active(claude.session_id) == []
+    await gw.on_stalled_button(press(f"st:go:{m1['message_id']}"))  # ✅ go on there
+    _, got, _ = hub.pull(A, claude.session_id, "/w/k05", 1, "claude_code")
+    assert [m["message_id"] for m in got] == [m1["message_id"]]
+
+    m3, _ = hub.send(A, "old task", session_id=claude.session_id)
+    hub.stall(claude.session_id, "billing_error")
+    await gw.on_stalled_button(press(f"st:cancel:{m3['message_id']}"))
+    assert orch.store.get("channel_msg", m3["message_id"])["state"] == "cancelled"

@@ -59,3 +59,13 @@ def test_cli_reads_the_event_from_stdin(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(ev)))
     assert main(["cursor-hook"]) == 0
     assert "Mario Clone (K10)" in json.loads(capsys.readouterr().out)["additional_context"]
+
+
+def test_stop_with_an_error_hands_the_work_to_the_operator(tmp_path, monkeypatch):
+    ev = {**folder(tmp_path, monkeypatch), "hook_event_name": "stop", "status": "error"}
+    posts = feed(monkeypatch, [])
+    assert ch.hook(ev, 8000) == {}  # no waiting, no followup
+    assert len(posts) == 1 and "/api/v1/channel/stalled?" in posts[0] and "agent=cursor" in posts[0]
+    posts = feed(monkeypatch, [{"queued": True, "next": "chm_9"}])
+    ch.hook({**ev, "status": "completed"}, 8000)  # a completed turn: the model works again
+    assert "/api/v1/channel/active?" in posts[0]

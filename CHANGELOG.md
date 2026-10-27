@@ -7,6 +7,11 @@ All notable changes are listed here. The format follows
 ## [Unreleased]
 
 ### Added
+- Stuck work goes to the operator. When an agent stops on a rate limit or API error, or misses its
+  lease, its work is held on Telegram with buttons to move it to another session, wait, or cancel.
+  When that agent runs again, the gateway asks before it goes on.
+- ❌ Từ chối for generated art. Telegram passcode entry happens in a private chat with the bot, and 3
+  wrong tries cancel the question.
 - Cursor integration. A `sessionStart` hook gives each chat the gateway rules. A `stop` hook waits
   for Telegram work and submits it as the next message.
 - Antigravity integration. A detached `agw wait --agent antigravity` wakes the conversation through

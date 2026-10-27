@@ -11,6 +11,8 @@ Reference for running the gateway day to day: environments, releases, Telegram, 
 **What Telegram shows.** Every request between agents (🤝 with ✍️ Answer myself / ❌ Cancel) and its answer (💡); `/asks` lists the open ones. Sessions are announced when they connect (🔌) and leave (⚪), and a queued `/send` says when it finally reaches a session (📬). An agent's question has one button per option, and replying to it answers it. A question or escalation Telegram refuses is reported back to the agent, or retried, instead of being lost.
 
 
+**Stuck work.** When an agent stops on a rate limit, usage limit or API error (Claude Code's `StopFailure` hook, Cursor's `stop` with an error), or nobody answers within the 60-minute lease, its unanswered and queued Telegram work is held as *stalled* instead of waiting silently. The group gets ⚠️ with the request and buttons: ↪️ another open session of the project, ⏳ wait, ❌ cancel. The stalled session takes no new work. When its agent runs again (a prompt in that session, or `get_messages`), the gateway asks once more: ✅ go on there, ↪️ move, or ❌ cancel. Codex and Antigravity have no failure hook yet, so for them only the lease applies.
+
 ## Environments (prod, dev, uat)
 
 Each environment runs beside the others from this folder, with its own settings file, port and data:

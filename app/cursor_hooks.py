@@ -3,7 +3,8 @@ the event as JSON on stdin and reads JSON from stdout:
 
 sessionStart  -> {"additional_context": ...}: the gateway rules and this folder's project, so nothing has to
                  be pasted into Cursor's rules UI.
-stop          -> waits (long-poll, no model run) for Telegram work for this folder's Cursor session; when
+stop          -> status error: the work is held for the operator (/api/v1/channel/stalled). Else
+                 waits (long-poll, no model run) for Telegram work for this folder's Cursor session; when
                  some is queued it returns {"followup_message": ...}, which Cursor submits as the next
                  user message, so the conversation picks the work up by itself. After that turn, stop runs
                  again and waits again. Nothing queued within HOLD_S: {} (Cursor stays idle).
@@ -57,7 +58,7 @@ def stop(event: dict, port: int, hold: float = HOLD_S) -> dict:
     """Wait for this folder's Cursor work; the wake-up text when some is queued, else {}."""
     from app.channel import ChannelHub
     from app.projects import project_for
-    from app.waiter import WAITERS, wake_text
+    from app.waiter import WAITERS, tell, wake_text
 
     if event.get("status") == "aborted":  # the user stopped the agent: do not start it again
         return {}
@@ -65,6 +66,16 @@ def stop(event: dict, port: int, hold: float = HOLD_S) -> dict:
     project = cwd and project_for(Path(cwd))
     if not project:
         return {}
+    where = {"project": project, "agent": "cursor", "cwd": cwd}
+    if event.get("status") == "error":  # rate limit, usage limit, API error: the operator decides
+        tell(
+            "/api/v1/channel/stalled",
+            port,
+            **where,
+            reason="Cursor: the agent stopped with an error",
+        )
+        return {}
+    tell("/api/v1/channel/active", port, **where)  # a turn completed: the model works
     sid = ChannelHub.pull_id(project, "cursor", cwd)
     WAITERS.mkdir(parents=True, exist_ok=True)
     path = WAITERS / f"{sid}.json"
