@@ -377,9 +377,9 @@ async def test_aspect_check_for_models_without_exact_size():
     ctx = SimpleNamespace(read_artifact=lambda aid: make_png(1024, 576))
     bad = await gate(ctx, {"images": [{"artifact_id": "a", "exact_size": False, "width": 1024, "height": 576}],
                            "rules": {"width": 512, "height": 512}})  # fmt: skip
-    assert (
-        bad.status == "failed"
-        and "does not match the requested 512x512" in bad.findings[0]["message"]
+    assert (  # a paid image is kept: the operator reviews it with the note
+        bad.status == "passed"
+        and "differs from the requested 512x512" in bad.findings[0]["message"]
     )
     exact = await gate(ctx, {"images": [{"artifact_id": "a", "width": 1024, "height": 576}],
                              "rules": {"width": 512, "height": 512}})  # fmt: skip

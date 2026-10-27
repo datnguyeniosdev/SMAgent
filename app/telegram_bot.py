@@ -766,6 +766,10 @@ class TelegramGateway:
                 else "no open session (work waits)"
             )
             lines.append(f"<b>p{num}</b> · {escape(name)} · {state}")
+            icon = {"working": "▶️", "idle": "💤", "closed": "⚪"}
+            lines += [f"   🧭 {escape(c['lane'])} · {icon[c['status']]} {c['status']} {c['sessions']} · "
+                      f"{escape(c['task'])} · <code>{escape(c['branch'])}</code>"
+                      for c in hub.children(name) if c["status"] != "deleted"]  # fmt: skip
         if not hub.projects():
             lines.append("none yet (a project appears once a session opens for it)")
         lines += [

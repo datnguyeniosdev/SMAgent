@@ -592,6 +592,7 @@ def cmd_hook_prompt(args) -> int:
             project=project,
             agent="claude_code",
             cwd=cwd,
+            client=client_kind(),
         )
     if project and missing(project, cwd):
         print(reminder(project, cwd, client_kind()))
@@ -602,7 +603,7 @@ def cmd_hook_failure(args) -> int:
     """StopFailure hook (global): the turn ended on an API error (rate limit, billing, overload...).
     The session's unanswered Telegram work goes to the operator to move, wait for, or cancel."""
     from app.config import ENV_PORTS
-    from app.projects import project_for
+    from app.projects import client_kind, project_for
     from app.waiter import tell
 
     try:
@@ -614,7 +615,7 @@ def cmd_hook_failure(args) -> int:
     if project:
         reason = " · ".join(str(event[k])[:120] for k in ("error", "error_details") if event.get(k))
         tell("/api/v1/channel/stalled", ENV_PORTS["prod"], project=project, agent="claude_code",
-             cwd=cwd, reason=reason or "API error")  # fmt: skip
+             cwd=cwd, reason=reason or "API error", client=client_kind())  # fmt: skip
     return 0
 
 

@@ -286,7 +286,7 @@ async def test_push_preferred_and_stale_pull_released(settings, cfg_dir):
     assert [m["message_id"] for m in orch.store.list("channel_msg", states=["pending"])] == [
         msg["message_id"]
     ]
-    hub.set_enabled(push, True)  # the main (pull) is gone: the operator chooses, nothing moves
+    hub.set_enabled(push, True)  # the main (pull) is offline: the operator chooses, nothing moves
     assert push.queue.empty()
     hub.set_main(push)  # /main s#
     assert push.queue.get_nowait()["message_id"] == msg["message_id"]
@@ -557,8 +557,8 @@ async def test_restart_requeues_and_lease_expiry_stalls_for_the_operator(setting
     orch, _ = make(settings, cfg_dir, [])
     hub = orch.channel
     s, _, _ = hub.pull(PROJECT, None)
-    m1, _ = hub.send(PROJECT, "first")
-    m2, _ = hub.send(PROJECT, "second")
+    m1, _ = hub.send(PROJECT, "first", session_id=s.session_id)
+    m2, _ = hub.send(PROJECT, "second", session_id=s.session_id)
     _, got, _ = hub.pull(PROJECT, s.session_id)
     assert [m["message_id"] for m in got] == [m1["message_id"]]
 
@@ -685,7 +685,15 @@ async def test_main_session_routes_lanes_to_children_in_worktrees(
     r = await hub.dispatch(main.session_id, f"m{m1['num']}", "UI", brief="fix it, report a shot")
     assert r["new_session"] and r["branch"].startswith("agw/ui-") and len(opened) == 1
     path = Path(r["path"])
-    assert path.parent == tmp_path / ".agw-worktrees" / "game" and (path / ".mcp.json").exists()
+    # a copy-on-write clone inside the project (APFS), else a git worktree next to it
+    assert path.parent in (repo / ".agw-children", tmp_path / ".agw-worktrees" / "game")
+    assert (path / ".mcp.json").exists() and (path / "README.md").exists()
+    assert (
+        "?? "
+        not in subprocess.run(
+            [*git, "status", "--porcelain"], capture_output=True, text=True
+        ).stdout
+    )
     assert [m["message_id"] for m in hub.in_progress(main.session_id)] == [job["message_id"]]
 
     child, _, _ = hub.pull(PROJECT, None, str(path), 0, "claude_code", "cli")  # the child connects
@@ -712,6 +720,48 @@ async def test_main_session_routes_lanes_to_children_in_worktrees(
     child.last_work -= CHILD_IDLE + timedelta(minutes=1)
     hub._prune()  # idle child: closed, branch kept
     assert child.session_id not in hub.sessions and "kept for review" in notes[-1]
+    assert [c["status"] for c in hub.children(PROJECT) if c["lane"] == "ui"] == ["closed"]
+
+    m4, _ = hub.send(PROJECT, "one more ui fix")  # its lane's child is reopened, no new copy
+    assert "ui (closed, m" in m4["text"]  # the router sees the lanes and their last task
+    hub.pull(PROJECT, main.session_id)
+    r = await hub.dispatch(main.session_id, m4["message_id"], "ui")
+    assert r["to"] == "reopened" and r["path"] == str(path) and opened[-1][0] == path
+
+    hub.stall(main.session_id, "rate limit")  # the main is stuck: a temporary router is opened
+    m5, t5 = hub.send(PROJECT, "fix the score")
+    router_dir = repo / ".agw-children" / "router"
+    for _ in range(100):  # opened in the background (git, a Terminal window)
+        if opened[-1][0] == router_dir:
+            break
+        await asyncio.sleep(0.05)
+    assert t5 is None and opened[-1][0] == router_dir and (router_dir / ".mcp.json").exists()
+    router, _, _ = hub.pull(PROJECT, None, str(router_dir), 0, "claude_code", "cli")
+    _, got, _ = hub.pull(PROJECT, router.session_id)  # it gets the waiting work, with the lanes
+    assert got[0]["message_id"] == m5["message_id"] and "temporary router" in got[0]["text"]
+    assert "ui (" in got[0]["text"]
+    await hub.dispatch(router.session_id, m5["message_id"], "audio")  # reopens audio's copy
+    hub.active(main.session_id)  # back: it routes again, hears what was routed; router closed
+    assert hub.main_for(PROJECT) is main and router.session_id not in hub.sessions
+    note = [m for m in main.queue._queue if m.get("kind") == "answer"][-1]
+    assert f"m{m5['num']} → audio" in note["text"] and "audio (" in note["text"]
+    kids = {c["lane"]: c for c in hub.children(PROJECT)}
+    assert kids["audio"]["task"].startswith(f"m{m5['num']} fix the score")
+    assert "router" not in kids
+
+
+async def test_a_push_session_and_its_pull_loop_are_one_main(settings, cfg_dir):
+    """The main recorded from a window's push session (no agent name) is still the main when its
+    pull loop (claude_code) asks to dispatch."""
+    from tests.test_config_gateway import make
+
+    orch, _ = make(settings, cfg_dir, [])
+    hub = orch.channel
+    push = hub.connect("cc_1", PROJECT, "/w/a", mode="push", notify=False)
+    assert hub.main_for(PROJECT) is push
+    hub.disconnect(push)
+    pull, _, _ = hub.pull(PROJECT, None, "/w/a", 0, "claude_code", "cli")
+    assert hub.main_for(PROJECT) is pull
 
 
 async def test_answers_skip_the_line_and_an_offline_main_is_put_to_the_operator(
@@ -733,12 +783,11 @@ async def test_answers_skip_the_line_and_an_offline_main_is_put_to_the_operator(
     _, got, _ = hub.pull(PROJECT, a.session_id)
     assert got[0]["message_id"] == later["message_id"]  # then its own work, in order
 
-    hub.disconnect(a)  # the main is gone
-    b, _, _ = hub.pull(PROJECT, None, "/w/b", 0, "codex")
+    hub.disconnect(a)  # the main is gone and no other session is open
     m, target = hub.send(PROJECT, "project work")
     m2, _ = hub.send(PROJECT, "more")
     assert target is None and [n for n, _ in asked].count("send_main_offline") == 1  # asked once
     hub.want_new_main(PROJECT)  # 🆕 on Telegram: the next session to connect becomes the main
     c, _, _ = hub.pull(PROJECT, None, "/w/c", 0, "claude_code")
-    assert hub.main_for(PROJECT) is c and b.queue.empty()
+    assert hub.main_for(PROJECT) is c
     assert [x["message_id"] for x in c.queue._queue] == [m["message_id"], m2["message_id"]]

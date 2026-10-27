@@ -35,6 +35,7 @@ from app.models import (
     TERMINAL,
     AgentProfile,
     AgentSession,
+    ReviewFinding,
     Task,
     TaskState,
     UsageRecord,
@@ -1571,6 +1572,12 @@ class Orchestrator:
             if a.startswith("art_") and self.artifacts.get(a):
                 self.artifacts.set_validation(a, "passed" if gate.status == "passed" else "failed")
         data = gate.model_dump(mode="json")
+        if (
+            gate.status == "passed"
+        ):  # a passing gate's notes (e.g. art at the model's nearest ratio)
+            task.findings += [ReviewFinding(severity=f["severity"], description=f.get("message", "")[:500],
+                                            location=step.ref)
+                              for f in gate.findings if f.get("severity") in ("medium", "low", "info")]  # fmt: skip
         if gate.status != "passed":
             raise StepError(
                 f"gate {step.ref} {gate.status}: "

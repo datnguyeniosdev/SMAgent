@@ -27,7 +27,8 @@ over idle sessions. This design replaces the spreading with a decision made by a
    `dispatch(message_id, to="s#" | "new", lane="<task type>", brief="...")`.
    - `s#`: hand it to an existing child session, normally the one already on that lane.
    - `new`: the gateway opens a new child session with the main session's tool and the project id,
-     in its own git worktree and branch, and pushes the brief into it.
+     in its own copy-on-write copy of the project (`<repo>/.agw-children/`) and branch, and pushes
+     the brief into it.
 4. **Lanes.** Each child session has one lane (a task type the main agent chooses: `ui`, `build`,
    `art`, `bugfix:<area>`...). Work on the same lane queues in that child, one job after another.
    Work on a different lane gets its own child and runs in parallel.
@@ -49,12 +50,14 @@ over idle sessions. This design replaces the spreading with a decision made by a
 - A `main` flag per project (stored like `enabled`), `/main s#`, and routing of project messages to it.
 - The `dispatch` tool, a `lane` and `parent` on child sessions, and a way to bind a child that is
   still starting to the brief waiting for it (a one-time token passed to `agw session`).
-- A git worktree and branch per child, and closing idle children after 30 minutes.
+- A copy-on-write copy and branch per child (git worktree where cloning fails), reopened for its
+  lane; closing idle children after 30 minutes; a temporary router while the main is stuck.
 - Rule text for main and child sessions (repo block, agent instructions).
 
 ## Decisions (operator, Telegram)
 
-1. **Where children run:** each child gets its own git worktree and branch. Branches are merged only
+1. **Where children run:** each child gets its own copy-on-write copy inside the project (no trust
+   prompt, almost no disk) and branch. Branches are merged only
    with the operator's approval.
 2. **Parallel children per project:** no limit. Rate limits go through the existing stuck-work flow.
 3. **Children's tool:** the same tool as the project's open main session, opened with the project id.

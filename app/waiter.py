@@ -118,7 +118,7 @@ def wait(project: str, cwd: str, client: str, port: int, interval: float = 30,
     """notify(text) -> bool: wake the agent and keep waiting (Antigravity); None: print and exit."""
     from app.channel import ChannelHub
 
-    sid = ChannelHub.pull_id(project, agent, cwd)
+    sid = ChannelHub.pull_id(project, agent, cwd, client)
     base = {"project": project, "agent": agent, "cwd": cwd, "client": client or "app"}
     WAITERS.mkdir(parents=True, exist_ok=True)
     path = WAITERS / f"{sid}.json"

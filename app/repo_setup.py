@@ -114,8 +114,9 @@ the answer goes back to that agent, not to Telegram.
 **Main session and child sessions.** Requests sent to the project go to its 👑 main session. If a
 request's text says you are the main session, do not do it: call `dispatch(message_id, lane, brief,
 session_id)` (lane = the task type: ui, build, art, bugfix-login). The same lane goes to its child
-session in order; a new lane opens a new child session in its own git worktree and branch. If you are
-a 🧭 child (opened in `.agw-worktrees`), work on your branch, answer with `reply_message` as usual,
+session in order; a new lane opens a new child session in its own copy of the project and branch. If
+you are a 🧭 child (opened in `.agw-children`), work on your `agw/` branch, commit your work there
+before you answer (that commit needs no approval), answer with `reply_message` as usual,
 and merge nothing without the operator's approval.
 
 **`UIUX review`.** When the user (here or on Telegram) says "UIUX review", send the UI to the

@@ -60,7 +60,8 @@ title, else the folder name.
   steps in on Telegram if nobody answers.
 - **Main session**: if a request's text says you are the main session, do not do it: call
   `dispatch(message_id, lane, brief, session_id)`; same lane → its child session in order, a new lane
-  → a new child session in its own git worktree. A child works on its branch and merges nothing
+  → a new child session in its own copy of the project. A child commits on its `agw/` branch before
+  answering (no approval needed for that) and merges or pushes nothing
   without approval.
 - **`UIUX review`**: when the user says "UIUX review", call `ask_agent(to="UIUXAgent", request,
   session_id)` with the screens or flow, their purpose, absolute paths of fresh screenshots and UI

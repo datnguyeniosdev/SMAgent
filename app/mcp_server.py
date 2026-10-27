@@ -690,7 +690,8 @@ def build_mcp_server(svc) -> MCPServer:
         """Main session only: route a project request (one whose text says you are the main session)
         instead of doing it. lane: the task type, short (ui, build, art, bugfix-login). The open child
         session of that lane gets it after its current work (same lane: in order); a new lane opens a
-        new child session with your agent tool in its own git worktree and branch (in parallel).
+        new child session with your agent tool in its own copy-on-write copy of the project and
+        branch (in parallel); a closed lane's copy is reopened instead of a new one.
         to: s# to pick an open session instead. brief: what to do and what to report, standing alone.
         The child answers the sender itself; you need not reply to the message."""
         try:

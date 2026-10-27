@@ -383,9 +383,12 @@ class MediaPlugin:
                 want = rules.expected_width / rules.expected_height
                 got = img["width"] / img["height"] if img.get("height") else 0
                 if not got or abs(got - want) / want > 0.12:
-                    findings.append({"severity": "high", "message": (
-                        f"{img.get('artifact_id')}: aspect {img.get('width')}x{img.get('height')} does not match "
-                        f"the requested {rules.expected_width}x{rules.expected_height}")})  # fmt: skip
+                    # the model offers a few ratios only: a paid image is not thrown away for it, the
+                    # operator sees the note in review and the agent crops or scales on import
+                    findings.append({"severity": "medium", "message": (
+                        f"{img.get('artifact_id')}: aspect {img.get('width')}x{img.get('height')} differs from "
+                        f"the requested {rules.expected_width}x{rules.expected_height} (the model's nearest "
+                        "ratio); crop or scale on import")})  # fmt: skip
             info = (
                 inspect_image(ctx.read_artifact(img["artifact_id"]))
                 if img.get("artifact_id")

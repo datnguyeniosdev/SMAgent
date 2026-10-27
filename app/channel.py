@@ -11,7 +11,7 @@ enabled, non-blocked session of the project (push preferred, newest first) and o
 Routing (docs/DISPATCH_DESIGN.md): work for a named session (/send s#, a reply to its report) stays
 in that session, one job after another. Project work goes to the project's main session, which only
 routes it with `dispatch`: to the child session of that lane (same lane: in order) or to a new child
-in its own git worktree (other lanes: in parallel). Answers to a session's own questions skip the
+in its own copy-on-write copy of the project (other lanes: in parallel). Answers to a session's own questions skip the
 line: they are what its current job waits for.
 Answers are published as reports of the session's record-only task, so a Telegram reply to one is
 routed back into the same session (see CollaborationService.submit_feedback).
@@ -24,11 +24,13 @@ import hashlib
 import logging
 import os
 import re
+import shutil
 import signal
 import subprocess
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from html import escape as escape_html
 from pathlib import Path
 
 from app.models import new_id, now
@@ -425,6 +427,12 @@ class ChannelHub:
             if self.in_progress(s.session_id):
                 continue
             for msg in list(s.queue._queue):
+                if msg.get("route") and msg.get("queued_at", "") < late:  # the main is not routing
+                    self.stall(
+                        s.session_id,
+                        f"routing work untaken for {int(QUEUE_WAIT.total_seconds() // 60)} min",
+                    )
+                    break
                 if msg.get("kind") != "answer" and msg.get("queued_at", "") < late:
                     self._take(s, msg)
                     self._stall([msg], s.session_id,
@@ -451,19 +459,150 @@ class ChannelHub:
 
     def main_for(self, project: str) -> LiveSession | None:
         """The project's main session when it can take work. With none chosen yet, the oldest open
-        session (app before CLI, never a child) becomes it."""
+        session (app before CLI, never a child) becomes it. The main stuck (rate limit, API error,
+        not picking up): a temporary router session is opened in <repo>/.agw-children/router and
+        routes for it with the same lanes (they live in the store); when the main works again it
+        takes over, hears what was routed, and the router is closed. The main offline: None (the
+        operator is asked)."""
         rec = self.svc.store.get("channel_main", _norm(project))
-        mine = [x for x in self.sessions.values()
-                if _norm(x.project) == _norm(project) and x.deliverable and not self.child(x)]  # fmt: skip
+        router_cwd = (rec or {}).get("router_cwd") or ""
+        mine = [x for x in self.sessions.values() if _norm(x.project) == _norm(project)
+                and not self.child(x) and not (router_cwd and x.cwd == router_cwd)]  # fmt: skip
         if rec is None or not (rec.get("session_id") or rec.get("pending_new")):
-            if not mine:
+            ready = [x for x in mine if x.deliverable]
+            if not ready:
                 return None
-            first = min(mine, key=lambda x: (x.kind != "app", x.connected_at))
+            first = min(ready, key=lambda x: (x.kind != "app", x.agent not in ("", "claude_code"),
+                                              x.connected_at))  # fmt: skip
             self.set_main(first, flush=False)
             return first
-        same = [x for x in mine if x.session_id == rec.get("session_id")
-                or (x.cwd and x.cwd == rec.get("cwd") and x.agent == rec.get("agent"))]  # fmt: skip
-        return max(same, key=lambda x: x.session_id == rec.get("session_id"), default=None)
+        # a window's push session and its pull loop are one main (the push one has no agent name)
+        same = [x for x in mine if x.session_id == rec.get("session_id") or (x.cwd and x.cwd == rec.get("cwd")
+                and (x.agent == rec.get("agent") or not x.agent or not rec.get("agent")))]  # fmt: skip
+        main = max((x for x in same if x.deliverable), key=lambda x: x.session_id == rec.get("session_id"),
+                   default=None)  # fmt: skip
+        if main is not None:
+            if router_cwd:  # back: the routing context returns to it
+                self._merge_back(main, rec)
+            return main
+        if rec.get("pending_new") or not same:  # offline: the operator decides (send_main_offline)
+            return None
+        routers = [
+            x
+            for x in self.sessions.values()
+            if router_cwd and x.cwd == router_cwd and x.deliverable
+        ]
+        if routers:
+            return max(routers, key=lambda x: x.mode == "push")
+        if not router_cwd:
+            self._open_router(project, rec, same[0])
+        return None
+
+    def _open_router(self, project: str, rec: dict, main: LiveSession) -> None:
+        """A temporary router for a stuck main, with the main's agent tool, inside the project."""
+        try:
+            repo = _toplevel(main.cwd)
+        except ValueError:
+            return
+        path = repo / CHILDREN / "router"
+        self.svc.store.put("channel_main", _norm(project), {**rec, "router_cwd": str(path),
+                           "routed": [], "router_since": now().isoformat()})  # fmt: skip
+        self._ops(f"🧭 {self._label(main)} (👑 main) is stuck ({escape_html(main.stalled)}): opening a "
+                  "temporary router with the same lanes until it works again")  # fmt: skip
+        agent = main.agent if main.agent not in ("", "claude_code") else ""
+
+        def make() -> None:
+            from app.config import ENV_PORTS, env_name
+            from app.repo_setup import setup_repo
+
+            (repo / CHILDREN).mkdir(exist_ok=True)
+            (repo / CHILDREN / ".gitignore").write_text("*\n")
+            path.mkdir(exist_ok=True)
+            setup_repo(path, f"http://127.0.0.1:{ENV_PORTS[env_name()]}/mcp", project, False)
+            self.launch(path, agent)
+
+        self._background(make)
+
+    def _background(self, fn) -> None:
+        """Run blocking work (git, opening a Terminal) off the event loop; failures are logged."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            fn()
+            return
+
+        async def go():
+            try:
+                await asyncio.to_thread(fn)
+            except Exception:  # noqa: BLE001 - routing goes on; the operator sees nothing opened
+                log.exception("background job failed")
+
+        loop.create_task(go())
+
+    def _merge_back(self, main: LiveSession, rec: dict) -> None:
+        """The main works again: what the router routed goes to it with the lanes as they are now,
+        its unrouted work comes back, and the router is closed."""
+        router_cwd = rec.get("router_cwd") or ""
+        self.svc.store.put("channel_main", _norm(main.project), {k: v for k, v in rec.items()
+                           if k not in ("router_cwd", "routed", "router_since")})  # fmt: skip
+        for r in [x for x in self.sessions.values() if x.cwd == router_cwd]:
+            for m in self.in_progress(r.session_id):  # routing work it took but did not route
+                for k in ("session_id", "delivered_at"):
+                    m.pop(k, None)
+                self._set(m, "pending")
+            if r.session_id in self.sessions:
+                self.close(r)
+        routed = "; ".join(rec.get("routed") or []) or "nothing"
+        mid = new_id("chm")
+        self._enqueue(main, {
+            "message_id": mid, "num": self._number("channel_mnum", mid), "project": main.project,
+            "kind": "answer", "pinned": True, "meta": {"source": "gateway", "kind": "answer"},
+            "text": f"While you were stuck, a temporary router routed for you: {routed}. "
+                    f"{self.lanes_note(main.project)} Keep routing to these lanes (dispatch reopens a "
+                    "closed lane's copy); do not open new ones for the same work. This needs no reply.",
+            "created_at": now().isoformat(),
+        })  # fmt: skip
+        self._ops(f"👑 {self._label(main)} works again and routes; the temporary router is closed")
+        self._flush_pending(main.project)
+
+    def children(self, project: str) -> list[dict]:
+        """The project's child folders (newest first) with lane, branch, task tags and status:
+        working (on a request), idle (open), closed (no session; folder and branch kept), deleted."""
+        out = []
+        for c in self.svc.store.list("channel_child"):
+            if _norm(c["project"]) != _norm(project) or not (path := c.get("path")):
+                continue
+            open_ = [x for x in self.sessions.values() if x.cwd == path]
+            busy = [m for x in open_ for m in self.in_progress(x.session_id)]
+            status = ("working" if busy else "idle" if open_
+                      else "closed" if Path(path).is_dir() else "deleted")  # fmt: skip
+            nums = ",".join(f"s{x.num}" for x in open_)
+            tasks = c.get("tasks") or []
+            task = f"m{busy[0].get('num')}" if busy else (tasks[-1]["tag"] if tasks else "")
+            out.append({**c, "path": path, "status": status, "sessions": nums, "task": task})
+        return sorted(out, key=lambda c: c.get("created_at", ""), reverse=True)
+
+    def _tag(self, path: str, msg: dict) -> None:
+        """Remember which request a child folder got: m# and its first words."""
+        c = self.svc.store.get("channel_child", path)
+        if c is None:
+            return
+        first = (msg.get("orig_text") or msg.get("text") or "").split("\n")
+        words = next((ln for ln in first[1:] + first if ln.strip() and "Telegram" not in ln), "")
+        tag = {
+            "num": msg.get("num"),
+            "tag": f"m{msg.get('num')} {words.strip()[:40]}",
+            "at": now().isoformat(),
+        }
+        self.svc.store.put(
+            "channel_child", path, {**c, "tasks": [*(c.get("tasks") or []), tag][-20:]}
+        )
+
+    def lanes_note(self, project: str) -> str:
+        kids = [c for c in self.children(project) if c["status"] != "deleted"]
+        lanes = ", ".join(f"{c['lane']} ({', '.join(x for x in (c['sessions'], c['status'], c['task']) if x)})"
+                          for c in kids)  # fmt: skip
+        return f"Lanes now: {lanes}." if lanes else "No lanes yet."
 
     def _route(self, msg: dict, exclude: str | None = None) -> LiveSession | None:
         """Where a message for no live session goes: an answer to its tool's session, work for a
@@ -486,12 +625,19 @@ class ChannelHub:
             return None
         if not msg.get("orig_text"):
             msg["orig_text"], msg["route"] = msg["text"], True
+            rec = self.svc.store.get("channel_main", _norm(project)) or {}
+            who = (
+                "the temporary router of"
+                if rec.get("router_cwd") == main.cwd
+                else "the main session of"
+            )
             msg["text"] += (
-                f"\n\n(You are the main session of {project}: route this, do not do it yourself. "
+                f"\n\n(You are {who} {project}: route this, do not do it yourself. "
                 f"Call dispatch(message_id='{msg['message_id']}', lane=<task type, e.g. ui, build, "
                 "art, bugfix-login>, brief=<what to do and what to report>, session_id=<yours>). "
                 "The same lane goes to its child session in order; a new lane opens a new child "
-                "session in its own git worktree. The child answers the sender itself.)"
+                "session in its own copy of the project. The child answers the sender itself. "
+                f"{self.lanes_note(project)})"
             )
         return main
 
@@ -530,12 +676,32 @@ class ChannelHub:
         msg.pop("route", None)
         msg.update(text=msg.pop("orig_text", msg["text"]) + note, lane=lane, pinned=True,
                    dispatched_by=session_id)  # fmt: skip
+        rec = self.svc.store.get("channel_main", _norm(msg["project"])) or {}
+        if (
+            rec.get("router_cwd") and rec["router_cwd"] == main.cwd
+        ):  # told to the main when it is back
+            self.svc.store.put("channel_main", _norm(msg["project"]), {**rec, "routed":
+                               [*rec.get("routed", []), f"m{msg.get('num')} → {lane}"]})  # fmt: skip
         if target is not None:
+            self._tag(target.cwd, msg)
             self._enqueue(target, msg)
             self._assigned(msg, target)
             self._ops(f"🧭 m{msg.get('num')} → {self._label(target)} ({lane})")
             return {"to": f"s{target.num}", "lane": lane, "new_session": False}
         self._set(msg, "pending")  # held for the new child (wait_cwd below)
+        old = next((c for c in self.children(msg["project"])
+                    if c["lane"] == lane and c["status"] == "closed"), None)  # fmt: skip
+        if old is not None:  # the lane's child closed: reopen it on its folder, no new copy
+            self._tag(old["path"], msg)
+            msg["wait_cwd"] = old["path"]
+            self._set(msg, "pending")
+            await asyncio.to_thread(self.launch, Path(old["path"]), old.get("agent", "") if
+                                    old.get("agent") not in ("", "claude_code") else "")  # fmt: skip
+            self._ops(
+                f"🧭 m{msg.get('num')} → reopened child ({lane}) on <code>{old['branch']}</code>"
+            )
+            return {"to": "reopened", "lane": lane, "new_session": False, "branch": old["branch"],
+                    "path": old["path"]}  # fmt: skip
         try:
             repo = await asyncio.to_thread(_toplevel, main.cwd)
             path, branch = await asyncio.to_thread(_worktree, repo, lane)
@@ -549,8 +715,9 @@ class ChannelHub:
         url = f"http://127.0.0.1:{ENV_PORTS[env_name()]}/mcp"
         await asyncio.to_thread(setup_repo, path, url, msg["project"], False)
         self.svc.store.put("channel_child", str(path), {"project": msg["project"], "lane": lane,
-                           "branch": branch, "repo": str(repo), "parent": session_id,
+                           "branch": branch, "repo": str(repo), "parent": session_id, "path": str(path),
                            "agent": main.agent or "claude_code", "created_at": now().isoformat()})  # fmt: skip
+        self._tag(str(path), msg)
         msg["wait_cwd"] = str(path)
         self._set(msg, "pending")
         agent = main.agent if main.agent not in ("", "claude_code") else ""
@@ -658,6 +825,14 @@ class ChannelHub:
                 continue
             elif holder is not None and holder.mode == "push":
                 continue  # Claude has it on screen; pushing it again would start it twice
+            elif msg.get(
+                "route"
+            ):  # the main did not route it: stuck, a temporary router takes over
+                self.stall(
+                    msg.get("session_id") or "",
+                    f"no routing within {int(LEASE.total_seconds() // 60)} min",
+                )
+                continue
             elif not msg.get("ask_id"):  # nobody answered within the lease: the operator decides
                 self._stall(
                     [msg],
@@ -708,7 +883,16 @@ class ChannelHub:
                 (keep if m.get("kind") == "answer" else msgs).append(m)
             for m in keep:
                 s.queue.put_nowait(m)
-        self._stall(msgs, session_id, reason)
+        routes = [
+            m for m in msgs if m.get("route")
+        ]  # a stuck main: its routing work is routed again
+        for m in routes:
+            for k in ("session_id", "delivered_at"):
+                m.pop(k, None)
+            self._set(m, "pending")
+        self._stall([m for m in msgs if not m.get("route")], session_id, reason)
+        for project in {m["project"] for m in routes}:
+            self._flush_pending(project)
         return msgs
 
     def _stall(self, msgs: list[dict], session_id: str, reason: str) -> None:
@@ -825,10 +1009,12 @@ class ChannelHub:
         return msg
 
     @staticmethod
-    def pull_id(project: str, agent: str, cwd: str) -> str:
+    def pull_id(project: str, agent: str, cwd: str, client: str = "") -> str:
         """One pull session per project, agent tool and folder (Claude, Codex and OpenCode on the
-        same project stay apart), stable across polls that forget to pass session_id."""
+        same project stay apart), stable across polls that forget to pass session_id. A terminal
+        session (cli) in the folder of a desktop one is another session, not a twin taking its work."""
         where = hashlib.sha256(cwd.encode()).hexdigest()[:6] if cwd else "0"
+        where += "c" if client == "cli" else ""
         return f"pull_{_norm(project)[:24]}_{_norm(agent or 'agent')[:12]}_{where}"
 
     def pull(
@@ -839,12 +1025,12 @@ class ChannelHub:
         Nothing new while it still has an unanswered message (no duplicate or parallel jobs), except
         answers to its own questions, which that message is waiting for.
         Returns (session, new messages, messages still in progress)."""
-        sid = session_id or self.pull_id(project, agent, cwd)
+        sid = session_id or self.pull_id(project, agent, cwd, client)
         if (
             cwd
             and agent
             and sid.startswith("pull_")
-            and sid != (own := self.pull_id(project, agent, cwd))
+            and sid != (own := self.pull_id(project, agent, cwd, client))
         ):
             # a stale id (remembered from before a folder rename or a restart): the folder's session,
             # the one its waiter and the gateway's pushes use
@@ -960,6 +1146,10 @@ class ChannelHub:
                 self._set(msg, "done")  # frees the session for its next message
                 self._flush_pending(rec["project"])
         body = text.strip() + note
+        if (
+            c := self.svc.store.get("channel_child", rec.get("cwd") or "")
+        ) and await asyncio.to_thread(_fetch_back, c):
+            body += f"\n\n(branch {c['branch']} is in the project repo for review)"
         mode = rec.get("mode", "push")
         agent = (s.agent if s else "") or rec.get("agent") or "claude_code"
         return await self.svc.collab.submit_report(
@@ -975,15 +1165,46 @@ def _toplevel(cwd: str) -> Path:
     return Path(out.stdout.strip())
 
 
-def _worktree(repo: Path, lane: str) -> tuple[Path, str]:
-    """A new worktree and branch for a child: <projects root>/.agw-worktrees/<repo>/<lane>-<id>."""
-    from app.projects import projects_root
+CHILDREN = ".agw-children"  # inside the project: trusted with it, ignored by its git
 
+
+def _worktree(repo: Path, lane: str) -> tuple[Path, str]:
+    """A child's own copy of the project and branch: <repo>/.agw-children/<lane>-<id>. An APFS
+    copy-on-write clone (almost no disk until files change; ignored build caches come along, so
+    engines need no re-import), reset to the last commit on a new branch agw/<lane>-<id>: the main
+    folder's unfinished edits stay out. Its branch lives in the copy's .git (see _fetch_back).
+    Where cloning fails (not APFS, the repo is itself a worktree): a git worktree in the same place."""
     name = f"{lane}-{new_id('w')[-4:]}"
-    path, branch = projects_root() / ".agw-worktrees" / repo.name / name, f"agw/{name}"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    branch, home = f"agw/{name}", repo / CHILDREN
+    path = home / name
+    home.mkdir(exist_ok=True)
+    (home / ".gitignore").write_text("*\n")  # never part of the repo itself
+    (home / ".gdignore").touch()  # Godot: do not import the copies
+    if (repo / ".git").is_dir():
+        path.mkdir()
+        items = [str(x) for x in repo.iterdir() if x.name != CHILDREN]
+        git = ["git", "-C", str(path)]
+        steps = (["cp", "-cR", *items, str(path)], [*git, "checkout", "-q", "-f", "-B", branch, "HEAD"],
+                 [*git, "clean", "-fdq"])  # fmt: skip
+        ok = all(
+            subprocess.run(cmd, capture_output=True, timeout=900).returncode == 0 for cmd in steps
+        )
+        if ok:
+            return path, branch
+        shutil.rmtree(path, ignore_errors=True)
     out = subprocess.run(["git", "-C", str(repo), "worktree", "add", "-b", branch, str(path)],
                          capture_output=True, text=True, timeout=900)  # fmt: skip
     if out.returncode != 0:
         raise ValueError(f"git worktree add failed: {(out.stderr or out.stdout).strip()[:300]}")
     return path, branch
+
+
+def _fetch_back(child: dict) -> bool:
+    """A clone's branch into the project repo (`git fetch`), so it can be reviewed and merged
+    there; the project folder's files are not touched. A worktree's branch is already there."""
+    path, repo = Path(child["path"]), Path(child.get("repo") or "")
+    if not (path / ".git").is_dir() or not (repo / ".git").exists():
+        return False
+    out = subprocess.run(["git", "-C", str(repo), "fetch", "-q", str(path),
+                          f"+{child['branch']}:{child['branch']}"], capture_output=True, timeout=300)  # fmt: skip
+    return out.returncode == 0
