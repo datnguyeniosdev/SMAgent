@@ -124,8 +124,8 @@ def build_mcp_server(svc) -> MCPServer:
             "state": task.state.value,
             "note": "the operator approves the cost, then reviews the model's preview on Telegram; with "
             'your session_id the decision arrives through get_messages as an "answer" message (no '
-            "polling): accepted -> models[0].path in get_task_result is the file; changes_requested -> "
-            "a new version is made and reviewed. 3D takes a few minutes.",
+            "polling): accepted -> models[0].path in get_task_result is the file; rejected -> do not use "
+            "it; changes_requested -> a new version is made and reviewed. 3D takes a few minutes.",
         }
 
     def task_or_error(task_id: str):
@@ -523,8 +523,8 @@ def build_mcp_server(svc) -> MCPServer:
             "state": task.state.value,
             "note": "the operator approves the cost, then reviews the image on Telegram; with your "
             'session_id the decision arrives through get_messages as an "answer" message (no '
-            "polling): accepted -> it lists the files (images[0].path in get_task_result); "
-            "changes_requested -> a new version is made and reviewed.",
+            "polling): accepted -> it lists the files (images[0].path in get_task_result); rejected -> "
+            "do not use it; changes_requested -> a new version is made and reviewed.",
         }
 
     @tool

@@ -54,3 +54,26 @@ async def test_art_decisions_are_pushed_not_its_generation(settings, cfg_dir):
     await orch.apply_action(action(orch, "art_accept", second.task_id), "11")
     (ok,) = answers(orch, sid)  # the revision, started by the operator, still reaches the agent
     assert "accepted" in ok["text"] and ".png" in ok["text"]
+
+
+async def test_rejected_art_is_never_usable_and_the_agent_is_told(settings, cfg_dir):
+    from app.gateway_config import load_config
+    from tests.conftest import build_orch, wait_done
+
+    client, _ = fal_api()
+    orch, _ = build_orch(settings, [], image=FalImageProvider("k", client=client, poll_s=0),
+                         gateway_cfg=load_config(cfg_dir))  # fmt: skip
+    sid = orch.channel.pull(P, None, "/w/k05", 0, "claude_code")[0].session_id
+    data = {"prompt": "gold coin\n\nPurpose: icon", "width": 64, "height": 32, "transparent": False,
+            "project": P, "session_id": sid}  # fmt: skip
+    task = await orch.submit_request(
+        TaskRequest(objective="coin", task_type="design_image", data=data, source="mcp")
+    )
+    await wait_done(orch, task)
+    await orch.apply_action(action(orch, "art_reject", task.task_id), "11")
+    (no,) = answers(orch, sid)
+    assert "rejected" in no["text"] and "do not use it" in no["text"] and ".png" not in no["text"]
+    assert orch.art_review(task.task_id)["state"] == "rejected"
+    note = await orch.apply_action(action(orch, "art_accept", task.task_id), "11")
+    assert "từ chối" in note and orch.art_review(task.task_id)["state"] == "rejected"
+    assert answers(orch, sid) == []  # a later ✅ changes nothing

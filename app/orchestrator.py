@@ -601,7 +601,8 @@ class Orchestrator:
     # ---------- generated-art review ----------
 
     def art_review(self, task_id: str) -> dict | None:
-        """pending -> accepted | changes_requested (then next_task_id is the regenerated version)."""
+        """pending -> accepted | rejected | changes_requested (then next_task_id is the regenerated
+        version)."""
         return self.store.get("art_review", task_id)
 
     def _set_review(self, task_id: str, **kw) -> dict:
@@ -615,6 +616,9 @@ class Orchestrator:
                                                 and a.validation_status != "failed")]  # fmt: skip
             self._answer_caller(task, f"🎨 The operator accepted your art {task_id}. Files:\n"
                                 + "\n".join(files) + "\nCopy what you need into the repo.")  # fmt: skip
+        elif task is not None and rec["state"] == "rejected":
+            self._answer_caller(task, f"🎨 The operator rejected your art {task_id}: do not use it. No new "
+                                "version is made; continue without it or ask the operator what they want.")  # fmt: skip
         elif task is not None and rec["state"] == "changes_requested":
             self._answer_caller(task, f"🎨 The operator asked for changes to your art {task_id}: "
                                 f"{rec.get('feedback', '')}\nThe new version is "
@@ -750,7 +754,13 @@ class Orchestrator:
         if a.kind == "retry":
             new = await self.retry(task.task_id)
             return f"Retrying as {new.task_id}"
-        if a.kind == "art_accept":
+        if a.kind in ("art_accept", "art_reject"):
+            done = (self.art_review(task.task_id) or {}).get("state")
+            if done in ("accepted", "rejected"):
+                return f"Ảnh này đã được {'chấp nhận' if done == 'accepted' else 'từ chối'} rồi ạ"
+            if a.kind == "art_reject":
+                self._set_review(task.task_id, state="rejected", by=str(actor))
+                return "Đã từ chối: agent không được dùng ảnh này"
             self._set_review(task.task_id, state="accepted", by=str(actor))
             return "Đã chấp nhận: agent được dùng ảnh này"
         if a.kind == "art_feedback":
@@ -1016,11 +1026,10 @@ class Orchestrator:
             acts += [  # the operator reviews generated art before an agent may use it
                 self.actions.create("art_accept", task.task_id, "✅ Chấp nhận", TERMINAL),
                 self.actions.create("art_feedback", task.task_id, "✏️ Góp ý", TERMINAL),
+                self.actions.create("art_reject", task.task_id, "❌ Từ chối", TERMINAL),
             ]
             self._set_review(task.task_id, state="pending")
-            reply = (
-                "Dạ, anh bấm ✅ Chấp nhận, hoặc trả lời bài này với điểm cần sửa (em tạo bản mới) ạ"
-            )
+            reply = "Dạ, anh bấm ✅ Chấp nhận, ❌ Từ chối, hoặc trả lời bài này với điểm cần sửa (em tạo bản mới) ạ"
         run = self.load_run(task.run_id) if task.run_id else None
         if (
             run is not None
