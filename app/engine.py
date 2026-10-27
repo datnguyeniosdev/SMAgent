@@ -237,6 +237,11 @@ class WorkflowEngine:
             run.error = f"workflow timed out after {wf.timeout_s}s"
             await self._cancel_running(running)
         except asyncio.CancelledError:
+            if getattr(
+                self.host, "stopping", False
+            ):  # restarting: steps stay as they are for recovery
+                await self._cancel_running(running)  # (their handlers skip the bookkeeping too)
+                raise
             cancelled = True
             await self.host.publish("cancellation.requested", task, run)
             await self._cancel_running(running)
@@ -421,6 +426,8 @@ class WorkflowEngine:
                 )
                 return
         except asyncio.CancelledError:
+            if getattr(self.host, "stopping", False):
+                raise  # the gateway is restarting: prepare_recovery decides on the next start
             if rec.state not in STEP_TERMINAL:
                 # A side-effecting operation that was in flight may still complete.
                 state = (

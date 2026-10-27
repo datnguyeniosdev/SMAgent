@@ -433,3 +433,46 @@ def test_long_telegram_text_is_split_not_cut():
     parts = chunks(text)
     assert "".join(parts) == text and all(len(p) <= 4096 for p in parts)
     assert chunks("short") == ["short"]
+
+
+async def test_art_waiting_for_approval_survives_a_restart(settings, cfg_dir):
+    """Prod, 2026-10-27: a release cancelled two art tasks waiting for the operator's approval. Now
+    the restart leaves them open and the next start asks for the approval again."""
+    from tests.conftest import build_orch, wait_done
+
+    client, _ = fal_api()
+    from app.gateway_config import load_config
+
+    orch, _ = build_orch(settings, [], image=FalImageProvider("k", client=client, poll_s=0),
+                         gateway_cfg=load_config(cfg_dir), auto=None)  # fmt: skip
+    from mcp.client import Client
+
+    from app.mcp_server import build_mcp_server
+
+    async with Client(build_mcp_server(orch)) as c:
+        r = (await c.call_tool("generate_art", {
+            "prompt": "flat gold coin icon", "purpose": "in-game reward sprite shown at 64 px",
+            "requirements": "flat vector, gold #F5C542, dark outline, solid background, no text",
+            "width": 64, "height": 32})).structured_content  # fmt: skip
+    task = orch.tasks[r["task_id"]]
+    for _ in range(100):
+        if orch.pending_approvals():
+            break
+        await asyncio.sleep(0.01)
+    assert task.state == TaskState.waiting_for_approval, (task.state, task.error)
+    orch.stopping = True  # the gateway shuts down
+    running = list(orch._running.values())
+    for t in running:
+        t.cancel()
+    await asyncio.gather(*running, return_exceptions=True)
+    assert not task.done
+    orch.stopping = False  # the next start: asked again, then approved and generated
+    report = await orch.recover()
+    assert "approval will be requested again" in " ".join(report[0]["steps"])
+    for _ in range(100):
+        if pending := orch.pending_approvals():
+            orch.decide_approval(pending[0]["approval_id"], True, "11")
+            break
+        await asyncio.sleep(0.01)
+    await wait_done(orch, task)
+    assert task.state == TaskState.succeeded, task.error

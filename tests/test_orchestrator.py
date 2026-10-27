@@ -324,3 +324,22 @@ async def test_design_without_image_provider_reports_missing(settings):
     assert "No image-generation provider" in notes.texts()
     assert "missing asset: coin" in notes.texts()
     assert task.state == TaskState.succeeded
+
+
+async def test_a_restart_interrupts_tasks_instead_of_cancelling_them(settings):
+    """Shutting the gateway down must not mark running tasks cancelled: the next start's recover()
+    decides (a step that was mid-way and not idempotent becomes unknown, never replayed)."""
+    writer = FakeConnector("claude_code", WRITER, write_file("a.py", ""))
+    orch, _ = build_orch(settings, [writer], auto=None)
+    task = await orch.submit("x", Workflow.code)
+    await asyncio.sleep(0.05)
+    orch.stopping = True  # what app.main does on shutdown
+    running = list(orch._running.values())
+    for t in running:
+        t.cancel()
+    await asyncio.gather(*running, return_exceptions=True)
+    assert not task.done and orch.store.get("task", task.task_id)["state"] != "cancelled"
+    assert not [e for e in orch.store.events(task.task_id) if e["type"] == "cancellation.requested"]
+    orch.stopping = False  # the next start
+    report = await orch.recover()
+    assert report[0]["task_id"] == task.task_id and report[0]["action"] == "resumed workflow"

@@ -356,6 +356,7 @@ async def lifespan(app: FastAPI):
     except (TimeoutError, Exception):  # open client streams must not block shutdown
         mcp_task.cancel()
         await asyncio.gather(mcp_task, return_exceptions=True)
+    orch.stopping = True  # interrupted, not cancelled: the next start resumes them (recover)
     for t in list(orch._running.values()):
         t.cancel()
     await asyncio.gather(*orch._running.values(), return_exceptions=True)

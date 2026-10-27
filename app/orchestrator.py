@@ -216,6 +216,8 @@ class Orchestrator:
         self.tasks: dict[str, Task] = {}
         self.sessions: dict[str, AgentSession] = {}
         self._running: dict[str, asyncio.Task] = {}
+        # the gateway is shutting down: running tasks are interrupted, not cancelled (recover resumes them)
+        self.stopping = False
         self._approvals: dict[str, asyncio.Future] = {}  # approval_id -> future
         self._answers: dict[str, asyncio.Future] = {}  # task_id -> clarification future
         self._active_calls: dict[str, AgentConnector] = {}
@@ -970,6 +972,8 @@ class Orchestrator:
                 run = await self.engine.execute(task, run, recs)
             await self._conclude(task, run)
         except (asyncio.CancelledError, Rejected) as e:
+            if self.stopping and isinstance(e, asyncio.CancelledError):
+                raise  # a restart, not the operator: the task stays open for recover()
             task.error = str(e) if isinstance(e, Rejected) else "cancelled"
             expired = isinstance(e, Rejected) and e.category == "expired"
             task.error_category = (
@@ -996,7 +1000,8 @@ class Orchestrator:
             self._finish(task, TaskState.failed)
         finally:
             self._running.pop(task.task_id, None)
-            self._finish_children(task)
+            if not self.stopping:
+                self._finish_children(task)
             self.store.put(
                 "task",
                 task.task_id,
