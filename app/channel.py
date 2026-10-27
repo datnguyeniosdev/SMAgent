@@ -40,6 +40,7 @@ log = logging.getLogger(__name__)
 PULL_TTL = timedelta(minutes=5)  # a pull session is open while it polled this recently (/loop 1m)
 LEASE = timedelta(minutes=60)  # an unanswered handed-over message keeps its session busy this long
 CHILD_IDLE = timedelta(minutes=30)  # a child session with nothing to do this long is closed
+BUSY = timedelta(minutes=30)  # one still_working call keeps a session busy this long
 START_WAIT = timedelta(
     minutes=10
 )  # a child or temporary router that has not connected by then failed
@@ -107,6 +108,9 @@ class LiveSession:
     client: str = ""  # "app" (desktop app / IDE) or "cli", as the session reports it
     stalled: str = ""  # why its agent stopped (rate limit, API error, no answer): no new work
     last_work: datetime = field(default_factory=now)  # last message handed to it or answered
+    busy_until: datetime | None = (
+        None  # still_working: on long work, never idle or stuck before this
+    )
 
     @property
     def kind(self) -> str:
@@ -521,8 +525,12 @@ class ChannelHub:
         main = max((x for x in same if x.deliverable), key=lambda x: x.session_id == rec.get("session_id"),
                    default=None)  # fmt: skip
         if main is not None:
-            if router_cwd:  # back: the routing context returns to it
-                self._merge_back(main, rec)
+            if (
+                router_cwd
+            ):  # back: the routing context returns to it, once the router finished routing
+                if not any(self.in_progress(x.session_id) for x in self.sessions.values()
+                           if x.cwd == router_cwd):  # fmt: skip
+                    self._merge_back(main, rec)
             elif rec.get("router_failed"):
                 self.svc.store.put("channel_main", _norm(project), {k: v for k, v in rec.items()
                                    if k != "router_failed"})  # fmt: skip
@@ -726,6 +734,11 @@ class ChannelHub:
         if msg.get("wait_cwd"):
             kids = [x for x in self.sessions.values() if x.cwd == msg["wait_cwd"] and x.deliverable]
             return max(kids, key=lambda x: x.mode == "push", default=None)
+        own = self.sessions.get(msg.get("for_session") or "")
+        if (
+            own is not None and own.deliverable and msg.get("pinned")
+        ):  # back to the session it was for
+            return own
         main = self.main_for(project)
         if main is not None and main.session_id == exclude:  # the main asked its own project
             return self.session_for(project, exclude=exclude)
@@ -735,10 +748,13 @@ class ChannelHub:
                 self._main_asked.add(_norm(project))
                 self._notify("send_main_offline", project)
             return None
-        if not msg.get("orig_text") and not _has_commit(
-            main.cwd
-        ):  # no children possible: it does it
-            return main
+        self._mark_route(msg, main)
+        return main
+
+    def _mark_route(self, msg: dict, main: LiveSession) -> None:
+        """The main session only routes: work reaching it through the gateway (for the project, or
+        addressed to it: /send s#, a reply to its report, an ask) carries the routing note."""
+        project = msg["project"]
         if not msg.get("orig_text"):
             msg["orig_text"], msg["route"] = msg["text"], True
             rec = self.svc.store.get("channel_main", _norm(project)) or {}
@@ -755,7 +771,6 @@ class ChannelHub:
                 "session in its own copy of the project. The child answers the sender itself. "
                 f"{self.lanes_note(project)})"
             )
-        return main
 
     async def dispatch(
         self, session_id: str, ref: str, lane: str, brief: str = "", to: str = ""
@@ -769,7 +784,11 @@ class ChannelHub:
             raise ValueError(f"unknown session {session_id}: call get_messages first")
         if msg is None:
             raise ValueError(f"no open message {ref}")
-        if self.main_for(msg["project"]) is not main:
+        rec = self.svc.store.get("channel_main", _norm(msg["project"])) or {}
+        router = (
+            bool(rec.get("router_cwd")) and main.cwd == rec["router_cwd"]
+        )  # finishing its routing
+        if self.main_for(msg["project"]) is not main and not router:
             raise PermissionError(f"only the main session of {msg['project']} routes its work")
         if msg.get("session_id") not in (None, session_id):
             raise PermissionError(f"m{msg.get('num')} is not yours to route")
@@ -821,7 +840,12 @@ class ChannelHub:
             return {"to": "reopened", "lane": lane, "new_session": False, "branch": old["branch"],
                     "path": old["path"]}  # fmt: skip
         try:
-            repo = await asyncio.to_thread(_toplevel, main.cwd)
+            try:
+                repo = await asyncio.to_thread(_toplevel, main.cwd)
+            except ValueError:  # not a git repo: its children get a plain copy of the folder
+                from app.projects import repo_for
+
+                repo = repo_for(Path(main.cwd)) or Path(main.cwd)
             free, started = shutil.disk_usage(repo).free, time.monotonic()
             path, branch, base, target, provider = await asyncio.to_thread(_worktree, repo, lane)
         except ValueError:  # no git repo, worktree failed: it stays with the main
@@ -846,15 +870,42 @@ class ChannelHub:
         await asyncio.to_thread(_trust, path, repo)
         agent = main.agent if main.agent not in ("", "claude_code") else ""
         self._remember_window(str(path), await asyncio.to_thread(self.launch, path, agent))
-        self._ops(f"🧭 m{msg.get('num')} → new child ({lane}) on branch <code>{branch}</code>")
+        where = f"on branch <code>{branch}</code>" if branch else "in a copy of the folder (no git)"
+        self._ops(f"🧭 m{msg.get('num')} → new child ({lane}) {where}")
         return {"to": "new", "lane": lane, "new_session": True, "branch": branch, "path": str(path)}
+
+    def _busy(self, s: LiveSession) -> bool:
+        """Said still_working lately, or has work waiting for the operator (stalled): not idle."""
+        if s.busy_until and s.busy_until > now():
+            return True
+        return any(m.get("stalled_session") == s.session_id
+                   for m in self.svc.store.list("channel_msg", states=["stalled"]))  # fmt: skip
+
+    def still_working(self, session_id: str, note: str = "") -> dict:
+        """Long work: the agent says it is still on it. Its open requests get a fresh lease (not
+        stuck), and the session counts as busy for BUSY (a child is not closed as idle)."""
+        s = self.sessions.get(session_id)
+        if s is None:
+            raise KeyError(session_id)
+        s.last_seen = s.last_work = now()
+        s.busy_until = now() + BUSY
+        renewed = []
+        for m in self.svc.store.list("channel_msg", states=["delivered"]):
+            if m.get("session_id") == session_id:
+                m["delivered_at"] = now().isoformat()
+                self._set(m, "delivered")
+                renewed.append(m["message_id"])
+        self.svc.store.event(
+            "channel.still_working", session=session_id, note=note[:200], renewed=renewed
+        )
+        return {"busy_until": s.busy_until.isoformat(), "renewed": renewed}
 
     def _close_idle_children(self) -> None:
         """A child with no work for CHILD_IDLE is closed; its branch and worktree stay for review."""
         cutoff = now() - CHILD_IDLE
         for s in list(self.sessions.values()):
             c = self.child(s)
-            if c is None or s.last_work > cutoff or not self._idle(s):
+            if c is None or s.last_work > cutoff or not self._idle(s) or self._busy(s):
                 continue
             if s.mode == "pull" and any(x is not s and x.cwd == s.cwd and x.mode == "push"
                                         for x in self.sessions.values()):  # fmt: skip
@@ -905,8 +956,12 @@ class ChannelHub:
             msg["meta"]["kind"] = msg["kind"]
         msg["num"] = self._number("channel_mnum", msg["message_id"])  # short id m<num>
         msg["pinned"] = pinned  # for that session: it waits its turn there
+        if pinned:
+            msg["for_session"] = target.session_id  # kept across a restart (the queue is in memory)
         if not pinned:
             target = self._route(msg, exclude=exclude)
+        elif msg.get("kind") != "answer" and target is self.main_for(target.project):
+            self._mark_route(msg, target)  # addressed to the main: it routes this too
         if target:
             self._enqueue(target, msg)
         else:
@@ -1292,16 +1347,6 @@ class ChannelHub:
         )
 
 
-def _has_commit(cwd: str) -> bool:
-    """A git repo with a commit: a child can get its own copy of it (dispatch). A folder that is not
-    one (yet) keeps today's behaviour: its main session does the work itself."""
-    if not cwd:
-        return False
-    out = subprocess.run(["git", "-C", cwd, "rev-parse", "--verify", "-q", "HEAD"], capture_output=True,
-                         timeout=10)  # fmt: skip
-    return out.returncode == 0
-
-
 def _toplevel(cwd: str) -> Path:
     out = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"], capture_output=True,
                          text=True, timeout=30)  # fmt: skip
@@ -1358,14 +1403,25 @@ def _worktree(repo: Path, lane: str) -> tuple[Path, str, str, str, str]:
     engines need no re-import), reset to the last commit on a new branch agw/<lane>-<id>: the main
     folder's unfinished edits stay out. Its branch lives in the copy's .git (see _fetch_back).
     Where cloning fails (not APFS, the repo is itself a worktree): a git worktree in the same place.
+    A folder that is not a git repo (or has no commit): a plain copy, no branch (provider "copy").
     Returns (path, branch, base: the commit it starts from, target: the repo's branch then, provider:
-    clone | worktree)."""
+    clone | worktree | copy)."""
     name = f"{lane}-{new_id('w')[-4:]}"
     branch, home = f"agw/{name}", repo / CHILDREN
     path = home / name
     home.mkdir(exist_ok=True)
     (home / ".gitignore").write_text("*\n")  # never part of the repo itself
     (home / ".gdignore").touch()  # Godot: do not import the copies
+    if not (repo / ".git").exists() or not _git(repo, "rev-parse", "--verify", "-q", "HEAD"):
+        # not a git repo, or no commit yet: a plain copy-on-write copy, no branch to bring back
+        path.mkdir()
+        items = [str(x) for x in repo.iterdir() if x.name != CHILDREN]
+        if subprocess.run(
+            ["cp", "-cR", *items, str(path)], capture_output=True, timeout=900
+        ).returncode:
+            shutil.rmtree(path, ignore_errors=True)
+            raise ValueError(f"could not copy {repo} for the child")
+        return path, "", "", "", "copy"
     target = _git(repo, "symbolic-ref", "--short", "-q", "HEAD") or ""  # "" when detached
     if (repo / ".git").is_dir():
         path.mkdir()

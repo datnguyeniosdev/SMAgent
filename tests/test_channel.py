@@ -332,12 +332,15 @@ async def test_list_ids_and_send_by_id(settings, cfg_dir):
         return m, SimpleNamespace(args=args, command="send")
 
     await gw.on_send(*msg("s2 run the tests"))  # exact session
-    assert b.queue.get_nowait()["text"].endswith("run the tests") and "session s2" in answers[-1]
+    text = b.queue.get_nowait()["text"]  # s2 is the main: even addressed to it, it routes
+    assert "run the tests" in text and "dispatch(" in text and "session s2" in answers[-1]
     await gw.on_send(
         *msg("p1 fix the menu")
     )  # project -> its main session; no git repo: no children,
     text = a.queue.get_nowait()["text"]  # so it does the work itself
-    assert text.endswith("fix the menu") and "dispatch(" not in text
+    assert (
+        "fix the menu" in text and "dispatch(" in text
+    )  # a folder without git: children get a copy
     await gw.on_send(*msg("x9 hello"))
     assert "Unknown session or project" in answers[-1] and "SESSIONS" in answers[-1]
 
@@ -356,7 +359,10 @@ async def test_one_job_at_a_time_queue_and_cancel(settings, cfg_dir):
     orch, _ = make(settings, cfg_dir, [])
     gw = gateway(orch)
     hub = orch.channel
-    s, _, _ = hub.pull(PROJECT, None)
+    hub.connect(
+        "cc_main", PROJECT, "/w/main", mode="push", notify=False
+    )  # the main: it only routes
+    s, _, _ = hub.pull(PROJECT, None)  # a worker session
     m1, _ = hub.send(PROJECT, "first", session_id=s.session_id)
     m2, _ = hub.send(PROJECT, "second", session_id=s.session_id)
     m3, _ = hub.send(PROJECT, "third", session_id=s.session_id)
@@ -379,7 +385,7 @@ async def test_one_job_at_a_time_queue_and_cancel(settings, cfg_dir):
 
     await gw.on_queue(msg("", "queue")[0])
     assert (
-        "<b>m1</b> · ▶️ in progress · s1" in answers[-1] and "<b>m2</b> · 📌 assigned" in answers[-1]
+        "<b>m1</b> · ▶️ in progress · s2" in answers[-1] and "<b>m2</b> · 📌 assigned" in answers[-1]
     )
 
     await gw.on_cancel(*msg("m2", "cancel"))  # waiting work: never delivered
@@ -558,6 +564,9 @@ async def test_restart_requeues_and_lease_expiry_stalls_for_the_operator(setting
 
     orch, _ = make(settings, cfg_dir, [])
     hub = orch.channel
+    hub.connect(
+        "cc_main", PROJECT, "/w/main", mode="push", notify=False
+    )  # the main: it only routes
     s, _, _ = hub.pull(PROJECT, None)
     m1, _ = hub.send(PROJECT, "first", session_id=s.session_id)
     m2, _ = hub.send(PROJECT, "second", session_id=s.session_id)
@@ -684,12 +693,17 @@ async def test_main_session_routes_lanes_to_children_in_worktrees(
     other, _, _ = hub.pull(PROJECT, None, "/w/other", 0, "codex", "cli")
     assert hub.main_for(PROJECT) is main  # the first session (app before CLI) becomes the main
 
-    job, _ = hub.send(PROJECT, "own job", session_id=main.session_id)  # pinned: main works on it
-    hub.pull(PROJECT, main.session_id)
+    job, _ = hub.send(
+        PROJECT, "own job", session_id=main.session_id
+    )  # addressed to the main: routed
+    assert "do not do it yourself" in orch.store.get("channel_msg", job["message_id"])["text"]
+    _, got, _ = hub.pull(PROJECT, main.session_id)
+    await hub.dispatch(main.session_id, job["message_id"], "misc")
+    opened.clear()  # (its child: not part of what follows)
     m1, t1 = hub.send(PROJECT, "fix the shop button")
     assert t1 is main
-    _, got, busy = hub.pull(PROJECT, main.session_id)  # busy, but routing work gets through
-    assert [m["message_id"] for m in got] == [m1["message_id"]] and busy
+    _, got, busy = hub.pull(PROJECT, main.session_id)
+    assert [m["message_id"] for m in got] == [m1["message_id"]] and not busy  # never busy
     assert "do not do it yourself" in got[0]["text"]
 
     with pytest.raises(PermissionError):  # only the main routes
@@ -712,7 +726,7 @@ async def test_main_session_routes_lanes_to_children_in_worktrees(
             [*git, "status", "--porcelain"], capture_output=True, text=True
         ).stdout
     )
-    assert [m["message_id"] for m in hub.in_progress(main.session_id)] == [job["message_id"]]
+    assert hub.in_progress(main.session_id) == []  # routing done: the main is never left busy
 
     child, _, _ = hub.pull(PROJECT, None, str(path), 0, "claude_code", "cli")  # the child connects
     assert hub.child(child)["lane"] == "ui" and hub.main_for(PROJECT) is main
@@ -797,6 +811,7 @@ async def test_answers_skip_the_line_and_an_offline_main_is_put_to_the_operator(
     orch, _ = make(settings, cfg_dir, [])
     hub, asked = orch.channel, []
     monkeypatch.setattr(hub, "_notify", lambda name, *a, **k: asked.append((name, a)))
+    main0, _, _ = hub.pull(PROJECT, None, "/w/main", 0, "claude_code", "app")  # routes only
     a, _, _ = hub.pull(PROJECT, None, "/w/a", 0, "claude_code")
     job, _ = hub.send(PROJECT, "work", session_id=a.session_id)
     later, _ = hub.send(PROJECT, "later", session_id=a.session_id)
@@ -808,7 +823,8 @@ async def test_answers_skip_the_line_and_an_offline_main_is_put_to_the_operator(
     _, got, _ = hub.pull(PROJECT, a.session_id)
     assert got[0]["message_id"] == later["message_id"]  # then its own work, in order
 
-    hub.disconnect(a)  # the main is gone and no other session is open
+    hub.disconnect(a)
+    hub.disconnect(main0)  # the main is gone and no other session is open
     m, target = hub.send(PROJECT, "project work")
     m2, _ = hub.send(PROJECT, "more")
     assert target is None and [n for n, _ in asked].count("send_main_offline") == 1  # asked once
@@ -1072,3 +1088,106 @@ async def test_a_terminal_main_is_not_confused_with_a_desktop_session_in_its_fol
     assert hub.main_for(PROJECT) is loop
     hub.disconnect(loop)
     assert hub.main_for(PROJECT) is None  # the desktop session is not the main
+
+
+async def test_still_working_keeps_long_work_from_being_called_stuck_or_closed(
+    settings, cfg_dir, tmp_path, monkeypatch
+):
+    """Long tasks were killed: an early answer or a task past the lease made a working child look
+    idle or stuck. still_working renews the lease and keeps the session busy; a child with work
+    waiting for the operator is never closed."""
+    from datetime import timedelta
+
+    from app import channel as ch
+    from app.models import now
+
+    orch, hub, repo, dispatch, sh = await _lanes(settings, cfg_dir, tmp_path, monkeypatch)
+    r = await dispatch("qa", "long playtest")
+    child, _, _ = hub.pull(PROJECT, None, r["path"], 0, "claude_code", "cli")
+    _, got, _ = hub.pull(PROJECT, child.session_id)
+    m = orch.store.get("channel_msg", got[0]["message_id"])
+    m["delivered_at"] = (now() - ch.LEASE + timedelta(minutes=1)).isoformat()  # 59 min in
+    orch.store.put("channel_msg", m["message_id"], m, state="delivered")
+    out = hub.still_working(child.session_id, "level 12 of 30")
+    assert out["renewed"] == [m["message_id"]]
+    hub._expire()  # an hour later it would have been stuck; the lease is fresh now
+    assert orch.store.get("channel_msg", m["message_id"])["state"] == "delivered"
+
+    await hub.reply(child.session_id, "Dạ, đang làm ạ", m["message_id"])  # answered early
+    child.last_work -= ch.CHILD_IDLE + timedelta(minutes=1)
+    hub._prune()
+    assert child.session_id in hub.sessions  # still busy (still_working): not closed
+    child.busy_until = now() - timedelta(seconds=1)
+    m2, _ = hub.send(PROJECT, "stuck one", session_id=child.session_id)
+    hub._stall([orch.store.get("channel_msg", m2["message_id"])], child.session_id, "rate limit")
+    child.queue._queue.clear()
+    hub._prune()
+    assert child.session_id in hub.sessions  # work waits for the operator: not closed
+    hub.cancel(m2["message_id"])
+    hub._prune()
+    assert child.session_id not in hub.sessions  # now really idle: closed
+
+    with pytest.raises(KeyError):
+        hub.still_working("pull_nobody")
+
+
+async def test_a_router_finishes_its_routing_before_the_main_takes_over(
+    settings, cfg_dir, tmp_path, monkeypatch
+):
+    from app import channel as ch
+
+    orch, hub, repo, dispatch, sh = await _lanes(settings, cfg_dir, tmp_path, monkeypatch)
+    main = hub.main_for(PROJECT)
+    hub.stall(main.session_id, "rate limit")
+    m, _ = hub.send(PROJECT, "fix the score")
+    router_dir = repo / ".agw-children" / "router"
+    for _ in range(100):
+        if (orch.store.get("channel_main", ch._norm(PROJECT)) or {}).get("router_cwd"):
+            break
+        await asyncio.sleep(0.05)
+    router, _, _ = hub.pull(PROJECT, None, str(router_dir), 0, "claude_code", "cli")
+    _, got, _ = hub.pull(PROJECT, router.session_id)
+    assert got[0]["message_id"] == m["message_id"]
+    hub.active(main.session_id)  # the main is back while the router is mid-way
+    assert router.session_id in hub.sessions and hub.main_for(PROJECT) is main
+    await hub.dispatch(router.session_id, m["message_id"], "audio")
+    hub.main_for(PROJECT)  # routed: now the router is closed and the main hears what it did
+    assert router.session_id not in hub.sessions
+    note = [x for x in main.queue._queue if x.get("kind") == "answer"][-1]
+    assert f"m{m['num']} → audio" in note["text"]
+
+
+async def test_a_project_without_git_still_gets_children_so_its_main_only_routes(
+    settings, cfg_dir, tmp_path, monkeypatch
+):
+    """POAgent is not a git repo: its main did all the work itself and could get stuck. Now its
+    children work in a plain copy of the folder (no branch)."""
+    from app import channel as ch
+    from app import projects
+    from tests.test_config_gateway import make
+
+    folder = tmp_path / "poagent"
+    folder.mkdir()
+    (folder / "README.md").write_text(f"# {PROJECT}\n")
+    (folder / "plan.md").write_text("v1\n")
+    monkeypatch.setattr(projects, "projects_root", lambda: tmp_path)
+    monkeypatch.setattr(ch, "CLAUDE_JSON", tmp_path / "claude.json")
+    orch, _ = make(settings, cfg_dir, [])
+    hub, opened = orch.channel, []
+    hub.launch = lambda path, agent: opened.append(path)
+    main, _, _ = hub.pull(PROJECT, None, str(folder), 0, "claude_code", "app")
+    m, _ = hub.send(
+        PROJECT, "research the market", session_id=main.session_id
+    )  # even addressed to it
+    _, got, _ = hub.pull(PROJECT, main.session_id)
+    assert "do not do it yourself" in got[0]["text"]
+    r = await hub.dispatch(main.session_id, m["message_id"], "research")
+    path = Path(r["path"])
+    assert r["new_session"] and r["branch"] == "" and opened == [path]
+    assert (path / "plan.md").read_text() == "v1\n" and path.parent == folder / ".agw-children"
+    assert orch.store.get("channel_child", str(path))["provider"] == "copy"
+    child, _, _ = hub.pull(PROJECT, None, str(path), 0, "claude_code", "cli")
+    _, got, _ = hub.pull(PROJECT, child.session_id)
+    assert got[0]["message_id"] == m["message_id"]
+    rep = await hub.reply(child.session_id, "Dạ, xong; sửa plan.md ạ", m["message_id"])
+    assert rep is not None and hub.in_progress(main.session_id) == []

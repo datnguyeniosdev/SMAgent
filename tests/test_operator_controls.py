@@ -86,12 +86,13 @@ async def test_unanswered_question_is_sent_again_after_30_minutes(settings, cfg_
 async def test_idle_session_is_preferred_and_fresh_runs_see_their_work(settings, cfg_dir):
     orch, _ = make(settings, cfg_dir, [])
     hub = orch.channel
+    hub.connect("cc_main", A, "/w/main", mode="push", notify=False)  # the main: it only routes
     busy, _, _ = hub.pull(A, None, cwd="/w/a", agent="claude_code")
     hub.send(A, "first", session_id=busy.session_id)
     hub.pull(A, busy.session_id)  # now in progress
     hub.pull(A, None, cwd="/w/b", agent="claude_code")
-    route, target = hub.send(A, "second")  # project work: to the main (the first), to route
-    assert target.session_id == busy.session_id
+    route, target = hub.send(A, "second")  # project work: to the main, to route
+    assert target.session_id == "cc_main"
 
     s, out, in_progress = hub.pull(
         A, None, "/w/a", 0, "claude_code"
@@ -323,6 +324,7 @@ async def test_stalled_work_goes_to_the_operator_and_is_asked_again_when_back(se
 
     orch, _ = make(settings, cfg_dir, [])
     gw, hub = gateway(orch), orch.channel
+    hub.connect("cc_main", A, "/w/main", mode="push", notify=False)  # the main: it only routes
     claude, _, _ = hub.pull(A, None, "/w/k05", 0, "claude_code")
     codex, _, _ = hub.pull(A, None, "/w/k05", 0, "codex")
     m1, _ = hub.send(A, "fix the HUD", session_id=claude.session_id)
@@ -331,7 +333,7 @@ async def test_stalled_work_goes_to_the_operator_and_is_asked_again_when_back(se
 
     held = hub.stall(claude.session_id, "rate_limit · 429 Too Many Requests")
     assert {m["message_id"] for m in held} == {m1["message_id"], m2["message_id"]}
-    assert not claude.deliverable and hub.session_for(A).session_id == codex.session_id
+    assert not claude.deliverable and hub.session_for(A).session_id != claude.session_id
     await asyncio.sleep(0)
     notes = [kw for _, kw, _ in gw.bot.sent if "bị kẹt" in kw.get("text", "")]
     assert (

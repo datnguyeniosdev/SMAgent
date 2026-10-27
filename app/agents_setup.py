@@ -58,8 +58,13 @@ title, else the folder name.
   `ask_agent(to=s#|project, request, session_id)`; the answer arrives through `get_messages`
   (`meta.kind: "answer"`), `get_ask` shows it too. The operator
   steps in on Telegram if nobody answers.
+- **Long work**: answer a request once, with the result (an early "working on it" reply marks it done
+  and the session may be closed as idle). For work over ~15 minutes call
+  `still_working(session_id, note)` every 15 minutes; otherwise 60 minutes without an answer counts as
+  stuck and an idle-looking child is closed after 30 minutes.
 - **Main session**: if a request's text says you are the main session, do not do it: call
-  `dispatch(message_id, lane, brief, session_id)`; same lane → its child session in order, a new lane
+  `dispatch(message_id, lane, brief, session_id)` and stop (the main only routes: no long work, no
+  subagents, so it is never busy when work arrives); same lane → its child session in order, a new lane
   → a new child session in its own copy of the project. A child commits on its `agw/` branch before
   answering (no approval needed for that) and merges or pushes nothing
   without approval.

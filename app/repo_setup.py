@@ -111,13 +111,22 @@ time, the operator decides on Telegram (resend, another session, open it, answer
 Requests from other agents arrive with `meta.kind: "request"`: do them and answer with `reply_message`;
 the answer goes back to that agent, not to Telegram.
 
-**Main session and child sessions.** Requests sent to the project go to its 👑 main session. If a
-request's text says you are the main session, do not do it: call `dispatch(message_id, lane, brief,
-session_id)` (lane = the task type: ui, build, art, bugfix-login). The same lane goes to its child
-session in order; a new lane opens a new child session in its own copy of the project and branch. If
-you are a 🧭 child (opened in `.agw-children`), work on your `agw/` branch, commit your work there
-before you answer (that commit needs no approval), answer with `reply_message` as usual,
-and merge nothing without the operator's approval.
+**Long work: say you are still on it.** A request you took counts as in progress until you answer it
+with `reply_message`. Answer once, with the result: an early "working on it" answer marks it done, and
+the gateway may then close your session as idle while you still work. If the work takes more than ~15
+minutes, call `still_working(session_id, note)` every 15 minutes (note: one line of where you are);
+without it a request unanswered for 60 minutes is treated as stuck, and a child session that looks
+idle for 30 minutes is closed.
+
+**Main session and child sessions.** Every request that reaches the project's 👑 main session through
+the gateway (for the project, or addressed to it) says you are the main session: do not do it, call
+`dispatch(message_id, lane, brief, session_id)` (lane = the task type: ui, build, art, bugfix-login)
+and stop. The main only routes, so it is never busy when work arrives: no long work, no subagents, no
+waiting in a main turn. The same lane goes to its child session in order; a new lane opens a new child
+session in its own copy of the project (and branch, in a git repo). If you are a 🧭 child (opened in
+`.agw-children`), work on your `agw/` branch, commit your work there before you answer (that commit
+needs no approval; a copy without git has no branch: say which files you changed), answer with
+`reply_message` as usual, and merge nothing without the operator's approval.
 
 **`UIUX review`.** When the user (here or on Telegram) says "UIUX review", send the UI to the
 UIUXAgent project for review: `ask_agent(to="UIUXAgent", request, session_id=<yours>)`. The request

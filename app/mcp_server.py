@@ -700,6 +700,17 @@ def build_mcp_server(svc) -> MCPServer:
             raise GatewayToolError(str(e)) from e
 
     @tool
+    async def still_working(session_id: str, note: str = "") -> dict[str, Any]:
+        """Long work (more than ~15 minutes): call this every 15 minutes until you answer, with a
+        one-line note of where you are. Without it, a request unanswered for 60 minutes is treated
+        as stuck and an idle-looking child session is closed after 30 minutes. Do not answer
+        early as if done: answer once, with the result."""
+        try:
+            return svc.channel.still_working(session_id, note)
+        except KeyError as e:
+            raise GatewayToolError(f"unknown session {session_id}: call get_messages first") from e
+
+    @tool
     async def get_ask(ask_id: str) -> dict[str, Any]:
         """State of an ask: queued | delivered | escalated (the operator is deciding) | answered (with
         the answer) | cancelled."""
@@ -758,6 +769,7 @@ TOOL_NAMES = [
     "list_agents",
     "ask_agent",
     "dispatch",
+    "still_working",
     "get_ask",
     "review_project",
     "get_review",
