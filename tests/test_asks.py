@@ -163,8 +163,8 @@ async def test_no_escalation_right_after_a_restart(settings, cfg_dir, monkeypatc
 
 
 async def test_two_busy_agents_asking_each_other_reach_the_operator(settings, cfg_dir):
-    """A waits for B and B waits for A, both busy with their own job: no deadlock, each ask goes to
-    the operator once its deadline passes."""
+    """A waits for B and B waits for A, both busy with their own job: no deadlock. Live sessions are
+    given until the hard cap (a long QA pass is not stuck), then each ask goes to the operator."""
     orch, _ = make(settings, cfg_dir, [])
     orch.asks.started -= timedelta(hours=1)  # past the restart grace
     gateway(orch)
@@ -177,9 +177,14 @@ async def test_two_busy_agents_asking_each_other_reach_the_operator(settings, cf
     ab = orch.asks.create(B, "need your atlas", from_session=a.session_id, wait_s=60)
     ba = orch.asks.create(A, "need your palette", from_session=b.session_id, wait_s=60)
     assert await orch.asks.check() == []  # before the deadline: waiting is fine
-    for ask in (ab, ba):
+    for ask in (ab, ba):  # past the deadline, but both sessions are live: still working on it
         rec = orch.asks.get(ask["ask_id"])
         rec["deadline"] = (asks_mod.now() - timedelta(seconds=1)).isoformat()
+        orch.asks._save(rec)
+    assert await orch.asks.check() == []
+    for ask in (ab, ba):  # the hard cap since delivery: the operator decides
+        rec = orch.asks.get(ask["ask_id"])
+        rec["sent_at"] = (asks_mod.now() - asks_mod.HARD_CAP - timedelta(seconds=1)).isoformat()
         orch.asks._save(rec)
     assert sorted(await orch.asks.check()) == sorted([ab["ask_id"], ba["ask_id"]])
     assert {orch.asks.get(x["ask_id"])["state"] for x in (ab, ba)} == {"escalated"}

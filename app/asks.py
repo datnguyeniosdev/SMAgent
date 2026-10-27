@@ -5,7 +5,9 @@ request, labelled as coming from A. B answers with reply_message; the answer goe
 as an "answer" message (and to get_ask). Nothing of this is posted to Telegram unless it goes wrong.
 
 The watchdog (every 30 s) escalates to the operator when B cannot take the request (no open, enabled,
-unblocked session) for UNREACHABLE, or has not answered by the deadline. The escalation shows B's state
+unblocked session) for UNREACHABLE, or has not answered by the deadline. A B whose session is still
+live is working on it (a QA pass or a build takes longer than any deadline): it is only escalated when
+its session goes silent, or after HARD_CAP from delivery. The escalation shows B's state
 and offers: resend, send to another session, open B's project, answer it myself, cancel.
 
 States: queued (no session can take it yet) | delivered (B has it) | escalated | answered | cancelled.
@@ -24,6 +26,7 @@ log = logging.getLogger(__name__)
 UNREACHABLE = timedelta(minutes=2)  # nobody can take it this long -> ask the operator
 RETRY = timedelta(minutes=5)  # a failed escalation is sent again after this
 DEFAULT_WAIT_S = 600
+HARD_CAP = timedelta(minutes=60)  # B's session is live but no answer this long after delivery
 OPEN_STATES = ["queued", "delivered", "escalated"]
 
 
@@ -207,7 +210,8 @@ class AskService:
         late = now() > datetime.fromisoformat(a["deadline"])
         target = hub.sessions.get(a.get("delivered_to") or "")
         if a["state"] == "delivered" and target is not None and target.deliverable:
-            if not late:
+            sent = datetime.fromisoformat(a.get("sent_at") or a["deadline"])
+            if not late or now() - sent < HARD_CAP:  # its session is live: B is still on it
                 return None
             busy = [
                 m
