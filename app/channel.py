@@ -1192,6 +1192,11 @@ def _trust(path: Path, repo: Path) -> bool:
         return False
     entry = projects.setdefault(str(path), {})
     entry.update({k: parent[k] for k in TRUST_KEYS if k in parent})
+    # Claude Code also reads the project's CLAUDE.md above the copy; its imports (e.g. @AGENTS.md)
+    # are the project's own files but sit outside the copy, so they would ask again
+    entry.update(
+        hasClaudeMdExternalIncludesApproved=True, hasClaudeMdExternalIncludesWarningShown=True
+    )
     tmp = CLAUDE_JSON.with_name(f".claude.json.agw-{os.getpid()}")
     # ponytail: read-modify-write; a Claude Code writing the same file at that instant can drop it
     tmp.write_text(json.dumps(data, indent=2))

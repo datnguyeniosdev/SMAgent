@@ -692,9 +692,11 @@ async def test_main_session_routes_lanes_to_children_in_worktrees(
     assert r["new_session"] and r["branch"].startswith("agw/ui-") and len(opened) == 1
     path, r_branch = Path(r["path"]), r["branch"]
     trusted = json.loads(claude_json.read_text())["projects"][str(path)]
-    assert trusted == {
-        "hasTrustDialogAccepted": True
-    }  # trusted like the project, nothing else copied
+    assert trusted == {  # trusted like the project (its own imports too), nothing else copied
+        "hasTrustDialogAccepted": True,
+        "hasClaudeMdExternalIncludesApproved": True,
+        "hasClaudeMdExternalIncludesWarningShown": True,
+    }
     # a copy-on-write clone inside the project (APFS), else a git worktree next to it
     assert path.parent in (repo / ".agw-children", tmp_path / ".agw-worktrees" / "game")
     assert (path / ".mcp.json").exists() and (path / "README.md").exists()
