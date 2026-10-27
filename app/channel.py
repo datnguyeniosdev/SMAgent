@@ -991,15 +991,16 @@ class ChannelHub:
         ]  # fmt: skip
 
     def _expire(self) -> None:
-        """Delivered but unanswered past LEASE (the session lost it or died): back to the inbox,
-        or after MAX_DELIVERIES expired with a note to the operator instead of lingering silently."""
+        """Delivered but unanswered past LEASE (the session lost it or died): back to the inbox, or
+        after MAX_DELIVERIES to the operator as stuck (never dropped: the agent may still be on it)."""
         # runs on pull rounds, connects and the gateway's 30 s watchdog (app/main.py)
         cutoff, projects = now() - LEASE, set()
         for msg in self.svc.store.list("channel_msg", states=["delivered"]):
             at = msg.get("delivered_at")
             holder = self.sessions.get(msg.get("session_id") or "")
             if at is None:  # delivered before leases existed: too old to hand out again, expire it
-                msg["deliveries"] = MAX_DELIVERIES
+                self._set(msg, "expired")
+                continue
             elif datetime.fromisoformat(at) > cutoff:
                 continue
             elif holder is not None and holder.mode == "push":
@@ -1020,9 +1021,16 @@ class ChannelHub:
                 )
                 continue
             msg["deliveries"] = msg.get("deliveries", 1) + 1
-            if msg["deliveries"] > MAX_DELIVERIES:
-                self._set(msg, "expired")
-                self._tell_expired(msg)
+            if (
+                msg["deliveries"] > MAX_DELIVERIES
+            ):  # never dropped: the operator decides (move/wait/cancel)
+                mins = int(LEASE.total_seconds() // 60)
+                self._stall(
+                    [msg],
+                    msg.get("session_id") or "",
+                    f"no answer after {MAX_DELIVERIES} leases of {mins} min",
+                )
+                continue
             elif holder is not None:  # still connected: only its own session gets it again
                 msg["pinned"] = True
                 self._enqueue(holder, msg)
@@ -1035,20 +1043,6 @@ class ChannelHub:
             self._flush_pending(project)
         self._untaken()
         self._never_started()
-
-    def _tell_expired(self, msg: dict) -> None:
-        rec = self.svc.store.get("channel_session", msg.get("session_id", "")) or {}
-        task = self.svc.tasks.get(rec.get("task_id", ""))
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        if task is not None:
-            html = (f"⌛ m{msg.get('num')} was never answered after {MAX_DELIVERIES} deliveries; "
-                    "dropped. Send it again if it is still needed.")  # fmt: skip
-            loop.create_task(self.svc._notify(task, html, "info"))
-
-    # ---- stuck work: the agent failed (rate limit, API error) or went silent ----
 
     def stall(self, session_id: str, reason: str) -> list[dict]:
         """The session's agent stopped (StopFailure hook, Cursor error, lease over): its unanswered and

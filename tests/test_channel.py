@@ -300,20 +300,22 @@ async def test_list_ids_and_send_by_id(settings, cfg_dir):
     orch, _ = make(settings, cfg_dir, [])
     gw = gateway(orch)
     hub = orch.channel
-    a = hub.connect("cc_a", PROJECT, "/w/MiniGame2048")
-    b, _, _ = hub.pull("Coinlets: Stack & Merge (TCN)", None, "/w/tini-coin")
+    a = hub.connect("cc_a", PROJECT, "/w/k05-toss-mallow-p0")
+    b, _, _ = hub.pull("Coinlets: Stack & Merge (TCN)", None, "/w/k09-coin-sort-fun")
     assert (a.num, b.num) == (1, 2) and hub.projects() == [
         (1, PROJECT),
         (2, "Coinlets: Stack & Merge (TCN)"),
     ]
-    a = hub.connect("cc_a", PROJECT, "/w/MiniGame2048")  # a reconnect (new stream) keeps its id
+    a = hub.connect(
+        "cc_a", PROJECT, "/w/k05-toss-mallow-p0"
+    )  # a reconnect (new stream) keeps its id
     assert a.num == 1
     assert hub.find("s2") is b and hub.resolve_project("p2") == "Coinlets: Stack & Merge (TCN)"
     assert hub.find("s9") is None and hub.resolve_project("p9") is None
 
     text = gw._list_text()
     assert (
-        "<b>s1</b> · ⌨️ <b>ClaudeCode(CLI)-2048Shooter</b> · 👑 main · 🟢 on · ⚡ push · MiniGame2048"
+        "<b>s1</b> · ⌨️ <b>ClaudeCode(CLI)-2048Shooter</b> · 👑 main · 🟢 on · ⚡ push · k05-toss-mallow-p0"
         in text
     )
     assert (
@@ -347,7 +349,9 @@ async def test_list_ids_and_send_by_id(settings, cfg_dir):
     hub.disconnect(b)  # s2's waiter stopped: /send s2 waits for it instead of "unknown session"
     await gw.on_send(*msg("s2 plan the characters"))
     assert "queued" in answers[-1] and "Unknown" not in answers[-1]
-    b2, got, _ = hub.pull("Coinlets: Stack & Merge (TCN)", None, "/w/tini-coin", 1)  # it reconnects
+    b2, got, _ = hub.pull(
+        "Coinlets: Stack & Merge (TCN)", None, "/w/k09-coin-sort-fun", 1
+    )  # it reconnects
     assert b2.num == 2 and "plan the characters" in got[0]["text"]
 
 
@@ -1191,3 +1195,35 @@ async def test_a_project_without_git_still_gets_children_so_its_main_only_routes
     assert got[0]["message_id"] == m["message_id"]
     rep = await hub.reply(child.session_id, "Dạ, xong; sửa plan.md ạ", m["message_id"])
     assert rep is not None and hub.in_progress(main.session_id) == []
+
+
+async def test_a_request_unanswered_for_two_leases_goes_to_the_operator_not_dropped(
+    settings, cfg_dir
+):
+    """Seen in prod: a QA child still auditing hit its second lease; the request would have been
+    dropped as "never answered". Now it goes to the operator as stuck."""
+    from datetime import timedelta
+
+    from app.channel import LEASE
+    from app.models import now
+    from tests.test_config_gateway import make
+
+    orch, _ = make(settings, cfg_dir, [])
+    hub = orch.channel
+    hub.connect("cc_main", PROJECT, "/w/main", mode="push", notify=False)
+    qa, _, _ = hub.pull(PROJECT, None, "/w/qa", 0, "claude_code")
+    ask = orch.asks.create(PROJECT, "audit the game", from_session="cc_main")
+    m, _ = hub.send(
+        PROJECT,
+        "audit",
+        session_id=qa.session_id,
+        extra={"ask_id": ask["ask_id"], "kind": "request"},
+    )
+    for lease in (1, 2):
+        _, got, _ = hub.pull(PROJECT, qa.session_id)
+        rec = orch.store.get("channel_msg", m["message_id"])
+        rec["delivered_at"] = (now() - LEASE - timedelta(minutes=1)).isoformat()
+        orch.store.put("channel_msg", m["message_id"], rec, state="delivered")
+        hub._expire()
+    got = orch.store.get("channel_msg", m["message_id"])
+    assert got["state"] == "stalled" and "2 leases" in got["stall_reason"]
