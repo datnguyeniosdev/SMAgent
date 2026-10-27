@@ -586,6 +586,20 @@ def cmd_hook_prompt(args) -> int:
     return 0
 
 
+def cmd_cursor_hook(args) -> int:
+    """Cursor hooks (sessionStart, stop): event JSON on stdin, reply JSON on stdout (app/cursor_hooks.py)."""
+    from app.config import ENV_PORTS
+    from app.cursor_hooks import hook
+
+    try:
+        event = json.loads(sys.stdin.read() or "{}")
+    except ValueError:
+        print("{}")
+        return 0
+    print(json.dumps(hook(event, ENV_PORTS["prod"])))
+    return 0
+
+
 def cmd_codex_hook(args) -> int:
     """Codex SessionStart/SessionEnd hook: record this folder's desktop thread for the gateway's push."""
     from app.codex_relay import hook
@@ -820,6 +834,7 @@ def main(argv: list[str] | None = None) -> int:
     sp.set_defaults(fn=cmd_hook_session_start)
     sub.add_parser("hook-prompt").set_defaults(fn=cmd_hook_prompt)  # UserPromptSubmit
     sub.add_parser("codex-hook").set_defaults(fn=cmd_codex_hook)  # Codex SessionStart/End
+    sub.add_parser("cursor-hook").set_defaults(fn=cmd_cursor_hook)  # Cursor sessionStart/stop
     sp = sub.add_parser("wait")  # pull loop run in the background (app/waiter.py)
     sp.add_argument("--project", default="")  # default: the folder's project (README)
     sp.add_argument("--cwd", default=".")

@@ -55,6 +55,12 @@ def test_each_agent_gets_its_documented_shape_and_removal_restores(home):
     assert agy["mcpServers"]["agent-gateway"] == {"serverUrl": URL}  # not url/httpUrl
     cur = json.loads((home / ".cursor/mcp.json").read_text())
     assert cur["mcpServers"]["agent-gateway"] == {"url": URL}
+    hooks = json.loads((home / ".cursor/hooks.json").read_text())
+    assert hooks["version"] == 1 and "cursor-hook" in hooks["hooks"]["sessionStart"][0]["command"]
+    assert (
+        hooks["hooks"]["stop"][0]["loop_limit"] is None
+        and hooks["hooks"]["stop"][0]["timeout"] == 3600
+    )
     gem = (home / ".gemini/GEMINI.md").read_text()
     assert (
         gem.startswith("my own notes") and gem.count(ag.START) == 1 and 'agent="antigravity"' in gem
@@ -89,11 +95,12 @@ def test_names_and_cli(home, capsys):
         ag.resolve("notepad")
     assert main(["setup", "--agents", "cursor,opencode"]) == 0
     out = capsys.readouterr().out
-    assert "--print-rules" in out and "opencode: MCP in" in out
+    assert "hooks in" in out and "opencode: MCP in" in out
     main(["setup", "--agents", "cursor", "--print-rules"])
     assert 'agent="cursor"' in capsys.readouterr().out
     main(["setup", "--agents", "cursor,opencode", "--remove"])
     assert not ag.configured("cursor") and not ag.configured("opencode")
+    assert "cursor-hook" not in (home / ".cursor/hooks.json").read_text()  # our hooks removed
 
 
 def test_token_header_names_the_variable_never_the_secret(home):

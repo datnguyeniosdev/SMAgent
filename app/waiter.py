@@ -41,13 +41,15 @@ def wake_text(project: str, cwd: str, client: str, sid: str, message_id: str,
 
     prompt = loop_prompt(project, client, agent).replace("this folder", f"'{cwd}'")
     prompt = prompt.replace("reusing the session_id it returned before", f"session_id '{sid}'")
-    again = (  # detached, it outlives the turn; running it again just replaces it
-        "The waiter keeps running by itself. If you are unsure it still runs, run "
-        f"`{command(project, cwd, client, agent)}` again (it returns at once and replaces the old one)."
-        if agent == "antigravity"
-        else "When you have answered, start this waiter again with the Bash tool, run_in_background "
-        f"true: `{command(project, cwd, client)}`."
-    )
+    if agent == "antigravity":  # detached, it outlives the turn; running it again just replaces it
+        again = ("The waiter keeps running by itself. If you are unsure it still runs, run "
+                 f"`{command(project, cwd, client, agent)}` again (it returns at once and replaces "
+                 "the old one).")  # fmt: skip
+    elif agent == "cursor":  # Cursor's stop hook waits again after this turn
+        again = "After you answer, the gateway wakes this conversation again by itself."
+    else:
+        again = ("When you have answered, start this waiter again with the Bash tool, run_in_background "
+                 f"true: `{command(project, cwd, client)}`.")  # fmt: skip
     return (
         f"agent-gateway has work for '{project}' (message {message_id}). {prompt} {again} If the "
         "get_messages tool is missing or fails, tell the user in one line that the agent-gateway MCP "

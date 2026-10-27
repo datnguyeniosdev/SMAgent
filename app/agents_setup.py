@@ -106,7 +106,7 @@ def paths(agent: str) -> dict[str, Path | None]:
             "mcp": h / ".gemini/config/mcp_config.json",
             "rules": h / ".gemini/GEMINI.md",
         },
-        "cursor": {"mcp": h / ".cursor/mcp.json", "rules": None},
+        "cursor": {"mcp": h / ".cursor/mcp.json", "rules": None, "hooks": h / ".cursor/hooks.json"},
     }[agent]
 
 
@@ -143,6 +143,26 @@ def codex_hooks(path: Path, install: bool) -> None:
             groups.append({"hooks": [{"type": "command", "command": cmd}]})
         if groups:
             hooks[event] = groups
+        else:
+            hooks.pop(event, None)
+    _write_json(path, data)
+
+
+def cursor_hooks(path: Path, install: bool) -> None:
+    """sessionStart (gateway rules into each conversation) and stop (waits for Telegram work, then
+    Cursor continues with it) -> `agw cursor-hook`. Other hooks stay."""
+    cmd = f"{shlex.quote(str(Path(sys.executable).parent / 'agw'))} cursor-hook"
+    data = _json(path)
+    data.setdefault("version", 1)
+    hooks = data.setdefault("hooks", {})
+    mine = {"sessionStart": {"command": cmd, "timeout": 10},
+            "stop": {"command": cmd, "timeout": 3600, "loop_limit": None}}  # fmt: skip
+    for event, entry in mine.items():
+        rest = [h for h in hooks.get(event, []) if "cursor-hook" not in h.get("command", "")]
+        if install:
+            rest.append(entry)
+        if rest:
+            hooks[event] = rest
         else:
             hooks.pop(event, None)
     _write_json(path, data)
@@ -298,8 +318,9 @@ def install(agent: str, url: str = "http://127.0.0.1:8000/mcp", token: bool | No
             skills += (f", desktop relay hook in {p['hooks']} (approve it once when Codex asks to "
                        "review the new hook)")  # fmt: skip
         return f"{agent}: MCP in {mcp}, instructions in {rules}{skills}; restart {agent}"
-    return (f"{agent}: MCP in {mcp}; Cursor keeps global rules in its UI: paste the text from "
-            "`agw setup --agents cursor --print-rules` into Cursor > Settings > Rules; restart Cursor")  # fmt: skip
+    cursor_hooks(p["hooks"], install=True)
+    return (f"{agent}: MCP in {mcp}; hooks in {p['hooks']} (sessionStart gives each conversation the "
+            "gateway rules, stop picks up Telegram work); restart Cursor")  # fmt: skip
 
 
 def remove(agent: str) -> str:
@@ -319,7 +340,7 @@ def remove(agent: str) -> str:
     if p.get("skills"):
         unlink_skills(p["skills"])
     if p.get("hooks") and p["hooks"].exists():
-        codex_hooks(p["hooks"], install=False)
+        (cursor_hooks if agent == "cursor" else codex_hooks)(p["hooks"], install=False)
     return f"{agent}: gateway entries removed"
 
 
