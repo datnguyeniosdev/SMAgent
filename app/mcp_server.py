@@ -292,8 +292,8 @@ def build_mcp_server(svc) -> MCPServer:
         labels; pass your session_id so the answer arrives through get_messages (kind "answer"), no
         polling; get_human_response(id) shows it too. secure=true for release, deploy, commit/push/merge
         and git pull: on Telegram it is approved only with the operator's passcode (answer "✅ Duyệt (đã
-        xác minh passcode)"); "❌ Từ chối" refuses; a 🔒 locked answer means 3 wrong passcodes: it is
-        not approved, ask the operator to confirm in your session. An approval in your session works too."""
+        xác minh passcode)"); "❌ Từ chối" refuses; a ❌ cancelled answer means 3 wrong passcodes: it is
+        not approved, drop that step. An approval in your session works too."""
         try:
             hi = await svc.collab.request_human_input(
                 question, task_id, options or [], ttl_s, project, session_id, secure

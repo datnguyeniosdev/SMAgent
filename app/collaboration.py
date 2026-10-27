@@ -79,7 +79,7 @@ class HumanInput(BaseModel):
     options: list[str] = []
     project: str | None = None
     session_id: str | None = None  # who asked: the answer is pushed there too
-    status: Literal["pending", "answered", "expired", "locked"] = "pending"
+    status: Literal["pending", "answered", "expired", "locked", "cancelled"] = "pending"
     response: str | None = None
     responder: str | None = None
     created_at: datetime = Field(default_factory=now)
@@ -89,7 +89,7 @@ class HumanInput(BaseModel):
     secure: bool = (
         False  # release/deploy/commit/pull: approved from Telegram only with the passcode
     )
-    attempts: int = 0  # wrong passcodes so far (3: locked, confirm on the machine)
+    attempts: int = 0  # wrong passcodes so far (3: cancelled, never approved)
 
 
 class Handoff(BaseModel):
@@ -799,11 +799,11 @@ class CollaborationService:
             if hi.options
             else "Reply to this message to answer"
         )
-        if hi.secure:  # approving needs the passcode; the buttons can only refuse
+        if hi.secure:  # approving needs the passcode, sent in a private chat with the bot
             body = "🔐 " + body
             reply = (
-                "Xác nhận quan trọng: anh trả lời tin này bằng passcode để duyệt (tin sẽ bị xoá ngay), "
-                "hoặc bấm ❌ Từ chối. Sai 3 lần: phải xác nhận trực tiếp trên máy"
+                "Xác nhận quan trọng: bấm ✅ Duyệt rồi gửi passcode cho bot trong chat riêng (tin bị xoá "
+                "ngay), hoặc bấm ❌ Từ chối. Sai 3 lần: yêu cầu bị huỷ"
                 if self.svc.s.telegram_confirm_passcode
                 else "Xác nhận quan trọng: chưa cài passcode (TELEGRAM_CONFIRM_PASSCODE trong .env), "
                 "nên chỉ duyệt được trực tiếp trên máy; ở đây anh chỉ có thể ❌ Từ chối"
@@ -862,7 +862,7 @@ class CollaborationService:
 
         hi = self.get_human_input(request_id)
         if hi.status != "pending":
-            return hi  # answered on Telegram first, expired or locked: nothing to close
+            return hi  # answered on Telegram first, expired or cancelled: nothing to close
         hi.status, hi.responder, hi.answered_at = "answered", "session", now()
         hi.response = f"(trả lời trong session) {answer.strip()[:300]}"
         self.store.put("human_input", hi.request_id, hi, task_id=hi.task_id, state=hi.status)
@@ -878,8 +878,8 @@ class CollaborationService:
         return hi
 
     def check_passcode(self, request_id: str, text: str, responder: str) -> str:
-        """A reply to a secure question: approved | wrong (tries left in the text) | locked |
-        no_passcode. The passcode itself is never stored or logged."""
+        """The passcode for a secure question: approved | wrong (tries left in the text) | cancelled
+        (3rd wrong try: never approved) | no_passcode. The passcode itself is never stored or logged."""
         import hmac
 
         hi = self.get_human_input(request_id)
@@ -899,13 +899,12 @@ class CollaborationService:
         if hi.attempts < 3:
             self.store.put("human_input", hi.request_id, hi, task_id=hi.task_id, state=hi.status)
             return f"wrong: {3 - hi.attempts} left"
-        hi.status, hi.responder, hi.answered_at = "locked", responder, now()
-        hi.response = "🔒 Locked after 3 wrong passcodes on Telegram"
+        hi.status, hi.responder, hi.answered_at = "cancelled", responder, now()
+        hi.response = "❌ Cancelled: 3 wrong passcodes on Telegram"
         self.store.put("human_input", hi.request_id, hi, task_id=hi.task_id, state=hi.status)
-        self._tell_asker(hi, f"🔒 Your question {request_id} is locked: 3 wrong passcodes on Telegram. "
-                         "It is NOT approved. Ask the operator to confirm directly on the machine (in your "
-                         "session), and do not go ahead until they do.")  # fmt: skip
-        return "locked"
+        self._tell_asker(hi, f"❌ Your question {request_id} is cancelled: 3 wrong passcodes on Telegram. "
+                         "It is NOT approved: do not do it. Drop that step and report it as not done.")  # fmt: skip
+        return "cancelled"
 
     def _tell_asker(self, hi: HumanInput, text: str, responder: str = "gateway") -> None:
         """Push to the agent session that asked (it is woken), else its project's session."""

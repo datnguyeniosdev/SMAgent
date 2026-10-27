@@ -67,7 +67,7 @@ title, else the folder name.
   user answers in your session first, call `close_question(request_id, answer)` at once.
   Release, deploy, commit, push, merge and git pull: add `secure=true` (Telegram approval needs the
   operator's passcode); go ahead only on "✅ Duyệt (đã xác minh passcode)" or an approval in your
-  session; a 🔒 locked answer is not approval.
+  session; a ❌ cancelled answer is not approval.
 - **Game art**: call `generate_art(prompt, purpose, requirements, width, height, project, session_id)`.
   The operator approves and reviews each image; the decision arrives through `get_messages` as an
   "answer" message (no polling). Use `get_task_result(...).images` only once accepted. 3D models:

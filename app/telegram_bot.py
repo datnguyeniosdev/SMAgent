@@ -50,6 +50,8 @@ WEBHOOK_PATH = "/telegram/webhook"
 ALLOWED_UPDATES = ["message", "callback_query"]
 PHOTO_LIMIT = 10 * 1024 * 1024
 ALBUM_WAIT_S = 1.5
+PASSCODE_WAIT_S = 300  # a ✅ on a secure question waits this long for the passcode (private chat)
+APPROVE_PASSCODE = "✅ Duyệt (nhập passcode)"
 
 HELP = (
     """<b>Agent Gateway</b> · <code>/menu</code> for buttons
@@ -239,6 +241,9 @@ class TelegramGateway:
         self._key_wait: dict[
             int, tuple[str, float]
         ] = {}  # user -> (variable, deadline): /keys entry
+        self._pass_wait: dict[
+            int, tuple[str, float]
+        ] = {}  # user -> (request_id, deadline): passcode
         self._deploy_wait: dict[str, tuple] = {}  # token -> (repo, env, branch, dry_run): /deploy
         self._deploy_tasks: set[asyncio.Task] = set()  # running deploys (kept referenced)
         self._album_timers: dict[str, asyncio.Task] = {}
@@ -432,8 +437,9 @@ class TelegramGateway:
     def _register(self) -> None:
         r = self.router
         r.message(F.chat.type == "private", F.text)(
-            self.on_key_value
+            self.on_passcode_value
         )  # first: secrets never reach others
+        r.message(F.chat.type == "private", F.text)(self.on_key_value)
         r.message(Command("start", "menu"))(self.on_menu)
         r.message(Command("keys"))(self.on_keys)
         r.message(Command("providers"))(self.on_providers)
@@ -833,37 +839,93 @@ class TelegramGateway:
             [InlineKeyboardButton(text=o[:60], callback_data=f"h:{hi.request_id}:{i}")]
             for i, o in enumerate(hi.options)
         ]) if hi.options else None  # fmt: skip
-        if getattr(
-            hi, "secure", False
-        ):  # approving needs the passcode reply; a button only refuses
+        if getattr(hi, "secure", False):  # approving asks for the passcode in a private chat
             from app.collaboration import REFUSE
 
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=REFUSE, callback_data=f"h:{hi.request_id}:r")]])  # fmt: skip
+            rows = [[InlineKeyboardButton(text=REFUSE, callback_data=f"h:{hi.request_id}:r")]]
+            if self.s.telegram_confirm_passcode:
+                rows.insert(0, [InlineKeyboardButton(text=APPROVE_PASSCODE,
+                                                     callback_data=f"h:{hi.request_id}:p")])  # fmt: skip
+            kb = InlineKeyboardMarkup(inline_keyboard=rows)
         msg = await self._send(self.bot.send_message, chat_id=self.s.telegram_control_chat_id, text=html,
                                reply_markup=kb)  # fmt: skip
         if msg is None:
             raise RuntimeError("Telegram did not take the question")
 
-    async def _passcode_reply(self, m: TgMessage, request_id: str, text: str, user_id: str) -> None:
-        """A reply to a secure question: deleted at once (the passcode must not stay in the chat),
-        then checked. Never echoed, logged or stored."""
+    async def _ask_passcode(self, q: CallbackQuery, request_id: str) -> None:
+        """✅ on a secure question: the passcode is asked for in a private chat (like /keys), never in
+        the group."""
+        hi = self.orch.collab.get_human_input(request_id)
+        if hi.status != "pending":
+            await q.answer(f"{request_id} is {hi.status}.", show_alert=True)
+            return
+        user = q.from_user.id
+        self._key_wait.pop(user, None)  # one secret entry at a time
+        self._pass_wait[user] = (request_id, time.monotonic() + PASSCODE_WAIT_S)
+        await q.answer()
+        ask = (f"🔐 Gửi passcode để duyệt <code>{request_id}</code> trong 5 phút (em xoá tin ngay). "
+               f"Còn {3 - hi.attempts} lần thử; /cancel để thôi.")  # fmt: skip
+        dm = await self._send(self.bot.send_message, chat_id=user, text=ask)
+        if q.message:
+            me = await self.bot.get_me()
+            where = (
+                "Em đã nhắn riêng anh" if dm is not None else f"Anh mở https://t.me/{me.username}"
+            )
+            await q.message.answer(f"🔐 {where}: gửi passcode cho <code>{request_id}</code> ở chat "
+                                   "riêng với bot, đừng gửi trong nhóm ạ.")  # fmt: skip
+
+    async def on_passcode_value(self, m: TgMessage):
+        """Private chat: the passcode for a pending ✅. Deleted at once, never logged, echoed or stored.
+        3 wrong tries cancel the question: it is never approved."""
+        user = m.from_user.id if m.from_user else None
+        wait = self._pass_wait.get(user) if user is not None else None
+        text = (m.text or "").strip()
+        if wait is None or user not in self.s.telegram_allowed_user_ids:
+            raise SkipHandler()
+        request_id, deadline = wait
+        if text.startswith("/"):
+            if text.split()[0].lower() == "/cancel":
+                self._pass_wait.pop(user, None)
+                await m.answer(f"Đã thôi: <code>{request_id}</code> vẫn chờ duyệt.")
+                return
+            raise SkipHandler()
+        try:
+            await m.delete()
+            gone = ""
+        except TelegramBadRequest:
+            gone = "\n⚠️ Em không xoá được tin passcode: anh tự xoá giúp em ạ."
+        if time.monotonic() > deadline:
+            self._pass_wait.pop(user, None)
+            await m.answer(f"Quá 5 phút cho <code>{request_id}</code>: bấm ✅ lại ạ." + gone)
+            return
+        from app.collaboration import CollaborationError
+
+        try:
+            result = self.orch.collab.check_passcode(request_id, text, str(user))
+        except CollaborationError as e:
+            self._pass_wait.pop(user, None)
+            await m.answer(f"❌ {escape(str(e))}" + gone)
+            return
+        if not result.startswith("wrong"):
+            self._pass_wait.pop(user, None)
+        note = {
+            "approved": f"✅ Đã duyệt <code>{request_id}</code> (passcode đúng).",
+            "cancelled": f"🚫 Sai passcode 3 lần: <code>{request_id}</code> đã bị huỷ, không chuyển cho agent.",
+            "no_passcode": "Chưa cài passcode (TELEGRAM_CONFIRM_PASSCODE): anh xác nhận trực tiếp trên máy ạ.",
+        }.get(result) or f"❌ Sai passcode, còn {result.split()[-2]} lần thử: gửi lại ạ."  # fmt: skip
+        await m.answer(note + gone)
+        if result in ("approved", "cancelled"):
+            await self.send_control(note)
+
+    async def _passcode_in_group(self, m: TgMessage, request_id: str) -> None:
+        """A reply in the group to a secure question: deleted (it may be the passcode), never checked."""
         try:
             await m.delete()
         except Exception as e:  # noqa: BLE001 - the bot may lack the right to delete: say so
-            log.warning("could not delete a passcode reply: %s", type(e).__name__)
-            await self._send(self.bot.send_message, chat_id=m.chat.id,
-                             text="⚠️ Em không xoá được tin passcode (bot cần quyền xoá tin); anh hãy tự xoá "
-                                  "và đổi passcode ạ.")  # fmt: skip
-        result = self.orch.collab.check_passcode(request_id, text, user_id)
-        note = {
-            "approved": f"✅ Đã duyệt <code>{request_id}</code> (passcode đúng).",
-            "locked": f"🔒 Sai passcode 3 lần: <code>{request_id}</code> bị khoá, anh xác nhận trực tiếp trên máy ạ.",
-            "no_passcode": "Chưa cài passcode (TELEGRAM_CONFIRM_PASSCODE): anh xác nhận trực tiếp trên máy ạ.",
-        }.get(
-            result
-        ) or f"❌ Sai passcode cho <code>{request_id}</code>, còn {result.split()[-2]} lần thử."
-        await self._send(self.bot.send_message, chat_id=m.chat.id, text=note)
+            log.warning("could not delete a reply to a secure question: %s", type(e).__name__)
+        await self._send(self.bot.send_message, chat_id=m.chat.id,
+                         text=f"🔐 <code>{request_id}</code>: bấm ✅ Duyệt rồi gửi passcode trong chat riêng "
+                              "với bot. Nếu vừa gõ passcode ở nhóm, anh nên đổi passcode ạ.")  # fmt: skip
 
     async def on_question_button(self, q: CallbackQuery):
         chat_id = q.message.chat.id if q.message else None
@@ -877,6 +939,9 @@ class TelegramGateway:
             from app.collaboration import REFUSE
 
             hi = self.orch.collab.get_human_input(request_id)
+            if idx == "p":
+                await self._ask_passcode(q, request_id)
+                return
             choice = REFUSE if idx == "r" else hi.options[int(idx)]
             hi = self.orch.collab.answer_human_input(request_id, choice, str(q.from_user.id))
         except (CollaborationError, IndexError, ValueError) as e:
@@ -2167,7 +2232,7 @@ class TelegramGateway:
 
             try:  # a reply to an agent's question is the answer
                 if self.orch.collab.get_human_input(ids["hin"]).secure:
-                    await self._passcode_reply(m, ids["hin"], text, str(user_id))
+                    await self._passcode_in_group(m, ids["hin"])
                     return
                 self.orch.collab.answer_human_input(ids["hin"], text, str(user_id), free=True)
                 await m.reply(f"✅ Answered <code>{ids['hin']}</code>.")

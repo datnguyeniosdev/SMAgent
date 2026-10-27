@@ -6,6 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from mcp.client import Client
 
 from app import deploys
@@ -195,48 +196,90 @@ async def test_unverified_reports_hide_the_gateway_label(settings, cfg_dir):
     assert "từ codex (pull session)" in sent and "gateway:" not in sent
 
 
-async def test_secure_confirmation_needs_the_passcode_and_locks_after_3_tries(settings, cfg_dir):
+async def test_secure_confirmation_asks_the_passcode_in_private_and_cancels_after_3_tries(
+    settings, cfg_dir
+):
     from types import SimpleNamespace
 
+    from aiogram.dispatcher.event.bases import SkipHandler
     from pydantic import SecretStr
 
     from app.collaboration import REFUSE, CollaborationError
+    from app.telegram_bot import APPROVE_PASSCODE
 
     orch, _ = make(settings, cfg_dir, [])
     gw = gateway(orch)
     orch.s.telegram_confirm_passcode = SecretStr("Pa55-kode!")
+    user = next(iter(orch.s.telegram_allowed_user_ids))
     s, _, _ = orch.channel.pull(A, None)
     ask = lambda: orch.collab.request_human_input(  # noqa: E731
         "Release lên prod?", options=["Release", "Huỷ"], project=A, session_id=s.session_id,
         secure=True)  # fmt: skip
+
+    async def get_me():
+        return SimpleNamespace(username="agw_bot")
+
+    gw.bot.get_me = get_me
+    group, private, deleted = [], [], []
+
+    async def noop(*a, **k):
+        return None
+
+    async def group_answer(text, **k):
+        group.append(text)
+
+    def press(hi, idx):
+        return SimpleNamespace(
+            data=f"h:{hi.request_id}:{idx}", from_user=SimpleNamespace(id=user), answer=noop,
+            message=SimpleNamespace(chat=SimpleNamespace(id=orch.s.telegram_control_chat_id),
+                                    answer=group_answer),
+        )  # fmt: skip
+
+    def dm(text):
+        async def answer(t, **k):
+            private.append(t)
+
+        async def delete():
+            deleted.append(text)
+
+        return SimpleNamespace(text=text, from_user=SimpleNamespace(id=user), answer=answer,
+                               delete=delete, chat=SimpleNamespace(id=user, type="private"))  # fmt: skip
+
     hi = await ask()
     kb = gw.bot.sent[-1][1]["reply_markup"].inline_keyboard
-    assert [b.text for row in kb for b in row] == [REFUSE]  # no approving button
-    assert "passcode" in gw.bot.sent[-1][1]["text"]
+    assert [b.text for row in kb for b in row] == [APPROVE_PASSCODE, REFUSE]
+    assert "chat riêng" in gw.bot.sent[-1][1]["text"]
     try:  # a typed "Release" or the option itself does not approve it
         orch.collab.answer_human_input(hi.request_id, "Release", "1", free=True)
         raise AssertionError("approved without the passcode")
     except CollaborationError as e:
         assert e.code == "passcode_required"
+    with pytest.raises(SkipHandler):  # no ✅ pressed: private text is not a passcode
+        await gw.on_passcode_value(dm("Pa55-kode!"))
 
-    deleted = []
-
-    async def delete():
-        deleted.append(True)
-
-    m = SimpleNamespace(chat=SimpleNamespace(id=1), delete=delete)
-    await gw._passcode_reply(m, hi.request_id, "Pa55-kode!", "1")  # right passcode, message deleted
-    assert deleted and "Đã duyệt" in gw.bot.sent[-1][1]["text"]
+    await gw.on_question_button(press(hi, "p"))  # ✅: the passcode is asked for in private
+    assert any(
+        kw.get("chat_id") == user and hi.request_id in kw["text"] for _, kw, _ in gw.bot.sent
+    )
+    assert "chat riêng" in group[-1]
+    await gw.on_passcode_value(dm("Pa55-kode!"))
+    assert deleted == ["Pa55-kode!"] and "Đã duyệt" in private[-1]
+    assert orch.collab.get_human_input(hi.request_id).status == "answered"
     _, msgs, _ = orch.channel.pull(A, s.session_id, limit=5)
     assert "đã xác minh passcode" in msgs[-1]["text"]
 
     hi = await ask()
-    assert orch.collab.check_passcode(hi.request_id, "0000", "1") == "wrong: 2 left"
-    assert orch.collab.check_passcode(hi.request_id, "1111", "1") == "wrong: 1 left"
-    assert orch.collab.check_passcode(hi.request_id, "9999", "1") == "locked"
-    assert orch.collab.get_human_input(hi.request_id).status == "locked"
+    await gw.on_question_button(press(hi, "p"))
+    for code, left in (("0000", "2"), ("1111", "1")):
+        await gw.on_passcode_value(dm(code))
+        assert f"còn {left} lần" in private[-1]
+    await gw.on_passcode_value(dm("9999"))  # 3rd wrong try: cancelled, not approved
+    assert "đã bị huỷ" in private[-1]
+    assert orch.collab.get_human_input(hi.request_id).status == "cancelled"
     _, msgs, _ = orch.channel.pull(A, s.session_id, limit=5)
-    assert "locked" in msgs[-1]["text"] and "NOT approved" in msgs[-1]["text"]
+    assert "cancelled" in msgs[-1]["text"] and "NOT approved" in msgs[-1]["text"]
+    with pytest.raises(SkipHandler):  # the wait ended with it
+        await gw.on_passcode_value(dm("Pa55-kode!"))
 
     hi = await ask()
     orch.collab.answer_human_input(hi.request_id, REFUSE, "1")  # refusing needs no passcode

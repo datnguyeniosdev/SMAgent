@@ -81,8 +81,8 @@ anything destructive.
   away, so the Telegram copy is closed (no reminder, no second answer).
 - **Important confirmations** (release, deploy, commit, push, merge, git pull): add `secure=true`. On
   Telegram the operator approves them only with a passcode, so go ahead only on the answer "✅ Duyệt
-  (đã xác minh passcode)" or an approval in this session. "❌ Từ chối" refuses; a 🔒 locked answer
-  (3 wrong passcodes) is NOT approval: ask the operator to confirm here, in this session.
+  (đã xác minh passcode)" or an approval in this session. "❌ Từ chối" refuses; a ❌ cancelled answer
+  (3 wrong passcodes) is NOT approval: drop that step.
 - Use `delegate_task` (with `project` and your `session_id`) only when the user asks to hand work to
   the gateway. Its end arrives as an "answer" message; `get_task_result` has the details.
 {deploy}
