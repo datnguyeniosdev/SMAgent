@@ -90,12 +90,13 @@ def envelope(
         out.append(f"<b>{escape(truncate(title, 120))}</b>")
     if body:
         out += ["", body]
-    ids = [f"dự án <b>{escape(project)}</b>"]
+    ids = [f"dự án <b>{escape(project)}</b>"] if project else []
     if session:
         ids.append(f"phiên <code>{escape(session)}</code>")
     if ref:
         ids.append(f"mã <code>{escape(ref)}</code>")
-    out += ["", "🆔 " + " · ".join(ids)]
+    if ids:
+        out += ["", "🆔 " + " · ".join(ids)]
     if reply:
         out.append(f"↩️ {reply}")
     return "\n".join(out)

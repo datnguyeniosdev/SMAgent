@@ -1323,8 +1323,10 @@ async def test_send_retries_a_network_timeout_instead_of_losing_the_message(
         await gw._send(down, chat_id=1, text="report")
 
 
-def test_hashtag_without_a_project_does_not_crash():
-    """Seen in prod: the Telegram copy of an ask from a session with no project raised TypeError."""
-    from app.formatting import hashtag
+def test_an_envelope_without_a_project_does_not_crash():
+    """Seen in prod: the Telegram copy of an ask (and its answer) from a session with no project crashed."""
+    from app.formatting import envelope, hashtag
 
     assert hashtag(None) == "#gateway" and hashtag("Glazed Gems (GMA)") == "#Glazed_Gems_GMA"
+    html = envelope("answer", "ok", project=None, title="Answer (ask_1)", ref="ask_1")
+    assert "#gateway" in html and "dự án" not in html and "ask_1" in html
