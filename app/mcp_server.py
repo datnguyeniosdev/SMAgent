@@ -684,6 +684,21 @@ def build_mcp_server(svc) -> MCPServer:
         return ask_view(a)
 
     @tool
+    async def dispatch(
+        message_id: str, lane: str, session_id: str, brief: str = "", to: str = ""
+    ) -> dict[str, Any]:
+        """Main session only: route a project request (one whose text says you are the main session)
+        instead of doing it. lane: the task type, short (ui, build, art, bugfix-login). The open child
+        session of that lane gets it after its current work (same lane: in order); a new lane opens a
+        new child session with your agent tool in its own git worktree and branch (in parallel).
+        to: s# to pick an open session instead. brief: what to do and what to report, standing alone.
+        The child answers the sender itself; you need not reply to the message."""
+        try:
+            return await svc.channel.dispatch(session_id, message_id, lane, brief, to)
+        except (ValueError, PermissionError) as e:
+            raise GatewayToolError(str(e)) from e
+
+    @tool
     async def get_ask(ask_id: str) -> dict[str, Any]:
         """State of an ask: queued | delivered | escalated (the operator is deciding) | answered (with
         the answer) | cancelled."""
@@ -741,6 +756,7 @@ TOOL_NAMES = [
     "generate_art",
     "list_agents",
     "ask_agent",
+    "dispatch",
     "get_ask",
     "review_project",
     "get_review",

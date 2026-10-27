@@ -446,7 +446,10 @@ def cmd_agent_loop(args) -> int:
 
     from app.config import ENV_PORTS, env_name
 
-    project = project_for(Path.cwd())
+    mcp = json.loads(Path(".mcp.json").read_text()) if Path(".mcp.json").exists() else {}
+    # a child worktree (dispatch) is outside the projects root: its .mcp.json names the project
+    local = mcp.get("mcpServers", {}).get(CHANNEL_NAME) or {}
+    project = project_for(Path.cwd()) or local.get("args", [None])[-1]
     prompt = loop_prompt(project, "cli", args.agent)
     query = urllib.parse.urlencode(
         {"project": project, "agent": args.agent, "cwd": str(Path.cwd())}

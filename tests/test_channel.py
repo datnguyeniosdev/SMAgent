@@ -84,7 +84,7 @@ async def test_push_into_live_session_and_reply_round_trip(tmp_path, monkeypatch
 
         first = await shim.read()  # the waiting message arrives as soon as the session connects
         assert first["method"] == "notifications/claude/channel"
-        assert first["params"]["content"] == "do the early thing"
+        assert first["params"]["content"].startswith("do the early thing")
         assert first["params"]["meta"]["message_id"] == early["message_id"]
         session = hub.session_for(PROJECT)
         assert session is not None
@@ -92,7 +92,7 @@ async def test_push_into_live_session_and_reply_round_trip(tmp_path, monkeypatch
         msg, target = hub.send(PROJECT, "fix the pause menu", sender="Darren")  # what /send does
         assert target is session
         pushed = await shim.read()
-        assert pushed["params"]["content"] == "fix the pause menu"
+        assert pushed["params"]["content"].startswith("fix the pause menu")
         assert pushed["params"]["meta"] == {"source": "telegram", "sender": "Darren", "project": PROJECT,
                                             "message_id": msg["message_id"],
                                             "session_id": session.session_id}  # fmt: skip
@@ -286,7 +286,9 @@ async def test_push_preferred_and_stale_pull_released(settings, cfg_dir):
     assert [m["message_id"] for m in orch.store.list("channel_msg", states=["pending"])] == [
         msg["message_id"]
     ]
-    hub.set_enabled(push, True)  # released work goes to the next session that can take it
+    hub.set_enabled(push, True)  # the main (pull) is gone: the operator chooses, nothing moves
+    assert push.queue.empty()
+    hub.set_main(push)  # /main s#
     assert push.queue.get_nowait()["message_id"] == msg["message_id"]
 
 
@@ -311,10 +313,11 @@ async def test_list_ids_and_send_by_id(settings, cfg_dir):
 
     text = gw._list_text()
     assert (
-        "<b>s1</b> · ⌨️ <b>ClaudeCode(CLI)-2048Shooter</b> · 🟢 on · ⚡ push · MiniGame2048" in text
+        "<b>s1</b> · ⌨️ <b>ClaudeCode(CLI)-2048Shooter</b> · 👑 main · 🟢 on · ⚡ push · MiniGame2048"
+        in text
     )
     assert (
-        "<b>s2</b> · ⌨️ <b>Agent(CLI)-Coinlets</b> · 🟢 on · 🔄 pull" in text
+        "<b>s2</b> · ⌨️ <b>Agent(CLI)-Coinlets</b> · 👑 main · 🟢 on · 🔄 pull" in text
         and "<b>p2</b> · Coinlets" in text
     )
 
@@ -330,8 +333,9 @@ async def test_list_ids_and_send_by_id(settings, cfg_dir):
 
     await gw.on_send(*msg("s2 run the tests"))  # exact session
     assert b.queue.get_nowait()["text"].endswith("run the tests") and "session s2" in answers[-1]
-    await gw.on_send(*msg("p1 fix the menu"))  # project -> its best session
-    assert a.queue.get_nowait()["text"].endswith("fix the menu")
+    await gw.on_send(*msg("p1 fix the menu"))  # project -> its main session, to route
+    text = a.queue.get_nowait()["text"]
+    assert "fix the menu" in text and "dispatch(" in text
     await gw.on_send(*msg("x9 hello"))
     assert "Unknown session or project" in answers[-1] and "SESSIONS" in answers[-1]
 
@@ -339,7 +343,7 @@ async def test_list_ids_and_send_by_id(settings, cfg_dir):
     await gw.on_send(*msg("s2 plan the characters"))
     assert "queued" in answers[-1] and "Unknown" not in answers[-1]
     b2, got, _ = hub.pull("Coinlets: Stack & Merge (TCN)", None, "/w/tini-coin", 1)  # it reconnects
-    assert b2.num == 2 and got[0]["text"].endswith("plan the characters")
+    assert b2.num == 2 and "plan the characters" in got[0]["text"]
 
 
 async def test_one_job_at_a_time_queue_and_cancel(settings, cfg_dir):
@@ -351,9 +355,9 @@ async def test_one_job_at_a_time_queue_and_cancel(settings, cfg_dir):
     gw = gateway(orch)
     hub = orch.channel
     s, _, _ = hub.pull(PROJECT, None)
-    m1, _ = hub.send(PROJECT, "first")
-    m2, _ = hub.send(PROJECT, "second")
-    m3, _ = hub.send(PROJECT, "third")
+    m1, _ = hub.send(PROJECT, "first", session_id=s.session_id)
+    m2, _ = hub.send(PROJECT, "second", session_id=s.session_id)
+    m3, _ = hub.send(PROJECT, "third", session_id=s.session_id)
     assert (m1["num"], m2["num"], m3["num"]) == (1, 2, 3)
 
     _, got, busy = hub.pull(PROJECT, s.session_id)
@@ -637,3 +641,104 @@ async def test_stale_pull_id_and_answers_stay_with_their_tool(settings, cfg_dir)
     assert target is None and codex.queue.empty()  # waits for Claude, not Codex
     s2, got, _ = hub.pull(p, stale, ok03, 5, "claude_code", "app")  # Claude is back
     assert [m["message_id"] for m in got] == [msg["message_id"]]
+
+
+async def test_main_session_routes_lanes_to_children_in_worktrees(
+    settings, cfg_dir, tmp_path, monkeypatch
+):
+    """docs/DISPATCH_DESIGN.md: project work -> the main session, which only routes; one child per
+    lane (same lane in order), a new lane opens a new child in its own git worktree."""
+    import subprocess
+    from datetime import timedelta
+
+    from app import projects
+    from app.channel import CHILD_IDLE
+    from tests.test_config_gateway import make
+
+    repo = tmp_path / "game"
+    repo.mkdir()
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", str(repo)]
+    subprocess.run([*git, "init", "-q"], check=True)
+    (repo / "README.md").write_text(f"# {PROJECT}\n")
+    subprocess.run([*git, "add", "."], check=True)
+    subprocess.run([*git, "commit", "-qm", "init"], check=True)
+    monkeypatch.setattr(projects, "projects_root", lambda: tmp_path)
+
+    orch, _ = make(settings, cfg_dir, [])
+    hub, opened, notes = orch.channel, [], []
+    hub.launch = lambda path, agent: opened.append((path, agent))
+    monkeypatch.setattr(hub, "_ops", notes.append)
+    main, _, _ = hub.pull(PROJECT, None, str(repo), 0, "claude_code", "app")
+    other, _, _ = hub.pull(PROJECT, None, "/w/other", 0, "codex", "cli")
+    assert hub.main_for(PROJECT) is main  # the first session (app before CLI) becomes the main
+
+    job, _ = hub.send(PROJECT, "own job", session_id=main.session_id)  # pinned: main works on it
+    hub.pull(PROJECT, main.session_id)
+    m1, t1 = hub.send(PROJECT, "fix the shop button")
+    assert t1 is main
+    _, got, busy = hub.pull(PROJECT, main.session_id)  # busy, but routing work gets through
+    assert [m["message_id"] for m in got] == [m1["message_id"]] and busy
+    assert "do not do it yourself" in got[0]["text"]
+
+    with pytest.raises(PermissionError):  # only the main routes
+        await hub.dispatch(other.session_id, m1["message_id"], "ui")
+    r = await hub.dispatch(main.session_id, f"m{m1['num']}", "UI", brief="fix it, report a shot")
+    assert r["new_session"] and r["branch"].startswith("agw/ui-") and len(opened) == 1
+    path = Path(r["path"])
+    assert path.parent == tmp_path / ".agw-worktrees" / "game" and (path / ".mcp.json").exists()
+    assert [m["message_id"] for m in hub.in_progress(main.session_id)] == [job["message_id"]]
+
+    child, _, _ = hub.pull(PROJECT, None, str(path), 0, "claude_code", "cli")  # the child connects
+    assert hub.child(child)["lane"] == "ui" and hub.main_for(PROJECT) is main
+    _, got, _ = hub.pull(PROJECT, child.session_id)
+    assert got[0]["message_id"] == m1["message_id"]
+    assert got[0]["text"].endswith("fix it, report a shot") and "do not do it" not in got[0]["text"]
+
+    m2, _ = hub.send(PROJECT, "and the coin icon")
+    hub.pull(PROJECT, main.session_id)
+    r = await hub.dispatch(
+        main.session_id, m2["message_id"], "ui"
+    )  # same lane: that child, in order
+    assert r == {"to": f"s{child.num}", "lane": "ui", "new_session": False} and len(opened) == 1
+    m3, _ = hub.send(PROJECT, "new level music")
+    hub.pull(PROJECT, main.session_id)
+    r = await hub.dispatch(main.session_id, m3["message_id"], "audio")  # other lane: in parallel
+    assert r["new_session"] and len(opened) == 2
+
+    await hub.reply(child.session_id, "Dạ, xong ạ", m1["message_id"])  # straight to the sender
+    _, got, _ = hub.pull(PROJECT, child.session_id)
+    assert got[0]["message_id"] == m2["message_id"]
+    await hub.reply(child.session_id, "Dạ, xong ạ", m2["message_id"])
+    child.last_work -= CHILD_IDLE + timedelta(minutes=1)
+    hub._prune()  # idle child: closed, branch kept
+    assert child.session_id not in hub.sessions and "kept for review" in notes[-1]
+
+
+async def test_answers_skip_the_line_and_an_offline_main_is_put_to_the_operator(
+    settings, cfg_dir, monkeypatch
+):
+    from tests.test_config_gateway import make
+
+    orch, _ = make(settings, cfg_dir, [])
+    hub, asked = orch.channel, []
+    monkeypatch.setattr(hub, "_notify", lambda name, *a, **k: asked.append((name, a)))
+    a, _, _ = hub.pull(PROJECT, None, "/w/a", 0, "claude_code")
+    job, _ = hub.send(PROJECT, "work", session_id=a.session_id)
+    later, _ = hub.send(PROJECT, "later", session_id=a.session_id)
+    hub.pull(PROJECT, a.session_id)
+    ans, _ = hub.send(PROJECT, "✅ Đồng ý", session_id=a.session_id, extra={"kind": "answer"})
+    _, got, busy = hub.pull(PROJECT, a.session_id)
+    assert [m["message_id"] for m in got] == [ans["message_id"]] and busy  # skipped the line
+    await hub.reply(a.session_id, "done", job["message_id"])
+    _, got, _ = hub.pull(PROJECT, a.session_id)
+    assert got[0]["message_id"] == later["message_id"]  # then its own work, in order
+
+    hub.disconnect(a)  # the main is gone
+    b, _, _ = hub.pull(PROJECT, None, "/w/b", 0, "codex")
+    m, target = hub.send(PROJECT, "project work")
+    m2, _ = hub.send(PROJECT, "more")
+    assert target is None and [n for n, _ in asked].count("send_main_offline") == 1  # asked once
+    hub.want_new_main(PROJECT)  # 🆕 on Telegram: the next session to connect becomes the main
+    c, _, _ = hub.pull(PROJECT, None, "/w/c", 0, "claude_code")
+    assert hub.main_for(PROJECT) is c and b.queue.empty()
+    assert [x["message_id"] for x in c.queue._queue] == [m["message_id"], m2["message_id"]]

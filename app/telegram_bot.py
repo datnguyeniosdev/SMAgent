@@ -66,6 +66,7 @@ HELP = (
 /open &lt;folder|p#&gt; [opencode|codex|antigravity] [new] — open an agent session (default Claude;
   /open alone: buttons)
 /close &lt;s#&gt; · /off &lt;s#&gt; · /on &lt;s#&gt; — close a session, or stop/resume giving it work
+/main &lt;s#&gt; — make it its project's 👑 main session: it routes project requests to 🧭 child sessions
 /agents — every agent: 🖥 app (desktop/IDE), ⌨️ CLI, ☁️ API, with on/off and close buttons
 Reply to any gateway message (text or photos) to give feedback or answer it.
 
@@ -138,13 +139,19 @@ def parse_feedback(text: str) -> tuple[str | None, str]:
 KIND_ICON = {"app": "🖥", "cli": "⌨️"}
 
 
-def session_line(s) -> str:
-    """One /live row: mode, state, project, id, folder."""
+def session_line(s, hub=None) -> str:
+    """One /live row: mode, state, project, id, folder; with the hub also 👑 main or 🧭 child lane."""
     mode = "⚡ push" if s.mode == "push" else "🔄 pull"
     who = f"{KIND_ICON[s.kind]} <b>{escape(s.title)}</b>"  # e.g. ClaudeCode(App)-Coinlets
     state = "🚫 blocked (org policy)" if s.blocked else ("🟢 on" if s.enabled else "⏸ off")
     folder = escape(s.cwd.rstrip("/").rsplit("/", 1)[-1]) if s.cwd else "-"
-    return (f"<b>s{s.num}</b> · {who} · {state} · {mode} · {folder}"
+    role = ""
+    if hub is not None:
+        if hub.main_for(s.project) is s:
+            role = " · 👑 main"
+        elif c := hub.child(s):
+            role = f" · 🧭 {escape(c['lane'])}"
+    return (f"<b>s{s.num}</b> · {who}{role} · {state} · {mode} · {folder}"
             f" · since {s.connected_at.astimezone():%H:%M} · <code>{escape(s.session_id)}</code>")  # fmt: skip
 
 
@@ -533,6 +540,7 @@ class TelegramGateway:
         r.message(Command("reviews"))(self.on_reviews)
         r.message(Command("open"))(self.on_open)
         r.message(Command("close"))(self.on_close)
+        r.message(Command("main"))(self.on_main)
         r.message(Command("cancel"))(self.on_cancel)
         r.message(Command("tools"))(self.on_tools)
         r.message(Command("tool"))(self.on_tool)
@@ -544,6 +552,7 @@ class TelegramGateway:
         r.callback_query(F.data.startswith("o:"))(self.on_open_button)
         r.callback_query(F.data.startswith("k:"))(self.on_ask_button)
         r.callback_query(F.data.startswith("st:"))(self.on_stalled_button)
+        r.callback_query(F.data.startswith("mn:"))(self.on_main_button)
         r.callback_query(F.data.startswith("h:"))(self.on_question_button)
         r.callback_query(F.data.startswith("rv:"))(self.on_review_button)
         r.callback_query(F.data.startswith("m:"))(self.on_menu_button)
@@ -744,7 +753,7 @@ class TelegramGateway:
         hub = self.orch.channel
         live = hub.live()
         lines = ["🖥 <b>SESSIONS</b>"]
-        lines += [session_line(x) for x in live] or [
+        lines += [session_line(x, self.orch.channel) for x in live] or [
             "none open · terminal: <code>agw session</code> (⚡ push) · any session: /loop + get_messages (🔄 pull)"
         ]
         lines += ["", "📁 <b>PROJECTS</b>"]
@@ -1236,6 +1245,78 @@ class TelegramGateway:
         what = await asyncio.to_thread(self.orch.channel.close, s)
         await m.answer(f"🔌 <b>s{s.num}</b> closed ({escape(s.project)}) · {escape(what)}")
 
+    async def on_main(self, m: TgMessage, command: CommandObject):
+        """/main <s#>: that session becomes its project's main (it routes the project's requests)."""
+        if not self._authorized_msg(m):
+            return
+        ref = (command.args or "").strip()
+        s = self.orch.channel.find(ref) if ref else None
+        if s is None or self.orch.channel.child(s):
+            await m.answer(
+                "Usage: /main &lt;s#&gt; (an open session that is not a 🧭 child; ids from /list)"
+            )
+            return
+        self.orch.channel.set_main(s)
+        await m.answer(f"👑 {session_line(s, self.orch.channel)}")
+
+    async def send_main_offline(self, project: str) -> None:
+        """The project's main session is gone and project work waits: wait, open a new main, or make
+        an open session the main."""
+        hub, Btn = self.orch.channel, InlineKeyboardButton  # noqa: N806
+        pnum = hub.project_num(project)
+        others = [x for x in hub.live() if x.deliverable and not hub.child(x)
+                  and channel_norm(x.project) == channel_norm(project)]  # fmt: skip
+        rows = [[Btn(text=f"👑 s{x.num} {x.title}"[:60], callback_data=f"mn:set:{pnum}:{x.num}")]
+                for x in others[:4]]  # fmt: skip
+        rows += [[Btn(text="🆕 Mở session chính mới", callback_data=f"mn:new:{pnum}")],
+                 [Btn(text="⏳ Chờ session chính", callback_data=f"mn:wait:{pnum}")]]  # fmt: skip
+        html = (f"👑 Session chính của <b>{escape(project)}</b> đang offline; yêu cầu gửi theo project "
+                "đang chờ nó điều hướng. Anh chọn giúp em ạ:")  # fmt: skip
+        await self._send(self.bot.send_message, chat_id=self.s.telegram_control_chat_id, text=html,
+                         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))  # fmt: skip
+
+    async def on_main_button(self, q: CallbackQuery):
+        chat_id = q.message.chat.id if q.message else None
+        if not self.authorized(q.from_user.id, chat_id):
+            await q.answer("Not authorized.", show_alert=True)
+            return
+        _, verb, pnum, *rest = q.data.split(":")
+        hub = self.orch.channel
+        project = next((name for num, name in hub.projects() if num == int(pnum)), None)
+        if project is None:
+            await q.answer("Không tìm thấy project ạ.", show_alert=True)
+            return
+        if verb == "wait":
+            await q.answer("Dạ, yêu cầu sẽ chờ session chính kết nối lại ạ.")
+            return
+        if verb == "set":
+            s = next((x for x in hub.live() if rest and x.num == int(rest[0])), None)
+            if s is None:
+                await q.answer("Session đó không còn mở ạ.", show_alert=True)
+                return
+            hub.set_main(s)
+            await q.answer()
+            if q.message:
+                await q.message.answer(f"👑 {session_line(s, hub)}")
+            return
+        from app.launcher import open_project
+
+        folder = hub.project_dir(project)
+        if folder is None:
+            await q.answer(
+                "Chưa biết thư mục của project; dùng /open &lt;folder&gt; ạ.", show_alert=True
+            )
+            return
+        rec = self.orch.store.get("channel_main", channel_norm(project)) or {}
+        agent = rec.get("agent") if rec.get("agent") not in (None, "", "claude_code") else ""
+        hub.want_new_main(project)
+        root = self.s.projects_root or Path(__file__).resolve().parents[2]
+        status, _ = await asyncio.to_thread(open_project, root, Path(folder).name, [], True,
+                                            self.s.mcp_require_token, None, agent)  # fmt: skip
+        await q.answer(
+            f"Đang mở session chính mới ({status}); yêu cầu chờ sẽ tới khi nó kết nối ạ."
+        )
+
     async def on_switch(self, m: TgMessage, command: CommandObject):
         """/on <session> or /off <session>: let a session take pushed/pulled work, or not."""
         if not self._authorized_msg(m):
@@ -1302,7 +1383,9 @@ class TelegramGateway:
             ("cli", "⌨️ <b>CLI</b> (terminal)"),
         ):
             mine = [x for x in live if x.kind == kind]
-            lines += ["", title] + ([session_line(x) for x in mine] or ["none open"])
+            lines += ["", title] + (
+                [session_line(x, self.orch.channel) for x in mine] or ["none open"]
+            )
             rows += [[Btn(text=f"{'⏸ Pause' if x.enabled else '▶️ Resume'} s{x.num}",
                           callback_data=f"y:{'off' if x.enabled else 'on'}:s{x.num}"),
                       Btn(text=f"✖ Close s{x.num}", callback_data=f"y:close:s{x.num}")] for x in mine]  # fmt: skip

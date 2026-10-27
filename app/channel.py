@@ -8,6 +8,11 @@ pull  any session (desktop app, VS Code, terminal): `/loop 1m` calls the MCP too
 
 Each session has an operator switch (/on, /off, persisted per session id). Messages go to an open,
 enabled, non-blocked session of the project (push preferred, newest first) and otherwise wait.
+Routing (docs/DISPATCH_DESIGN.md): work for a named session (/send s#, a reply to its report) stays
+in that session, one job after another. Project work goes to the project's main session, which only
+routes it with `dispatch`: to the child session of that lane (same lane: in order) or to a new child
+in its own git worktree (other lanes: in parallel). Answers to a session's own questions skip the
+line: they are what its current job waits for.
 Answers are published as reports of the session's record-only task, so a Telegram reply to one is
 routed back into the same session (see CollaborationService.submit_feedback).
 """
@@ -31,6 +36,9 @@ from app.models import new_id, now
 log = logging.getLogger(__name__)
 PULL_TTL = timedelta(minutes=5)  # a pull session is open while it polled this recently (/loop 1m)
 LEASE = timedelta(minutes=60)  # an unanswered handed-over message keeps its session busy this long
+CHILD_IDLE = timedelta(minutes=30)  # a child session with nothing to do this long is closed
+# a free session that leaves work untaken this long is not pulling
+QUEUE_WAIT = timedelta(minutes=10)
 MAX_DELIVERIES = 2  # an unanswered message is handed out again once after its lease, then expires
 # waiting, assigned to a session, in progress, held because its session failed (operator decides)
 OPEN_STATES = ("pending", "queued", "delivered", "stalled")
@@ -92,6 +100,7 @@ class LiveSession:
     closing: bool = False  # pull: /close asked its loop to stop at the next round
     client: str = ""  # "app" (desktop app / IDE) or "cli", as the session reports it
     stalled: str = ""  # why its agent stopped (rate limit, API error, no answer): no new work
+    last_work: datetime = field(default_factory=now)  # last message handed to it or answered
 
     @property
     def kind(self) -> str:
@@ -121,6 +130,10 @@ class ChannelHub:
         self._stopping: set[str] = (
             set()
         )  # closed pull sessions: tell their loop to stop if it polls again
+        self._main_asked: set[str] = set()  # projects whose offline main was put to the operator
+        from app.launcher import open_in_terminal
+
+        self.launch = open_in_terminal  # (folder, agent): opens a child session; tests replace it
         # session queues live in memory: what they held when the last process stopped waits again
         for msg in svc.store.list("channel_msg", states=["queued"]):
             self._set(msg, "pending")
@@ -163,6 +176,11 @@ class ChannelHub:
         self.project_num(project)
         self._save(s)
         self.sessions[session_id] = s
+        main = self.svc.store.get("channel_main", _norm(project)) or {}
+        if main.get("pending_new") and not self.child(s):  # the operator asked for a new main
+            self.set_main(s)
+        elif mode == "push":  # (a pull session is known once its agent is: see pull)
+            self.main_for(project)
         self._expire()
         self._flush_pending(project)
         self.svc.store.event("channel.connected", task_id=task.task_id, session=session_id,
@@ -195,6 +213,7 @@ class ChannelHub:
         self._flush_pending(s.project)
 
     def _prune(self) -> None:
+        self._close_idle_children()
         cutoff = now() - PULL_TTL
         for s in [s for s in self.sessions.values() if s.mode == "pull" and s.last_seen < cutoff]:
             if self.in_progress(s.session_id):  # still working on a message within its lease
@@ -268,7 +287,10 @@ class ChannelHub:
         return None
 
     def close(self, s: LiveSession) -> str:
-        """/close: push -> stop its Claude Code process; pull -> its loop stops at the next round."""
+        """/close: push -> stop its Claude Code process; pull -> its loop stops at the next round.
+        Closing the main lets the project's next session become the main."""
+        if self.main_for(s.project) is s:
+            self.svc.store.put("channel_main", _norm(s.project), {"project": s.project})
         self.svc.store.event("channel.close", task_id=s.task_id, session=s.session_id, mode=s.mode)
         if s.mode == "pull":  # gone from /list now; if its loop is still alive it is told to stop
             self._stopping.add(s.session_id)
@@ -370,15 +392,186 @@ class ChannelHub:
         for msg in sorted(waiting, key=lambda m: m.get("created_at", "")):  # oldest first
             if _norm(msg["project"]) != _norm(project):
                 continue
-            target = self.session_for(
-                project, exclude=msg.get("from_session"), agent=msg.get("for_agent")
-            )
+            target = self._route(msg, exclude=msg.get("from_session"))
             if target is not None:
-                target.queue.put_nowait(msg)
-                self._set(msg, "queued")
+                self._enqueue(target, msg)
                 self._assigned(msg, target)
                 if (msg.get("meta") or {}).get("source") == "telegram":
                     self._ops(f"📬 m{msg.get('num')} delivered to {self._label(target)}")
+
+    def _idle(self, s: LiveSession) -> bool:
+        return s.queue.empty() and not self.in_progress(s.session_id)
+
+    def _enqueue(self, s: LiveSession, msg: dict) -> None:
+        """Into a session's queue; an answer (its current job waits for it) or routing work for the
+        main session (a quick dispatch) goes first."""
+        msg["queued_at"] = now().isoformat()
+        s.queue.put_nowait(msg)
+        first = lambda m: m.get("kind") == "answer" or m.get("route")  # noqa: E731
+        if first(msg):  # behind earlier answers and routing work, before the rest
+            q = s.queue._queue  # ponytail: asyncio.Queue internals, like _next
+            q.pop()
+            q.insert(next((i for i, m in enumerate(q) if not first(m)), len(q)), msg)
+        self._set(msg, "queued")
+
+    def _take(self, s: LiveSession, msg: dict) -> None:
+        s.queue._queue.remove(msg)  # ponytail: asyncio.Queue internals
+
+    def _untaken(self) -> None:
+        """Work a free session leaves untaken for QUEUE_WAIT (its agent is not pulling) goes to the
+        operator as stuck, who moves, waits or cancels it."""
+        late = (now() - QUEUE_WAIT).isoformat()
+        for s in [x for x in self.sessions.values() if x.mode == "pull"]:
+            if self.in_progress(s.session_id):
+                continue
+            for msg in list(s.queue._queue):
+                if msg.get("kind") != "answer" and msg.get("queued_at", "") < late:
+                    self._take(s, msg)
+                    self._stall([msg], s.session_id,
+                                f"not picked up within {int(QUEUE_WAIT.total_seconds() // 60)} min")  # fmt: skip
+
+    # ---- main session and children: docs/DISPATCH_DESIGN.md ----
+
+    def child(self, s: LiveSession) -> dict | None:
+        """The child record of a session opened by dispatch (lane, branch, worktree), else None."""
+        return self.svc.store.get("channel_child", s.cwd) if s.cwd else None
+
+    def set_main(self, s: LiveSession, flush: bool = True) -> None:
+        """/main s#, or the first session of a project: it routes the project's work."""
+        self.svc.store.put("channel_main", _norm(s.project), {"project": s.project,
+                           "session_id": s.session_id, "cwd": s.cwd, "agent": s.agent})  # fmt: skip
+        self._main_asked.discard(_norm(s.project))
+        if flush:  # not from main_for, which may run inside a flush (a message queued twice)
+            self._flush_pending(s.project)
+
+    def want_new_main(self, project: str) -> None:
+        """The operator opens a new main: the next session of the project to connect becomes it."""
+        rec = self.svc.store.get("channel_main", _norm(project)) or {"project": project}
+        self.svc.store.put("channel_main", _norm(project), {**rec, "pending_new": True})
+
+    def main_for(self, project: str) -> LiveSession | None:
+        """The project's main session when it can take work. With none chosen yet, the oldest open
+        session (app before CLI, never a child) becomes it."""
+        rec = self.svc.store.get("channel_main", _norm(project))
+        mine = [x for x in self.sessions.values()
+                if _norm(x.project) == _norm(project) and x.deliverable and not self.child(x)]  # fmt: skip
+        if rec is None or not (rec.get("session_id") or rec.get("pending_new")):
+            if not mine:
+                return None
+            first = min(mine, key=lambda x: (x.kind != "app", x.connected_at))
+            self.set_main(first, flush=False)
+            return first
+        same = [x for x in mine if x.session_id == rec.get("session_id")
+                or (x.cwd and x.cwd == rec.get("cwd") and x.agent == rec.get("agent"))]  # fmt: skip
+        return max(same, key=lambda x: x.session_id == rec.get("session_id"), default=None)
+
+    def _route(self, msg: dict, exclude: str | None = None) -> LiveSession | None:
+        """Where a message for no live session goes: an answer to its tool's session, work for a
+        child being opened to that child, project work to the main session (with a routing note).
+        The main offline: the operator is asked once whether to wait or open a new one."""
+        project = msg["project"]
+        if msg.get("kind") == "answer":
+            return self.session_for(project, exclude=exclude, agent=msg.get("for_agent"))
+        if msg.get("wait_cwd"):
+            kids = [x for x in self.sessions.values() if x.cwd == msg["wait_cwd"] and x.deliverable]
+            return max(kids, key=lambda x: x.mode == "push", default=None)
+        main = self.main_for(project)
+        if main is not None and main.session_id == exclude:  # the main asked its own project
+            return self.session_for(project, exclude=exclude)
+        if main is None:
+            rec = self.svc.store.get("channel_main", _norm(project)) or {}
+            if rec.get("session_id") and _norm(project) not in self._main_asked:
+                self._main_asked.add(_norm(project))
+                self._notify("send_main_offline", project)
+            return None
+        if not msg.get("orig_text"):
+            msg["orig_text"], msg["route"] = msg["text"], True
+            msg["text"] += (
+                f"\n\n(You are the main session of {project}: route this, do not do it yourself. "
+                f"Call dispatch(message_id='{msg['message_id']}', lane=<task type, e.g. ui, build, "
+                "art, bugfix-login>, brief=<what to do and what to report>, session_id=<yours>). "
+                "The same lane goes to its child session in order; a new lane opens a new child "
+                "session in its own git worktree. The child answers the sender itself.)"
+            )
+        return main
+
+    async def dispatch(
+        self, session_id: str, ref: str, lane: str, brief: str = "", to: str = ""
+    ) -> dict:
+        """The main session hands a message to a child: `to` (s#), else the open child of that
+        lane, else a new child opened in a new git worktree with the main's agent tool."""
+        main = self.sessions.get(session_id)
+        msg = next((m for st in ("delivered", "queued") for m in self.svc.store.list("channel_msg", states=[st])
+                    if ref in (m["message_id"], f"m{m.get('num')}")), None)  # fmt: skip
+        if main is None:
+            raise ValueError(f"unknown session {session_id}: call get_messages first")
+        if msg is None:
+            raise ValueError(f"no open message {ref}")
+        if self.main_for(msg["project"]) is not main:
+            raise PermissionError(f"only the main session of {msg['project']} routes its work")
+        if msg.get("session_id") not in (None, session_id):
+            raise PermissionError(f"m{msg.get('num')} is not yours to route")
+        lane = re.sub(r"[^a-z0-9-]+", "-", lane.lower()).strip("-")[:30] or "task"
+        kids = [x for x in self.sessions.values() if x is not main and x.deliverable
+                and _norm(x.project) == _norm(msg["project"])]  # fmt: skip
+        if to:
+            target = next((x for x in kids if f"s{x.num}" == to.lower()), None)
+            if target is None:
+                raise ValueError(f"{to} is not an open session of {msg['project']}")
+        else:
+            same = [x for x in kids if (self.child(x) or {}).get("lane") == lane]
+            target = max(same, key=lambda x: x.mode == "push", default=None)
+        for x in self.sessions.values():  # still queued in the main: taken out first
+            for m in [m for m in x.queue._queue if m["message_id"] == msg["message_id"]]:
+                self._take(x, m)
+        for k in ("session_id", "delivered_at", "wait_cwd"):
+            msg.pop(k, None)
+        note = f"\n\nBrief from the main session (lane {lane}): {brief}" if brief else ""
+        msg.pop("route", None)
+        msg.update(text=msg.pop("orig_text", msg["text"]) + note, lane=lane, pinned=True,
+                   dispatched_by=session_id)  # fmt: skip
+        if target is not None:
+            self._enqueue(target, msg)
+            self._assigned(msg, target)
+            self._ops(f"🧭 m{msg.get('num')} → {self._label(target)} ({lane})")
+            return {"to": f"s{target.num}", "lane": lane, "new_session": False}
+        self._set(msg, "pending")  # held for the new child (wait_cwd below)
+        try:
+            repo = await asyncio.to_thread(_toplevel, main.cwd)
+            path, branch = await asyncio.to_thread(_worktree, repo, lane)
+        except ValueError:  # no git repo, worktree failed: it stays with the main
+            msg.update(session_id=session_id, delivered_at=now().isoformat())
+            self._set(msg, "delivered")
+            raise
+        from app.config import ENV_PORTS, env_name
+        from app.repo_setup import setup_repo
+
+        url = f"http://127.0.0.1:{ENV_PORTS[env_name()]}/mcp"
+        await asyncio.to_thread(setup_repo, path, url, msg["project"], False)
+        self.svc.store.put("channel_child", str(path), {"project": msg["project"], "lane": lane,
+                           "branch": branch, "repo": str(repo), "parent": session_id,
+                           "agent": main.agent or "claude_code", "created_at": now().isoformat()})  # fmt: skip
+        msg["wait_cwd"] = str(path)
+        self._set(msg, "pending")
+        agent = main.agent if main.agent not in ("", "claude_code") else ""
+        await asyncio.to_thread(self.launch, path, agent)
+        self._ops(f"🧭 m{msg.get('num')} → new child ({lane}) on branch <code>{branch}</code>")
+        return {"to": "new", "lane": lane, "new_session": True, "branch": branch, "path": str(path)}
+
+    def _close_idle_children(self) -> None:
+        """A child with no work for CHILD_IDLE is closed; its branch and worktree stay for review."""
+        cutoff = now() - CHILD_IDLE
+        for s in list(self.sessions.values()):
+            c = self.child(s)
+            if c is None or s.last_work > cutoff or not self._idle(s):
+                continue
+            if s.mode == "pull" and any(x is not s and x.cwd == s.cwd and x.mode == "push"
+                                        for x in self.sessions.values()):  # fmt: skip
+                continue  # the push twin is closed, which takes this one along
+            self.close(s)
+            self._ops(f"🧹 {self._label(s)} ({c['lane']}) closed after "
+                      f"{int(CHILD_IDLE.total_seconds() // 60)} min idle; branch "
+                      f"<code>{c['branch']}</code> kept for review")  # fmt: skip
 
     def _assigned(self, msg: dict, target: LiveSession) -> None:
         """An agent's request changed hands: its ask follows (watchdog, attribution)."""
@@ -405,11 +598,10 @@ class ChannelHub:
         for_agent = (extra or {}).get("kind") == "answer" and (
             target.agent if target else rec.get("agent")
         )
-        if target is None or not target.deliverable or target.session_id == exclude:
-            target = self.session_for(project, exclude=exclude, agent=for_agent or None)
+        pinned = target is not None and target.deliverable and target.session_id != exclude
         msg = {
             "message_id": new_id("chm"),
-            "project": target.project if target else project,
+            "project": target.project if pinned else (self.resolve_project(project) or project),
             "text": text,
             "meta": {"source": source, "sender": sender, "project": project},
             "created_at": now().isoformat(),
@@ -421,9 +613,13 @@ class ChannelHub:
         if msg.get("kind"):
             msg["meta"]["kind"] = msg["kind"]
         msg["num"] = self._number("channel_mnum", msg["message_id"])  # short id m<num>
-        self._set(msg, "queued" if target else "pending")
+        msg["pinned"] = pinned  # for that session: it waits its turn there
+        if not pinned:
+            target = self._route(msg, exclude=exclude)
         if target:
-            target.queue.put_nowait(msg)
+            self._enqueue(target, msg)
+        else:
+            self._set(msg, "pending")
         self.svc.store.event("channel.message", message_id=msg["message_id"],
                              delivered_to=target and target.session_id)  # fmt: skip
         return msg, target
@@ -435,6 +631,8 @@ class ChannelHub:
     def delivered(self, msg: dict, session_id: str) -> None:
         """Handed to a session: in progress (the session is busy) until reply_message answers it."""
         msg["session_id"], msg["delivered_at"] = session_id, now().isoformat()
+        if s := self.sessions.get(session_id):
+            s.last_work = now()
         # an answer to the session's own ask is information, not a job: it never keeps it busy
         self._set(msg, "done" if msg.get("kind") == "answer" else "delivered")
 
@@ -472,8 +670,8 @@ class ChannelHub:
                 self._set(msg, "expired")
                 self._tell_expired(msg)
             elif holder is not None:  # still connected: only its own session gets it again
-                holder.queue.put_nowait(msg)
-                self._set(msg, "queued")
+                msg["pinned"] = True
+                self._enqueue(holder, msg)
             else:
                 self._set(msg, "pending")
                 projects.add(msg["project"])
@@ -481,6 +679,7 @@ class ChannelHub:
                                  session=msg.get("session_id"), state=msg["state"])  # fmt: skip
         for project in projects:
             self._flush_pending(project)
+        self._untaken()
 
     def _tell_expired(self, msg: dict) -> None:
         rec = self.svc.store.get("channel_session", msg.get("session_id", "")) or {}
@@ -560,13 +759,13 @@ class ChannelHub:
             "delivered_at",
         ):
             msg.pop(k, None)
-        if target is None or not target.deliverable:
+        msg["pinned"] = target is not None and target.deliverable
+        if not msg["pinned"]:
             target = self.session_for(msg["project"], exclude=msg.get("from_session"))
         if target is None:
             self._set(msg, "pending")  # the next session of the project to connect takes it
             return msg, None
-        target.queue.put_nowait(msg)
-        self._set(msg, "queued")
+        self._enqueue(target, msg)
         self._assigned(msg, target)
         return msg, target
 
@@ -637,7 +836,8 @@ class ChannelHub:
         client: str = "",
     ):  # fmt: skip
         """get_messages: register/refresh a pull session and hand over what is queued for it.
-        Nothing new while it still has an unanswered message (no duplicate or parallel jobs).
+        Nothing new while it still has an unanswered message (no duplicate or parallel jobs), except
+        answers to its own questions, which that message is waiting for.
         Returns (session, new messages, messages still in progress)."""
         sid = session_id or self.pull_id(project, agent, cwd)
         if (
@@ -667,6 +867,7 @@ class ChannelHub:
         s.client = client if client in ("app", "cli") else s.client
         if new:  # announced once the agent and its kind are known
             self._ops(f"🔌 {self._label(s)} connected")
+            self.main_for(s.project)  # the project's first session becomes its main
             if agent:  # waiting work for this tool (an answer to its question) can go now
                 self._flush_pending(s.project)
         if agent or client:
@@ -675,8 +876,13 @@ class ChannelHub:
             self.active(s.session_id)
         self._expire()
         busy = self.in_progress(s.session_id)
+        if s.enabled and not busy and s.queue.empty():
+            self._flush_pending(s.project)  # free again: the project's waiting work
         out = []
-        while s.enabled and not busy and not s.queue.empty() and len(out) < limit:
+        while s.enabled and not s.queue.empty() and len(out) < limit:
+            head = s.queue._queue[0]
+            if busy and head.get("kind") != "answer" and not head.get("route"):
+                break  # one job at a time; answers and routing work still get through
             msg = s.queue.get_nowait()
             self.delivered(msg, s.session_id)
             out.append(msg)
@@ -724,7 +930,7 @@ class ChannelHub:
         if rec is None:
             raise KeyError(session_id)
         if s := self.sessions.get(session_id):
-            s.last_seen = now()
+            s.last_seen = s.last_work = now()
         note = f"\n\n(answer to {message_id})" if message_id else ""
         msg = self.svc.store.get("channel_msg", message_id) if message_id else None
         if (
@@ -745,15 +951,39 @@ class ChannelHub:
                 msg, "done"
             )  # an agent's request: the answer goes back to that agent, not to Telegram
             by = f"s{s.num} ({s.project})" if s else rec["project"]
+            self._flush_pending(rec["project"])
             return {"ask": self.svc.asks.answer(msg["ask_id"], text, by=by)}
         if msg is not None:
             if msg.get("state") == "cancelled":
                 note = f"\n\n(answer to {message_id}, which was cancelled on Telegram)"
             else:
                 self._set(msg, "done")  # frees the session for its next message
+                self._flush_pending(rec["project"])
         body = text.strip() + note
         mode = rec.get("mode", "push")
         agent = (s.agent if s else "") or rec.get("agent") or "claude_code"
         return await self.svc.collab.submit_report(
             rec["task_id"], body, f"{agent} ({mode} session)", images=images
         )
+
+
+def _toplevel(cwd: str) -> Path:
+    out = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"], capture_output=True,
+                         text=True, timeout=30)  # fmt: skip
+    if out.returncode != 0:
+        raise ValueError(f"the main session's folder is not a git repo: {cwd}")
+    return Path(out.stdout.strip())
+
+
+def _worktree(repo: Path, lane: str) -> tuple[Path, str]:
+    """A new worktree and branch for a child: <projects root>/.agw-worktrees/<repo>/<lane>-<id>."""
+    from app.projects import projects_root
+
+    name = f"{lane}-{new_id('w')[-4:]}"
+    path, branch = projects_root() / ".agw-worktrees" / repo.name / name, f"agw/{name}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    out = subprocess.run(["git", "-C", str(repo), "worktree", "add", "-b", branch, str(path)],
+                         capture_output=True, text=True, timeout=900)  # fmt: skip
+    if out.returncode != 0:
+        raise ValueError(f"git worktree add failed: {(out.stderr or out.stdout).strip()[:300]}")
+    return path, branch

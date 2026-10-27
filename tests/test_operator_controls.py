@@ -89,9 +89,9 @@ async def test_idle_session_is_preferred_and_fresh_runs_see_their_work(settings,
     busy, _, _ = hub.pull(A, None, cwd="/w/a", agent="claude_code")
     hub.send(A, "first", session_id=busy.session_id)
     hub.pull(A, busy.session_id)  # now in progress
-    idle, _, _ = hub.pull(A, None, cwd="/w/b", agent="claude_code")
-    _, target = hub.send(A, "second")
-    assert target.session_id == idle.session_id
+    hub.pull(A, None, cwd="/w/b", agent="claude_code")
+    route, target = hub.send(A, "second")  # project work: to the main (the first), to route
+    assert target.session_id == busy.session_id
 
     s, out, in_progress = hub.pull(
         A, None, "/w/a", 0, "claude_code"
