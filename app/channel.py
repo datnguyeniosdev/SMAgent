@@ -483,7 +483,7 @@ class ChannelHub:
     def set_main(self, s: LiveSession, flush: bool = True) -> None:
         """/main s#, or the first session of a project: it routes the project's work."""
         self.svc.store.put("channel_main", _norm(s.project), {"project": s.project,
-                           "session_id": s.session_id, "cwd": s.cwd, "agent": s.agent})  # fmt: skip
+                           "session_id": s.session_id, "cwd": s.cwd, "agent": s.agent, "kind": s.kind})  # fmt: skip
         self._main_asked.discard(_norm(s.project))
         if flush:  # not from main_for, which may run inside a flush (a message queued twice)
             self._flush_pending(s.project)
@@ -512,9 +512,12 @@ class ChannelHub:
                                               x.connected_at))  # fmt: skip
             self.set_main(first, flush=False)
             return first
-        # a window's push session and its pull loop are one main (the push one has no agent name)
+        # a window's push session and its pull loop are one main (the push one has no agent name);
+        # a desktop session in the same folder is another session, not the main's twin
+        kind = rec.get("kind") or ("cli" if not rec.get("agent") else "")
         same = [x for x in mine if x.session_id == rec.get("session_id") or (x.cwd and x.cwd == rec.get("cwd")
-                and (x.agent == rec.get("agent") or not x.agent or not rec.get("agent")))]  # fmt: skip
+                and (x.agent == rec.get("agent") or not x.agent or not rec.get("agent"))
+                and (not kind or x.kind == kind))]  # fmt: skip
         main = max((x for x in same if x.deliverable), key=lambda x: x.session_id == rec.get("session_id"),
                    default=None)  # fmt: skip
         if main is not None:

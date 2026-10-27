@@ -1053,3 +1053,22 @@ async def test_nothing_waits_forever_for_a_child_or_router_that_never_starts(
     assert hub.main_for(PROJECT) is main
     assert not orch.store.get("channel_main", ch._norm(PROJECT)).get("router_failed")
     assert m2["message_id"] in [x["message_id"] for x in main.queue._queue]
+
+
+async def test_a_terminal_main_is_not_confused_with_a_desktop_session_in_its_folder(
+    settings, cfg_dir
+):
+    """Seen in prod (UIUXAgent): the main was a Terminal window (push, no agent name) and work went to
+    a desktop session in the same folder. Only the window's own pull loop is its twin."""
+    from tests.test_config_gateway import make
+
+    orch, _ = make(settings, cfg_dir, [])
+    hub = orch.channel
+    push = hub.connect("cc_1", PROJECT, "/w/ui", mode="push", notify=False)
+    assert hub.main_for(PROJECT) is push
+    desktop, _, _ = hub.pull(PROJECT, None, "/w/ui", 0, "claude_code", "app")
+    loop, _, _ = hub.pull(PROJECT, None, "/w/ui", 0, "claude_code", "cli")
+    push.blocked = True  # its channel events are dropped: the pull loop takes its work
+    assert hub.main_for(PROJECT) is loop
+    hub.disconnect(loop)
+    assert hub.main_for(PROJECT) is None  # the desktop session is not the main
