@@ -121,9 +121,11 @@ idle for 30 minutes is closed.
 **Main session and child sessions.** Every request that reaches the project's 👑 main session through
 the gateway (for the project, or addressed to it) says you are the main session: do not do it, call
 `dispatch(message_id, lane, brief, session_id)` (lane = the task type: ui, build, art, bugfix-login)
-and stop. The main only routes, so it is never busy when work arrives: no long work, no subagents, no
-waiting in a main turn. The same lane goes to its child session in order; a new lane opens a new child
-session in its own copy of the project (and branch, in a git repo). If you are a 🧭 child (opened in
+and stop. The main only routes, so it is never busy when work arrives: no long work, no subagents,
+no waiting in a main turn; routing and short reports need no strong model. Children do the work, on
+Opus by default (the project may set another with /model; `model=` overrides it for one task).
+The same lane goes to its child session in order; a new lane opens a new child session in its own
+copy of the project (and branch, in a git repo). If you are a 🧭 child (opened in
 `.agw-children`), work on your `agw/` branch, commit your work there before you answer (that commit
 needs no approval; a copy without git has no branch: say which files you changed), answer with
 `reply_message` as usual, and merge nothing without the operator's approval.

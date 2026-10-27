@@ -687,7 +687,9 @@ async def test_main_session_routes_lanes_to_children_in_worktrees(
 
     orch, _ = make(settings, cfg_dir, [])
     hub, opened, notes = orch.channel, [], []
-    hub.launch = lambda path, agent: opened.append((path, agent)) or 100 + len(opened)  # window id
+    hub.launch = lambda path, agent, model="": (
+        opened.append((path, agent)) or 100 + len(opened)
+    )  # window id
     from app import launcher
 
     closed_windows = []
@@ -874,7 +876,7 @@ async def _lanes(settings, cfg_dir, tmp_path, monkeypatch):
     monkeypatch.setattr(ch, "CLAUDE_JSON", tmp_path / "claude.json")  # never the real one
     orch, _ = make(settings, cfg_dir, [])
     hub = orch.channel
-    hub.launch = lambda path, agent: None
+    hub.launch = lambda path, agent, model="": None
     monkeypatch.setattr(hub, "_ops", lambda html: None)
     main, _, _ = hub.pull(PROJECT, None, str(repo), 0, "claude_code", "app")
 
@@ -1056,7 +1058,7 @@ async def test_nothing_waits_forever_for_a_child_or_router_that_never_starts(
     main = hub.main_for(PROJECT)
     asked, opened = [], []
     monkeypatch.setattr(hub, "_notify", lambda name, *a, **k: asked.append(name))
-    hub.launch = lambda path, agent: opened.append(path)
+    hub.launch = lambda path, agent, model="": opened.append(path)
     hub.stall(main.session_id, "rate limit")  # stuck main: a router is opened in the background
     m2, t2 = hub.send(PROJECT, "fix the score")
     assert t2 is None
@@ -1178,7 +1180,7 @@ async def test_a_project_without_git_still_gets_children_so_its_main_only_routes
     monkeypatch.setattr(ch, "CLAUDE_JSON", tmp_path / "claude.json")
     orch, _ = make(settings, cfg_dir, [])
     hub, opened = orch.channel, []
-    hub.launch = lambda path, agent: opened.append(path)
+    hub.launch = lambda path, agent, model="": opened.append(path)
     main, _, _ = hub.pull(PROJECT, None, str(folder), 0, "claude_code", "app")
     m, _ = hub.send(
         PROJECT, "research the market", session_id=main.session_id
@@ -1227,3 +1229,38 @@ async def test_a_request_unanswered_for_two_leases_goes_to_the_operator_not_drop
         hub._expire()
     got = orch.store.get("channel_msg", m["message_id"])
     assert got["state"] == "stalled" and "2 leases" in got["stall_reason"]
+
+
+async def test_children_work_on_opus_and_the_router_on_a_cheaper_model(
+    settings, cfg_dir, tmp_path, monkeypatch
+):
+    from app.launcher import terminal_command
+
+    orch, hub, repo, dispatch, sh = await _lanes(settings, cfg_dir, tmp_path, monkeypatch)
+    launched = []
+    hub.launch = lambda path, agent, model="": launched.append(
+        (Path(path).name.split("-")[0], model)
+    )
+    await dispatch("ui")  # the work: Opus by default
+    m, _ = hub.send(PROJECT, "light job")
+    main = hub.main_for(PROJECT)
+    hub.pull(PROJECT, main.session_id)
+    await hub.dispatch(main.session_id, m["message_id"], "docs", model="sonnet")  # per task
+    hub.set_model(PROJECT, "child", "haiku")  # per project
+    await dispatch("audio")
+    with pytest.raises(ValueError):
+        hub.set_model(PROJECT, "child", "gpt-9")
+    assert launched == [("ui", "opus"), ("docs", "sonnet"), ("audio", "haiku")]
+    assert hub.models(PROJECT) == {"child": "haiku", "router": "sonnet"}
+    hub.set_model(PROJECT, "child", "default")
+    assert hub.models(PROJECT)["child"] == "opus"
+
+    hub.stall(main.session_id, "rate limit")  # the temporary router: the cheaper router model
+    hub.send(PROJECT, "route me")
+    for _ in range(100):
+        if launched[-1][0] == "router":
+            break
+        await asyncio.sleep(0.05)
+    assert launched[-1] == ("router", "sonnet")
+    assert terminal_command(repo, "", "opus").endswith("session --model opus")
+    assert "--model" not in terminal_command(repo, "codex", "opus")  # other tools keep their own

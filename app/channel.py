@@ -143,7 +143,7 @@ class ChannelHub:
         self._main_asked: set[str] = set()  # projects whose offline main was put to the operator
         from app.launcher import open_in_terminal
 
-        self.launch = open_in_terminal  # (folder, agent): opens a child session; tests replace it
+        self.launch = open_in_terminal  # (folder, agent, model): opens a child; tests replace it
         # session queues live in memory: what they held when the last process stopped waits again
         for msg in svc.store.list("channel_msg", states=["queued"]):
             self._set(msg, "pending")
@@ -570,7 +570,7 @@ class ChannelHub:
             path.mkdir(exist_ok=True)
             setup_repo(path, f"http://127.0.0.1:{ENV_PORTS[env_name()]}/mcp", project, False)
             _trust(path, repo)
-            wid = self.launch(path, agent)
+            wid = self.launch(path, agent, self.models(project)["router"])
             now_rec = self.svc.store.get("channel_main", _norm(project)) or {}
             if wid and now_rec.get("router_cwd") == str(path):
                 self.svc.store.put(
@@ -773,7 +773,7 @@ class ChannelHub:
             )
 
     async def dispatch(
-        self, session_id: str, ref: str, lane: str, brief: str = "", to: str = ""
+        self, session_id: str, ref: str, lane: str, brief: str = "", to: str = "", model: str = ""
     ) -> dict:
         """The main session hands a message to a child: `to` (s#), else the open child of that
         lane, else a new child opened in a new git worktree with the main's agent tool."""
@@ -828,11 +828,14 @@ class ChannelHub:
                     if c["lane"] == lane and c["status"] == "closed"), None)  # fmt: skip
         if old is not None:  # the lane's child closed: reopen it on its folder, no new copy
             self._tag(old["path"], msg)
+            if model:  # reopened with another model: it keeps that one
+                self.svc.store.put("channel_child", old["path"], {**old, "model": model})
             msg["wait_cwd"], msg["waiting_since"] = old["path"], now().isoformat()
             self._set(msg, "pending")
             await asyncio.to_thread(_trust, Path(old["path"]), Path(old.get("repo") or ""))
-            wid = await asyncio.to_thread(self.launch, Path(old["path"]), old.get("agent", "") if
-                                          old.get("agent") not in ("", "claude_code") else "")  # fmt: skip
+            agent = old.get("agent", "") if old.get("agent") not in ("", "claude_code") else ""
+            model = model or old.get("model") or self.models(msg["project"])["child"]
+            wid = await asyncio.to_thread(self.launch, Path(old["path"]), agent, model)
             self._remember_window(old["path"], wid)
             self._ops(
                 f"🧭 m{msg.get('num')} → reopened child ({lane}) on <code>{old['branch']}</code>"
@@ -869,10 +872,34 @@ class ChannelHub:
         self._set(msg, "pending")
         await asyncio.to_thread(_trust, path, repo)
         agent = main.agent if main.agent not in ("", "claude_code") else ""
-        self._remember_window(str(path), await asyncio.to_thread(self.launch, path, agent))
+        model = model or self.models(msg["project"])["child"]
+        c = self.svc.store.get("channel_child", str(path)) or {}
+        self.svc.store.put("channel_child", str(path), {**c, "model": model})
+        self._remember_window(str(path), await asyncio.to_thread(self.launch, path, agent, model))
         where = f"on branch <code>{branch}</code>" if branch else "in a copy of the folder (no git)"
         self._ops(f"🧭 m{msg.get('num')} → new child ({lane}) {where}")
         return {"to": "new", "lane": lane, "new_session": True, "branch": branch, "path": str(path)}
+
+    def models(self, project: str) -> dict:
+        """Claude models for the project's child sessions and temporary router: /model, else the
+        gateway's defaults (child_model, router_model). The main picks another per task."""
+        s = getattr(self.svc, "s", None) or getattr(self.svc, "settings", None)
+        rec = self.svc.store.get("channel_model", _norm(project)) or {}
+        return {"child": rec.get("child") or getattr(s, "child_model", "") or "opus",
+                "router": rec.get("router") or getattr(s, "router_model", "") or "sonnet"}  # fmt: skip
+
+    def set_model(self, project: str, role: str, model: str) -> dict:
+        """/model p# child|router <model|default>."""
+        if role not in ("child", "router"):
+            raise ValueError("role is child or router")
+        if model != "default" and not re.fullmatch(
+            r"(opus|sonnet|haiku|claude-[a-z0-9.-]+)", model
+        ):
+            raise ValueError("model: opus, sonnet, haiku, a claude-… id, or default")
+        rec = self.svc.store.get("channel_model", _norm(project)) or {}
+        rec = {**rec, "project": project, role: None if model == "default" else model}
+        self.svc.store.put("channel_model", _norm(project), rec)
+        return self.models(project)
 
     def _busy(self, s: LiveSession) -> bool:
         """Said still_working lately, or has work waiting for the operator (stalled): not idle."""

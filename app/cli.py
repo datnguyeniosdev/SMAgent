@@ -509,6 +509,7 @@ def cmd_session(args) -> int:
     # the channel option takes several values, so it goes last: a prompt after it would be read as a channel
     argv = [
         claude,
+        *(["--model", args.model] if args.model else []),
         *args.claude_args,
         "--dangerously-load-development-channels",
         f"server:{CHANNEL_NAME}",
@@ -841,6 +842,9 @@ def main(argv: list[str] | None = None) -> int:
         "session", help="(in a repo) open Claude Code that takes work from Telegram"
     )
     sp.add_argument("--no-loop", action="store_true", help="do not start the pull loop")
+    sp.add_argument(
+        "--model", default="", help="Claude model for the session (opus, sonnet, haiku or an id)"
+    )
     sp.add_argument("--agent", default="claude_code", choices=["claude_code", *AGENT_RUN],
                     help="another agent CLI, run once a minute to take work")  # fmt: skip
     sp.add_argument("claude_args", nargs=argparse.REMAINDER, help="extra arguments for claude")

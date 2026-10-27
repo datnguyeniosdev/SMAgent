@@ -64,7 +64,8 @@ title, else the folder name.
   stuck and an idle-looking child is closed after 30 minutes.
 - **Main session**: if a request's text says you are the main session, do not do it: call
   `dispatch(message_id, lane, brief, session_id)` and stop (the main only routes: no long work, no
-  subagents, so it is never busy when work arrives); same lane → its child session in order, a new lane
+  subagents, so it is never busy when work arrives); children do the work, on Opus by default
+  (`model=` overrides it for one task); same lane → its child session in order, a new lane
   → a new child session in its own copy of the project. A child commits on its `agw/` branch before
   answering (no approval needed for that) and merges or pushes nothing
   without approval.

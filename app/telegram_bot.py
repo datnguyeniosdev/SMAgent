@@ -68,6 +68,7 @@ HELP = (
 /close &lt;s#&gt; · /off &lt;s#&gt; · /on &lt;s#&gt; — close a session, or stop/resume giving it work
 /children prune &lt;lane&gt; — delete a closed 🧭 child's folder (its branch stays), confirmed
 /main &lt;s#&gt; — make it its project's 👑 main session: it routes project requests to 🧭 child sessions
+/model [p# child|router opus|sonnet|haiku|default] — the Claude model of a project's child sessions and temporary router
 /agents — every agent: 🖥 app (desktop/IDE), ⌨️ CLI, ☁️ API, with on/off and close buttons
 Reply to any gateway message (text or photos) to give feedback or answer it.
 
@@ -550,6 +551,7 @@ class TelegramGateway:
         r.message(Command("close"))(self.on_close)
         r.message(Command("children"))(self.on_children)
         r.message(Command("main"))(self.on_main)
+        r.message(Command("model"))(self.on_model)
         r.message(Command("cancel"))(self.on_cancel)
         r.message(Command("tools"))(self.on_tools)
         r.message(Command("tool"))(self.on_tool)
@@ -778,7 +780,7 @@ class TelegramGateway:
             lines.append(f"<b>p{num}</b> · {escape(name)} · {state}")
             icon = {"working": "▶️", "idle": "💤", "closed": "⚪"}
             lines += [f"   🧭 {escape(c['lane'])} · {icon[c['status']]} {c['status']} {c['sessions']} · "
-                      f"{escape(c['task'])} · <code>{escape(c['branch'])}</code>"
+                      f"{escape(c['task'])} · {escape(c.get('model') or '')} · <code>{escape(c['branch'])}</code>"
                       + (f" from {escape(c.get('target') or '?')}@{c['base'][:7]}" if c.get("base") else "")
                       for c in hub.children(name) if c["status"] != "deleted"]  # fmt: skip
         if not hub.projects():
@@ -1304,6 +1306,31 @@ class TelegramGateway:
             return
         await q.answer()
         await q.message.answer(f"🧹 {escape(name)}: {escape(what)}")
+
+    async def on_model(self, m: TgMessage, command: CommandObject):
+        """/model: models per project; /model p# child|router <model|default> changes one."""
+        if not self._authorized_msg(m):
+            return
+        hub = self.orch.channel
+        args = (command.args or "").split()
+        if len(args) == 3:
+            project = hub.resolve_project(args[0])
+            if project is None:
+                await m.answer(f"Unknown project {escape(args[0])} (ids from /list).")
+                return
+            try:
+                got = hub.set_model(project, args[1].lower(), args[2].lower())
+            except ValueError as e:
+                await m.answer(f"⚠️ {escape(str(e))}")
+                return
+            await m.answer(f"🧠 <b>{escape(project)}</b>: child <code>{got['child']}</code> · router "
+                           f"<code>{got['router']}</code> (new sessions from now on)")  # fmt: skip
+            return
+        lines = ["🧠 <b>MODELS</b> (child sessions · temporary router)"]
+        lines += [f"<b>p{num}</b> {escape(name)} · {hub.models(name)['child']} · {hub.models(name)['router']}"
+                  for num, name in hub.projects()]  # fmt: skip
+        lines.append("\n<code>/model p1 child opus</code> · <code>/model p1 router default</code>")
+        await m.answer("\n".join(lines))
 
     async def on_main(self, m: TgMessage, command: CommandObject):
         """/main <s#>: that session becomes its project's main (it routes the project's requests)."""

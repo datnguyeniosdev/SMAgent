@@ -685,7 +685,7 @@ def build_mcp_server(svc) -> MCPServer:
 
     @tool
     async def dispatch(
-        message_id: str, lane: str, session_id: str, brief: str = "", to: str = ""
+        message_id: str, lane: str, session_id: str, brief: str = "", to: str = "", model: str = ""
     ) -> dict[str, Any]:
         """Main session only: route a project request (one whose text says you are the main session)
         instead of doing it. lane: the task type, short (ui, build, art, bugfix-login). The open child
@@ -693,9 +693,11 @@ def build_mcp_server(svc) -> MCPServer:
         new child session with your agent tool in its own copy-on-write copy of the project and
         branch (in parallel); a closed lane's copy is reopened instead of a new one.
         to: s# to pick an open session instead. brief: what to do and what to report, standing alone.
-        The child answers the sender itself; you need not reply to the message."""
+        model: for a new (or reopened) child only; empty = the project's child model (Opus unless
+        /model set another), e.g. "sonnet" for light work. The child answers the sender itself; you
+        need not reply to the message."""
         try:
-            return await svc.channel.dispatch(session_id, message_id, lane, brief, to)
+            return await svc.channel.dispatch(session_id, message_id, lane, brief, to, model)
         except (ValueError, PermissionError) as e:
             raise GatewayToolError(str(e)) from e
 

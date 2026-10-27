@@ -76,18 +76,20 @@ def is_connected(repo: Path) -> bool:
         return False
 
 
-def terminal_command(repo: Path, agent: str = "") -> str:
+def terminal_command(repo: Path, agent: str = "", model: str = "") -> str:
     agw = Path(sys.executable).parent / "agw"
     extra = f" --agent {shlex.quote(agent)}" if agent and agent != "claude_code" else ""
+    if model and agent in ("", "claude_code"):  # (other agent tools keep their own model setting)
+        extra += f" --model {shlex.quote(model)}"
     # exec: the session replaces the window's shell, so the window ends with it
     return f"cd {shlex.quote(str(repo))} && exec {shlex.quote(str(agw))} session{extra}"
 
 
-def open_in_terminal(repo: Path, agent: str = "") -> int | None:
+def open_in_terminal(repo: Path, agent: str = "", model: str = "") -> int | None:
     """New Terminal.app window running `agw session` in the repo (macOS asks once for permission).
     Returns the window's id, so the gateway can close it with the session (close_terminal_window)."""
     cmd = (
-        terminal_command(repo, agent).replace("\\", "\\\\").replace('"', '\\"')
+        terminal_command(repo, agent, model).replace("\\", "\\\\").replace('"', '\\"')
     )  # AppleScript string
     script = (f'tell application "Terminal"\nactivate\nset t to do script "{cmd}"\n'
               "return id of (first window whose selected tab is t)\nend tell")  # fmt: skip

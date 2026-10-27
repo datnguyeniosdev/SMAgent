@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     mcp_require_token: bool = True
     # folder whose git sub-folders /open can start (default: the folder containing this gateway)
     projects_root: Path | None = None
+    # Claude model of the sessions the gateway opens: child sessions do the work (Opus), a temporary
+    # router only routes and reports (cheaper). Per project with /model, per task with dispatch(model=).
+    child_model: str = "opus"
+    router_model: str = "sonnet"
 
     # Storage and workspaces
     data_dir: Path = Path("var")
