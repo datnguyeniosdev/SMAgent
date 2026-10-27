@@ -1155,7 +1155,7 @@ class TelegramGateway:
         if q.message and verb != "other":
             try:
                 await q.message.edit_reply_markup(reply_markup=None)
-            except TelegramBadRequest:
+            except (TelegramBadRequest, TelegramRetryAfter):  # cosmetic: the action already ran
                 pass
 
     async def on_open_button(self, q: CallbackQuery):
@@ -2750,5 +2750,5 @@ class TelegramGateway:
         if q.message:
             try:
                 await q.message.edit_reply_markup(reply_markup=None)
-            except TelegramBadRequest:
+            except (TelegramBadRequest, TelegramRetryAfter):  # cosmetic: the action already ran
                 pass
