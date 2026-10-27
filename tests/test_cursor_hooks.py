@@ -69,3 +69,21 @@ def test_stop_with_an_error_hands_the_work_to_the_operator(tmp_path, monkeypatch
     posts = feed(monkeypatch, [{"queued": True, "next": "chm_9"}])
     ch.hook({**ev, "status": "completed"}, 8000)  # a completed turn: the model works again
     assert "/api/v1/channel/active?" in posts[0]
+
+
+def test_after_response_sends_the_text_for_question_forwarding(tmp_path, monkeypatch):
+    ev = {**folder(tmp_path, monkeypatch), "hook_event_name": "afterAgentResponse",
+          "text": "Anh muốn em làm tiếp không?"}  # fmt: skip
+    sent = []
+
+    def urlopen(req, timeout):
+        sent.append((req.full_url, json.loads(req.data)))
+        from tests.test_waiter import Resp
+
+        return Resp({})
+
+    monkeypatch.setattr(w.urllib.request, "urlopen", urlopen)
+    assert ch.hook(ev, 8000) == {}
+    url, body = sent[0]
+    assert url.startswith("http://127.0.0.1:8000/api/v1/channel/turn") and body["agent"] == "cursor"
+    assert body["text"] == ev["text"] and body["project"] == "Mario Clone (K10)"

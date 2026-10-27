@@ -133,11 +133,12 @@ def link_skills(dst: Path) -> list[str]:
 
 
 def codex_hooks(path: Path, install: bool) -> None:
-    """SessionStart/SessionEnd -> `agw codex-hook` (the Codex desktop relay). Other hooks stay."""
+    """SessionStart/SessionEnd -> `agw codex-hook` (the Codex desktop relay); Stop -> a question the
+    thread ends on also goes to Telegram. Other hooks stay."""
     cmd = f"{shlex.quote(str(Path(sys.executable).parent / 'agw'))} codex-hook"
     data = _json(path)
     hooks = data.setdefault("hooks", {})
-    for event in ("SessionStart", "SessionEnd"):
+    for event in ("SessionStart", "SessionEnd", "Stop"):  # Stop: questions asked in the thread
         groups = [g for g in hooks.get(event, [])
                   if not any("codex-hook" in h.get("command", "") for h in g.get("hooks", []))]  # fmt: skip
         if install:
@@ -157,6 +158,7 @@ def cursor_hooks(path: Path, install: bool) -> None:
     data.setdefault("version", 1)
     hooks = data.setdefault("hooks", {})
     mine = {"sessionStart": {"command": cmd, "timeout": 10},
+            "afterAgentResponse": {"command": cmd, "timeout": 10},  # its questions go to Telegram
             "stop": {"command": cmd, "timeout": 3600, "loop_limit": None}}  # fmt: skip
     for event, entry in mine.items():
         rest = [h for h in hooks.get(event, []) if "cursor-hook" not in h.get("command", "")]

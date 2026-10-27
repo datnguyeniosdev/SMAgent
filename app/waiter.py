@@ -166,11 +166,14 @@ def wait(project: str, cwd: str, client: str, port: int, interval: float = 30,
                 time.sleep(interval)
 
 
-def tell(path: str, port: int, **query) -> None:
-    """Fire-and-forget POST to the local gateway from a hook (failure, active again); a gateway that
-    is down is ignored: hooks never block or fail the agent."""
+def tell(path: str, port: int, body: dict | None = None, **query) -> None:
+    """Fire-and-forget POST to the local gateway from a hook (failure, active again, turn ended); a
+    gateway that is down is ignored: hooks never block or fail the agent. body: sent as JSON."""
     url = f"http://127.0.0.1:{port}{path}?{urllib.parse.urlencode(query)}"
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method="POST",
+                                 headers={"content-type": "application/json"} if data else {})  # fmt: skip
     try:
-        urllib.request.urlopen(urllib.request.Request(url, method="POST"), timeout=2).close()  # noqa: S310
+        urllib.request.urlopen(req, timeout=5).close()  # noqa: S310
     except OSError:
         pass

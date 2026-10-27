@@ -7,6 +7,8 @@ All notable changes are listed here. The format follows
 ## [Unreleased]
 
 ### Added
+- Codex and Cursor questions asked only in their own chat are forwarded to Telegram with buttons;
+  the answer wakes the session.
 - Stuck work goes to the operator. When an agent stops on a rate limit or API error, or misses its
   lease, its work is held on Telegram with buttons to move it to another session, wait, or cancel.
   When that agent runs again, the gateway asks before it goes on.

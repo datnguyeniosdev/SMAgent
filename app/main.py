@@ -903,6 +903,27 @@ async def channel_stalled(
     return {"stalled": [m["message_id"] for m in held]}
 
 
+class TurnIn(BaseModel):
+    project: str = Field(max_length=200)
+    agent: str = Field(max_length=40)
+    cwd: str = Field("", max_length=1000)
+    text: str = Field("", max_length=20_000)
+
+
+@app.post("/api/v1/channel/turn", include_in_schema=False)
+async def channel_turn(request: Request, body: TurnIn):
+    """An agent tool's turn ended (Codex Stop, Cursor afterAgentResponse): a question it asked only in
+    its own chat is forwarded to Telegram; the answer wakes that session."""
+    _local_only(request)
+    orch = request.app.state.orch
+    hub = orch.channel
+    sid = hub.pull_id(body.project, body.agent, body.cwd)
+    s = hub.sessions.get(sid)
+    label = s.title if s else body.agent
+    hi = await orch.collab.turn_ended(body.project, sid, label, body.text)
+    return {"forwarded": hi.request_id if hi else None}
+
+
 @app.post("/api/v1/channel/active", include_in_schema=False)
 async def channel_active(request: Request, project: str, agent: str, cwd: str = ""):
     """The agent's model runs again (a prompt): work it left stalled is put to the operator."""

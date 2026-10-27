@@ -369,3 +369,45 @@ async def test_stalled_work_goes_to_the_operator_and_is_asked_again_when_back(se
     hub.stall(claude.session_id, "billing_error")
     await gw.on_stalled_button(press(f"st:cancel:{m3['message_id']}"))
     assert orch.store.get("channel_msg", m3["message_id"])["state"] == "cancelled"
+
+
+def test_question_in_finds_the_question_an_agent_ends_on():
+    from app.collaboration import question_in
+
+    assert "commit luôn không?" in question_in("Đã sửa HUD.\n\nAnh muốn em commit luôn không?")
+    assert question_in("Done: tests pass.\n\nNothing else to do.") is None
+    assert "Should I deploy" in question_in(
+        "Built.\n\nShould I deploy it to UAT now? It takes 5 minutes."
+    )
+
+
+async def test_a_question_asked_only_in_the_chat_reaches_telegram_and_its_answer_the_session(
+    settings, cfg_dir
+):
+    from pydantic import SecretStr
+
+    orch, _ = make(settings, cfg_dir, [])
+    gw, hub = gateway(orch), orch.channel
+    orch.s.telegram_confirm_passcode = SecretStr("Pa55-kode!")
+    codex, _, _ = hub.pull(A, None, "/w/k05", 0, "codex")
+    collab = orch.collab
+
+    hi = await collab.turn_ended(
+        A, codex.session_id, codex.title, "Xong.\n\nAnh có muốn em đổi màu nền không?"
+    )
+    assert hi.auto and not hi.secure and "đổi màu nền" in gw.bot.sent[-1][1]["text"]
+    collab.answer_human_input(hi.request_id, "✅ Đồng ý", "11")
+    _, msgs, _ = hub.pull(A, codex.session_id, "/w/k05", 5, "codex")  # the answer wakes Codex
+    assert any("✅ Đồng ý" in m["text"] for m in msgs)
+
+    risky = await collab.turn_ended(
+        A, codex.session_id, codex.title, "Em commit và push lên main nhé?"
+    )
+    assert risky.secure  # commit/push: passcode on Telegram
+    # the next turn ends without the Telegram answer: it was answered in the chat, the copy closes
+    assert await collab.turn_ended(A, codex.session_id, codex.title, "Đã push xong.") is None
+    assert collab.get_human_input(risky.request_id).status == "answered"
+
+    own = await collab.request_human_input("Release?", project=A, session_id=codex.session_id)
+    assert await collab.turn_ended(A, codex.session_id, codex.title, "Release luôn không?") is None
+    assert collab.get_human_input(own.request_id).status == "pending"  # its own question stays

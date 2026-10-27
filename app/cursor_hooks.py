@@ -104,10 +104,25 @@ def stop(event: dict, port: int, hold: float = HOLD_S) -> dict:
     return {}
 
 
+def after_response(event: dict, port: int) -> dict:
+    """The agent's final message: a question it asks only in the chat goes to Telegram too."""
+    from app.projects import project_for
+    from app.waiter import tell
+
+    cwd = _folder(event)
+    project = cwd and project_for(Path(cwd))
+    if project and event.get("text"):
+        tell("/api/v1/channel/turn", port,
+             {"project": project, "agent": "cursor", "cwd": cwd, "text": event["text"]})  # fmt: skip
+    return {}
+
+
 def hook(event: dict, port: int) -> dict:
     name = event.get("hook_event_name") or ""
     if name == "sessionStart":
         return session_start(event)
+    if name == "afterAgentResponse":
+        return after_response(event, port)
     if name == "stop":
         return stop(event, port)
     return {}

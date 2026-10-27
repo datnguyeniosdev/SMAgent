@@ -11,6 +11,7 @@ import fnmatch
 import hashlib
 import json
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
@@ -90,6 +91,25 @@ class HumanInput(BaseModel):
         False  # release/deploy/commit/pull: approved from Telegram only with the passcode
     )
     attempts: int = 0  # wrong passcodes so far (3: cancelled, never approved)
+    auto: bool = False  # forwarded by the gateway from the agent's own chat (turn-end hook)
+
+
+_ASKS = re.compile(
+    r"\?|xác nhận|duyệt|đồng ý|có muốn|cho phép|anh muốn|chị muốn|bạn muốn|confirm|approv|should i|"
+    r"shall i|do you want|would you like|let me know|proceed|go ahead",
+    re.I,
+)
+_RISKY = re.compile(r"\b(commit|push|merge|release|deploy|git pull)\b", re.I)
+
+
+def question_in(text: str) -> str | None:
+    """The question an agent's final message ends on (asks something or for a confirmation), else
+    None. ponytail: keyword heuristic on the last paragraphs; a classifier if it misfires often."""
+    paras = [p.strip() for p in re.split(r"\n\s*\n", text or "") if p.strip()]
+    if not paras:
+        return None
+    tail = paras[-1] if len(paras[-1]) >= 40 or len(paras) == 1 else "\n\n".join(paras[-2:])
+    return tail[-800:] if _ASKS.search(tail) else None
 
 
 class Handoff(BaseModel):
@@ -783,6 +803,31 @@ class CollaborationService:
                 "delivery_failed",
                 f"the question did not reach Telegram ({type(e).__name__}); try again later",
             ) from e
+        return hi
+
+    async def turn_ended(
+        self, project: str, session_id: str, label: str, text: str
+    ) -> HumanInput | None:
+        """An agent tool's turn ended (Codex Stop, Cursor afterAgentResponse) with `text`. A question
+        asked only in its own chat goes to Telegram too, with buttons; the answer wakes the session.
+        An earlier forwarded question still open was answered in the chat: its Telegram copy closes.
+        Skipped when the agent asked through request_human_input itself in the last 10 minutes."""
+        mine = [h for h in (HumanInput.model_validate(r) for r in self.store.list("human_input",
+                states=["pending"])) if h.session_id == session_id]  # fmt: skip
+        for h in mine:
+            if h.auto:
+                await self.close_human_input(h.request_id, "trả lời trong chat của agent")
+        q = question_in(text)
+        if q is None or any(
+            not h.auto and now() - h.created_at < timedelta(minutes=10) for h in mine
+        ):
+            return None
+        secure = bool(_RISKY.search(q))
+        hi = await self.request_human_input(f"{label} hỏi:\n{q}", project=project, session_id=session_id,
+                                            options=[] if secure else ["✅ Đồng ý", "❌ Không"],
+                                            secure=secure)  # fmt: skip
+        hi.auto = True
+        self.store.put("human_input", hi.request_id, hi, task_id=hi.task_id, state=hi.status)
         return hi
 
     async def _post_question(self, hi: HumanInput, prefix: str = "") -> None:

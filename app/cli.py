@@ -637,6 +637,19 @@ def cmd_codex_hook(args) -> int:
         event = json.loads(sys.stdin.read() or "{}")
     except ValueError:
         return 0
+    if (
+        event.get("hook_event_name") == "Stop"
+    ):  # a question asked in the thread goes to Telegram too
+        from app.config import ENV_PORTS
+        from app.projects import project_for
+        from app.waiter import tell
+
+        cwd = event.get("cwd") or os.getcwd()
+        if (project := project_for(Path(cwd))) and event.get("last_assistant_message"):
+            tell("/api/v1/channel/turn", ENV_PORTS["prod"], {"project": project, "agent": "codex",
+                 "cwd": cwd, "text": event["last_assistant_message"]})  # fmt: skip
+        print("{}")  # Codex wants JSON from Stop
+        return 0
     out = hook(event)
     if out:
         print(json.dumps(out))
