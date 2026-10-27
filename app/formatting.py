@@ -64,9 +64,10 @@ STATE_KIND = {
 }
 
 
-def hashtag(text: str) -> str:
-    """Telegram hashtag (tap = search the chat for every message with it)."""
-    return "#" + (re.sub(r"[^0-9A-Za-z]+", "_", text).strip("_") or "gateway")
+def hashtag(text: str | None) -> str:
+    """Telegram hashtag (tap = search the chat for every message with it). No project known (an ask
+    from a session that never said its project): #gateway, not a crash."""
+    return "#" + (re.sub(r"[^0-9A-Za-z]+", "_", text or "").strip("_") or "gateway")
 
 
 def envelope(

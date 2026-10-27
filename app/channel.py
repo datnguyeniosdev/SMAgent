@@ -940,7 +940,13 @@ class ChannelHub:
         cutoff = now() - CHILD_IDLE
         for s in list(self.sessions.values()):
             c = self.child(s)
-            if c is None or s.last_work > cutoff or not self._idle(s) or self._busy(s):
+            if c is None:
+                continue
+            # a Terminal child is a push session plus its pull loop, one Claude process: the work goes
+            # to either, so the child is idle only when all of them are (seen in prod: the push twin
+            # looked idle and closing it killed the loop mid-task)
+            twins = [x for x in self.sessions.values() if x.cwd == s.cwd]
+            if any(x.last_work > cutoff or not self._idle(x) or self._busy(x) for x in twins):
                 continue
             if s.mode == "pull" and any(x is not s and x.cwd == s.cwd and x.mode == "push"
                                         for x in self.sessions.values()):  # fmt: skip

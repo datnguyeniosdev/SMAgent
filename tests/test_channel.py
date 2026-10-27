@@ -1318,3 +1318,29 @@ async def test_stuck_work_resumed_to_the_main_is_routed_not_done_there(settings,
     hub.stall(worker.session_id, "rate limit")
     _, target = hub.resume(f"m{m['num']}", main.session_id)  # ↪️ the main on Telegram
     assert target is main and "do not do it yourself" in main.queue._queue[0]["text"]
+
+
+async def test_a_child_working_through_its_pull_loop_is_not_closed_via_its_idle_push_twin(
+    settings, cfg_dir, tmp_path, monkeypatch
+):
+    """Seen in prod: work went to a Terminal child's pull loop; its push twin had no work of its own,
+    looked idle for 30 min and was closed, killing the Claude process mid-task."""
+    from datetime import timedelta
+
+    from app import channel as ch
+
+    orch, hub, repo, dispatch, sh = await _lanes(settings, cfg_dir, tmp_path, monkeypatch)
+    r = await dispatch("qa", "long audit")
+    # in prod a child's push session is blocked (channel events dropped): its pull loop takes the work
+    push = hub.connect("cc_child", PROJECT, r["path"], blocked=True, mode="push", notify=False)
+    loop, _, _ = hub.pull(PROJECT, None, r["path"], 0, "claude_code", "cli")
+    _, got, _ = hub.pull(PROJECT, loop.session_id)  # the loop takes the work
+    assert got and got[0]["message_id"] == r["msg"]["message_id"]
+    push.last_work -= ch.CHILD_IDLE + timedelta(minutes=5)  # the push twin itself never got work
+    hub._prune()
+    assert push.session_id in hub.sessions and loop.session_id in hub.sessions  # not closed
+    await hub.reply(loop.session_id, "done", got[0]["message_id"])
+    loop.last_work -= ch.CHILD_IDLE + timedelta(minutes=1)
+    hub._prune()  # now the whole child is idle: closed (a test session has no process to stop)
+    closes = [e for e in orch.store.events() if e["type"] == "channel.close"]
+    assert loop.session_id not in hub.sessions or any("cc_child" in json.dumps(e) for e in closes)

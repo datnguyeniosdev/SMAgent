@@ -1321,3 +1321,10 @@ async def test_send_retries_a_network_timeout_instead_of_losing_the_message(
 
     with pytest.raises(TelegramNetworkError):  # still failing after 3 tries: the caller logs it
         await gw._send(down, chat_id=1, text="report")
+
+
+def test_hashtag_without_a_project_does_not_crash():
+    """Seen in prod: the Telegram copy of an ask from a session with no project raised TypeError."""
+    from app.formatting import hashtag
+
+    assert hashtag(None) == "#gateway" and hashtag("Glazed Gems (GMA)") == "#Glazed_Gems_GMA"
