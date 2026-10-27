@@ -663,6 +663,12 @@ async def test_main_session_routes_lanes_to_children_in_worktrees(
     subprocess.run([*git, "add", "."], check=True)
     subprocess.run([*git, "commit", "-qm", "init"], check=True)
     monkeypatch.setattr(projects, "projects_root", lambda: tmp_path)
+    from app import channel as ch
+
+    claude_json = tmp_path / "claude.json"  # the operator trusts the project, not its children yet
+    claude_json.write_text(json.dumps({"projects": {str(repo): {"hasTrustDialogAccepted": True,
+                                                                "allowedTools": ["x"]}}}))  # fmt: skip
+    monkeypatch.setattr(ch, "CLAUDE_JSON", claude_json)
 
     orch, _ = make(settings, cfg_dir, [])
     hub, opened, notes = orch.channel, [], []
@@ -684,7 +690,11 @@ async def test_main_session_routes_lanes_to_children_in_worktrees(
         await hub.dispatch(other.session_id, m1["message_id"], "ui")
     r = await hub.dispatch(main.session_id, f"m{m1['num']}", "UI", brief="fix it, report a shot")
     assert r["new_session"] and r["branch"].startswith("agw/ui-") and len(opened) == 1
-    path = Path(r["path"])
+    path, r_branch = Path(r["path"]), r["branch"]
+    trusted = json.loads(claude_json.read_text())["projects"][str(path)]
+    assert trusted == {
+        "hasTrustDialogAccepted": True
+    }  # trusted like the project, nothing else copied
     # a copy-on-write clone inside the project (APFS), else a git worktree next to it
     assert path.parent in (repo / ".agw-children", tmp_path / ".agw-worktrees" / "game")
     assert (path / ".mcp.json").exists() and (path / "README.md").exists()
@@ -713,7 +723,12 @@ async def test_main_session_routes_lanes_to_children_in_worktrees(
     r = await hub.dispatch(main.session_id, m3["message_id"], "audio")  # other lane: in parallel
     assert r["new_session"] and len(opened) == 2
 
+    subprocess.run(["git", "-C", str(path), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
+                    "--allow-empty", "-m", "child work"], check=True)  # fmt: skip
     await hub.reply(child.session_id, "Dạ, xong ạ", m1["message_id"])  # straight to the sender
+    assert (
+        r_branch in subprocess.run([*git, "branch"], capture_output=True, text=True).stdout
+    )  # fetched
     _, got, _ = hub.pull(PROJECT, child.session_id)
     assert got[0]["message_id"] == m2["message_id"]
     await hub.reply(child.session_id, "Dạ, xong ạ", m2["message_id"])
@@ -791,3 +806,18 @@ async def test_answers_skip_the_line_and_an_offline_main_is_put_to_the_operator(
     c, _, _ = hub.pull(PROJECT, None, "/w/c", 0, "claude_code")
     assert hub.main_for(PROJECT) is c
     assert [x["message_id"] for x in c.queue._queue] == [m["message_id"], m2["message_id"]]
+
+
+def test_child_folders_are_trusted_only_under_a_trusted_project(tmp_path, monkeypatch):
+    from app import channel as ch
+
+    cfg = tmp_path / "claude.json"
+    cfg.write_text(
+        json.dumps({"projects": {"/w/ok": {"hasTrustDialogAccepted": True}}, "other": 1})
+    )
+    monkeypatch.setattr(ch, "CLAUDE_JSON", cfg)
+    assert not ch._trust(Path("/w/no/.agw-children/x"), Path("/w/no"))  # never trusted: left alone
+    assert ch._trust(Path("/w/ok/.agw-children/x"), Path("/w/ok"))
+    data = json.loads(cfg.read_text())
+    assert data["other"] == 1 and "/w/no/.agw-children/x" not in data["projects"]
+    assert data["projects"]["/w/ok/.agw-children/x"]["hasTrustDialogAccepted"] is True

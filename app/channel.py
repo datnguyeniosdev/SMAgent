@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
@@ -519,6 +520,7 @@ class ChannelHub:
             (repo / CHILDREN / ".gitignore").write_text("*\n")
             path.mkdir(exist_ok=True)
             setup_repo(path, f"http://127.0.0.1:{ENV_PORTS[env_name()]}/mcp", project, False)
+            _trust(path, repo)
             self.launch(path, agent)
 
         self._background(make)
@@ -695,6 +697,7 @@ class ChannelHub:
             self._tag(old["path"], msg)
             msg["wait_cwd"] = old["path"]
             self._set(msg, "pending")
+            await asyncio.to_thread(_trust, Path(old["path"]), Path(old.get("repo") or ""))
             await asyncio.to_thread(self.launch, Path(old["path"]), old.get("agent", "") if
                                     old.get("agent") not in ("", "claude_code") else "")  # fmt: skip
             self._ops(
@@ -720,6 +723,7 @@ class ChannelHub:
         self._tag(str(path), msg)
         msg["wait_cwd"] = str(path)
         self._set(msg, "pending")
+        await asyncio.to_thread(_trust, path, repo)
         agent = main.agent if main.agent not in ("", "claude_code") else ""
         await asyncio.to_thread(self.launch, path, agent)
         self._ops(f"🧭 m{msg.get('num')} → new child ({lane}) on branch <code>{branch}</code>")
@@ -1129,6 +1133,9 @@ class ChannelHub:
             )
         if msg is not None and _norm(msg.get("project", "")) != _norm(rec["project"]):
             raise PermissionError(f"m{msg.get('num')} belongs to another project")
+        # a child's answer (to the operator or another agent) brings its branch into the project repo
+        child = self.svc.store.get("channel_child", rec.get("cwd") or "")
+        fetched = bool(child) and await asyncio.to_thread(_fetch_back, child)
         if msg is not None and msg.get("kind") == "answer":  # answers need no reply
             self._set(msg, "done")
             return {"note": "that message was an answer to your own ask; nothing to reply"}
@@ -1146,10 +1153,8 @@ class ChannelHub:
                 self._set(msg, "done")  # frees the session for its next message
                 self._flush_pending(rec["project"])
         body = text.strip() + note
-        if (
-            c := self.svc.store.get("channel_child", rec.get("cwd") or "")
-        ) and await asyncio.to_thread(_fetch_back, c):
-            body += f"\n\n(branch {c['branch']} is in the project repo for review)"
+        if fetched:
+            body += f"\n\n(branch {child['branch']} is in the project repo for review)"
         mode = rec.get("mode", "push")
         agent = (s.agent if s else "") or rec.get("agent") or "claude_code"
         return await self.svc.collab.submit_report(
@@ -1165,7 +1170,33 @@ def _toplevel(cwd: str) -> Path:
     return Path(out.stdout.strip())
 
 
-CHILDREN = ".agw-children"  # inside the project: trusted with it, ignored by its git
+CHILDREN = ".agw-children"  # inside the project, ignored by its git
+CLAUDE_JSON = (
+    Path.home() / ".claude.json"
+)  # Claude Code's per-folder trust (tests point it elsewhere)
+TRUST_KEYS = ("hasTrustDialogAccepted", "enabledMcpjsonServers", "disabledMcpjsonServers",
+              "hasClaudeMdExternalIncludesApproved", "hasClaudeMdExternalIncludesWarningShown")  # fmt: skip
+
+
+def _trust(path: Path, repo: Path) -> bool:
+    """A child folder the gateway made inside a project the operator already trusts is trusted the
+    same way, so its Claude Code does not stop at "trust this folder?" (operator's choice,
+    2026-10-27). Never for a project that is not trusted itself."""
+    try:
+        data = json.loads(CLAUDE_JSON.read_text())
+    except (OSError, ValueError):
+        return False
+    projects = data.setdefault("projects", {})
+    parent = projects.get(str(repo)) or {}
+    if not parent.get("hasTrustDialogAccepted"):
+        return False
+    entry = projects.setdefault(str(path), {})
+    entry.update({k: parent[k] for k in TRUST_KEYS if k in parent})
+    tmp = CLAUDE_JSON.with_name(f".claude.json.agw-{os.getpid()}")
+    # ponytail: read-modify-write; a Claude Code writing the same file at that instant can drop it
+    tmp.write_text(json.dumps(data, indent=2))
+    tmp.replace(CLAUDE_JSON)
+    return True
 
 
 def _worktree(repo: Path, lane: str) -> tuple[Path, str]:
