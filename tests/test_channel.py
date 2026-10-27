@@ -1264,3 +1264,57 @@ async def test_children_work_on_opus_and_the_router_on_a_cheaper_model(
     assert launched[-1] == ("router", "sonnet")
     assert terminal_command(repo, "", "opus").endswith("session --model opus")
     assert "--model" not in terminal_command(repo, "codex", "opus")  # other tools keep their own
+
+
+async def test_untaken_work_counts_from_when_the_session_is_free_and_a_busy_main_gets_a_router(
+    settings, cfg_dir, tmp_path, monkeypatch
+):
+    """Seen in prod: work queued 19 min behind a job was marked stuck 2 s after the job ended; and
+    routing work waiting behind a busy main never brought in the temporary router."""
+    from datetime import timedelta
+
+    from app import channel as ch
+    from app.models import now
+
+    orch, hub, repo, dispatch, sh = await _lanes(settings, cfg_dir, tmp_path, monkeypatch)
+    worker, _, _ = hub.pull(PROJECT, None, "/w/worker", 0, "claude_code", "cli")
+    job, _ = hub.send(PROJECT, "long job", session_id=worker.session_id)
+    hub.pull(PROJECT, worker.session_id)
+    waiting, _ = hub.send(PROJECT, "next job", session_id=worker.session_id)
+    worker.queue._queue[0]["queued_at"] = (now() - ch.QUEUE_WAIT - timedelta(minutes=9)).isoformat()
+    hub._expire()  # busy: it waits its turn
+    assert orch.store.get("channel_msg", waiting["message_id"])["state"] == "queued"
+    await hub.reply(worker.session_id, "done", job["message_id"])
+    hub._expire()  # just free: not stuck yet
+    assert orch.store.get("channel_msg", waiting["message_id"])["state"] == "queued"
+    worker.last_work -= ch.QUEUE_WAIT + timedelta(minutes=1)  # free for 10+ min and still untaken
+    hub._expire()
+    assert orch.store.get("channel_msg", waiting["message_id"])["state"] == "stalled"
+
+    main = hub.main_for(PROJECT)  # a main busy on work of its own: routing work waits for it
+    own, _ = hub.send(PROJECT, "legacy job", session_id=main.session_id)
+    m = orch.store.get("channel_msg", own["message_id"])
+    m.pop("route", None)  # (sent before the main only routed)
+    orch.store.put("channel_msg", own["message_id"], m, state="queued")
+    main.queue._queue[0].pop("route", None)
+    hub.pull(PROJECT, main.session_id)
+    r, _ = hub.send(PROJECT, "route me")
+    main.queue._queue[0]["queued_at"] = (now() - ch.QUEUE_WAIT - timedelta(minutes=1)).isoformat()
+    hub._expire()
+    assert main.stalled and (orch.store.get("channel_main", ch._norm(PROJECT)) or {}).get(
+        "router_cwd"
+    )
+
+
+async def test_stuck_work_resumed_to_the_main_is_routed_not_done_there(settings, cfg_dir):
+    from tests.test_config_gateway import make
+
+    orch, _ = make(settings, cfg_dir, [])
+    hub = orch.channel
+    main, _, _ = hub.pull(PROJECT, None, "/w/main", 0, "claude_code", "app")
+    worker, _, _ = hub.pull(PROJECT, None, "/w/worker", 0, "claude_code", "cli")
+    m, _ = hub.send(PROJECT, "fix the hud", session_id=worker.session_id)
+    hub.pull(PROJECT, worker.session_id)
+    hub.stall(worker.session_id, "rate limit")
+    _, target = hub.resume(f"m{m['num']}", main.session_id)  # ↪️ the main on Telegram
+    assert target is main and "do not do it yourself" in main.queue._queue[0]["text"]

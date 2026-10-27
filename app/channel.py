@@ -460,12 +460,14 @@ class ChannelHub:
             self._notify("send_main_offline", rec["project"])
 
     def _untaken(self) -> None:
-        """Work a free session leaves untaken for QUEUE_WAIT (its agent is not pulling) goes to the
-        operator as stuck, who moves, waits or cancels it."""
+        """Routing work the main leaves untaken for QUEUE_WAIT (busy on something else, or not
+        pulling): the main counts as stuck and a temporary router takes over. Other work a session
+        leaves untaken for QUEUE_WAIT once it is free (counted from its last answer, not from when the
+        work was queued behind its job) goes to the operator as stuck."""
         late = (now() - QUEUE_WAIT).isoformat()
         for s in [x for x in self.sessions.values() if x.mode == "pull"]:
-            if self.in_progress(s.session_id):
-                continue
+            busy = bool(self.in_progress(s.session_id))
+            free_since = s.last_work.isoformat()
             for msg in list(s.queue._queue):
                 if msg.get("route") and msg.get("queued_at", "") < late:  # the main is not routing
                     self.stall(
@@ -473,7 +475,13 @@ class ChannelHub:
                         f"routing work untaken for {int(QUEUE_WAIT.total_seconds() // 60)} min",
                     )
                     break
-                if msg.get("kind") != "answer" and msg.get("queued_at", "") < late:
+                waiting_since = max(msg.get("queued_at", ""), free_since)
+                if (
+                    not busy
+                    and msg.get("kind") != "answer"
+                    and not msg.get("route")
+                    and waiting_since < late
+                ):
                     self._take(s, msg)
                     self._stall([msg], s.session_id,
                                 f"not picked up within {int(QUEUE_WAIT.total_seconds() // 60)} min")  # fmt: skip
@@ -1152,6 +1160,8 @@ class ChannelHub:
         if target is None:
             self._set(msg, "pending")  # the next session of the project to connect takes it
             return msg, None
+        if target is self.main_for(target.project) and msg.get("kind") != "answer":
+            self._mark_route(msg, target)  # the main routes it, it does not do it
         self._enqueue(target, msg)
         self._assigned(msg, target)
         return msg, target
