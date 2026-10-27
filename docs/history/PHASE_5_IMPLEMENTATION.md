@@ -1,12 +1,12 @@
 # Phase 5 Implementation: Domain Plugins
 
-Audit: [PHASE_5_AUDIT.md](PHASE_5_AUDIT.md). Contract: [PLUGIN_DEVELOPMENT.md](PLUGIN_DEVELOPMENT.md).
+Audit: [PHASE_5_AUDIT.md](PHASE_5_AUDIT.md). Contract: [PLUGIN_DEVELOPMENT.md](../PLUGIN_DEVELOPMENT.md).
 Plugins:
-- [software](SOFTWARE_ENGINEERING_PLUGIN.md)
-- [documents](RESEARCH_DOCUMENTS_PLUGIN.md)
-- [data](DATA_PROCESSING_PLUGIN.md)
-- [media](MEDIA_PLUGIN.md)
-- [unity](UNITY_PLUGIN.md)
+- [software](../SOFTWARE_ENGINEERING_PLUGIN.md)
+- [documents](../RESEARCH_DOCUMENTS_PLUGIN.md)
+- [data](../DATA_PROCESSING_PLUGIN.md)
+- [media](../MEDIA_PLUGIN.md)
+- [unity](../UNITY_PLUGIN.md)
 
 ## Shared contracts
 
@@ -20,7 +20,7 @@ Plugins:
   - failed/skipped steps, limitations, routing, next actions
 - **Routing**: explicit domain, automatic classification (scores + reasons + all candidates recorded), model fallback only for read-only answers, clarification when ambiguous, `rejected` for inactive plugins. A task is never silently routed to an unrelated plugin.
 
-## End-to-end results (real; see [DEMO_EVIDENCE.md](DEMO_EVIDENCE.md))
+## End-to-end results (real; see [DEMO_EVIDENCE.md](../DEMO_EVIDENCE.md))
 
 | Example | Status | Evidence |
 |---|---|---|

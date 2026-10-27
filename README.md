@@ -1,296 +1,262 @@
-# Agent Gateway: Generic Multi-Agent Platform
+# Agent Gateway
 
-One gateway accepts different kinds of tasks (from Telegram, REST or scripts) and handles each one end to end:
-1. Picks verified capabilities through a central registry.
-2. Plans a validated workflow (domain plugins provide the knowledge).
-3. Executes it with a durable workflow engine and a policy-checked tool subsystem.
-4. Validates real outputs with quality gates.
-5. Returns an evidence-based result envelope.
+**Run your coding agents from Telegram.** Agent Gateway is a local server that connects the AI coding
+tools on your machine (Claude Code, Codex, Cursor, Antigravity, OpenCode) to one Telegram group. You
+send work from your phone. The agent session that has the project open picks it up, does it in the
+repo, and replies in the group. Questions, approvals, reviews and generated art all come back the same
+way.
 
-> **What actually works today:** [CAPABILITY_MATRIX.md](docs/CAPABILITY_MATRIX.md), with run evidence in [DEMO_EVIDENCE.md](docs/DEMO_EVIDENCE.md).
-> - **Verified locally:** workflow engine, crash recovery, tool/MCP subsystem, software (deterministic), documents, data, media-inspect and Unity-inspect plugins, REST.
-> - **Verified with a real coding runtime:** OpenCode 2.1.0 (`task_type: code_change`), with gateway-enforced permissions.
-> - **Not working here:** Claude Code (stored login returns 401), model/image providers (no API keys), Telegram group/channel (placeholder chat IDs), Unity Editor tools (no Editor running).
+It also runs plain workflows without an agent (data, documents, media inspection) through a
+config-driven workflow engine with a REST API.
 
-## Config-driven orchestration (new)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)
+![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)
 
-Agents, capabilities, executors, model providers, MCP servers, routes, versioned workflows and policies are declared in [`config/`](config/) (YAML, schema-versioned, validated at startup).
-- Adding an agent with existing capabilities, or a new workflow plus route, needs **no code change**.
-- Telegram reports, and replies in the linked Discussion Group, become correlated feedback that runs a configured follow-up workflow, e.g. visual feedback: Gemini design analysis, a deterministic implementation prompt, then a handoff to Claude Code or back to the caller.
-- The gateway is also an **MCP server** (`/mcp`) for clients like Claude Code.
+- [Demo](#demo)
+- [Features](#features)
+- [Supported agents](#supported-agents)
+- [Quick start](#quick-start)
+- [How it works](#how-it-works)
+- [Documentation](#documentation)
+- [Contributing](#contributing), [Security](#security), [License](#license)
 
-Details: [CONFIG_DRIVEN_GATEWAY.md](docs/CONFIG_DRIVEN_GATEWAY.md). Audit: [CONFIG_UPGRADE_AUDIT.md](docs/CONFIG_UPGRADE_AUDIT.md).
+## Demo
+
+### 1. A Telegram request handled by an agent session
+
+The operator sends work to a session from the Telegram group. The agent is idle and costs nothing
+until the message arrives. Then the gateway wakes it. The exchange below is a shortened example;
+session numbers and wording vary.
+
+```text
+Telegram (operator)      /sessions
+Bot                      s16  ClaudeCode(App)-AgentGateway   local_agent_tool   ready
+                         s49  Antigravity(App)-MarioClone    gst-002-mario-snes ready
+                         s52  Cursor(App)-MarioClone         gst-002-mario-snes ready
+Telegram (operator)      /send s49 Add a pause button to the HUD
+Bot                      📬 m561 delivered to Antigravity(App)-MarioClone
+   ... the waiter in that session wakes within about a second; the agent calls get_messages,
+   edits the repo, runs the tests, then calls reply_message ...
+Bot                      Antigravity(App)-MarioClone: Added a Pause button to the HUD …
+                         (changed / validated / not done, at most 500 characters)
+```
+
+If the agent needs a decision, it asks with `request_human_input`. The question shows up in the group
+with one button per option. For risky steps (release, deploy, push) the agent asks with
+`secure=true`, and the reply must be the operator's passcode. The bot deletes that reply at once.
+
+### 2. A workflow over REST, no agent and no API keys
+
+This runs on a fresh install. Copy the token from `.env`, but don't paste it into shared logs.
 
 ```bash
-uv run python -m app.gateway_config config
+export API_TOKEN=$(grep '^API_TOKEN=' .env | cut -d= -f2-)
 ```
 
 ```bash
-claude mcp add --transport http --scope project agent-gateway http://127.0.0.1:8000/mcp --header "Authorization: Bearer $API_TOKEN"
-```
-
-## Documentation
-
-| Topic | Doc |
-|---|---|
-| Architecture | [GENERIC_PLATFORM_ARCHITECTURE.md](docs/GENERIC_PLATFORM_ARCHITECTURE.md) |
-| Capability registry | [CAPABILITY_REGISTRY.md](docs/CAPABILITY_REGISTRY.md) · [CAPABILITY_MATRIX.md](docs/CAPABILITY_MATRIX.md) |
-| Workflow engine / recovery | [WORKFLOW_ENGINE.md](docs/WORKFLOW_ENGINE.md) · [WORKFLOW_RECOVERY.md](docs/WORKFLOW_RECOVERY.md) |
-| Security | [SECURITY.md](docs/SECURITY.md) · [SECURITY_MODEL.md](docs/SECURITY_MODEL.md) · [WORKFLOW_SECURITY.md](docs/WORKFLOW_SECURITY.md) |
-| Plugins | [PLUGIN_DEVELOPMENT.md](docs/PLUGIN_DEVELOPMENT.md) · [software](docs/SOFTWARE_ENGINEERING_PLUGIN.md) · [documents](docs/RESEARCH_DOCUMENTS_PLUGIN.md) · [data](docs/DATA_PROCESSING_PLUGIN.md) · [media](docs/MEDIA_PLUGIN.md) · [unity](docs/UNITY_PLUGIN.md) |
-| Config-driven gateway | [CONFIG_DRIVEN_GATEWAY.md](docs/CONFIG_DRIVEN_GATEWAY.md) · [CONFIG_UPGRADE_AUDIT.md](docs/CONFIG_UPGRADE_AUDIT.md) |
-| Phase reports | [P2 audit](docs/PHASE_2_AUDIT.md) · [P2](docs/PHASE_2_IMPLEMENTATION.md) · [P3 audit](docs/PHASE_3_ARCHITECTURE_AUDIT.md) · [P3](docs/PHASE_3_IMPLEMENTATION.md) · [P4 audit](docs/PHASE_4_AUDIT.md) · [P4](docs/PHASE_4_IMPLEMENTATION.md) · [P5 audit](docs/PHASE_5_AUDIT.md) · [P5](docs/PHASE_5_IMPLEMENTATION.md) |
-
-## Quick install
-
-```bash
-scripts/install.sh
-```
-
-One idempotent script, only git needed beforehand: uv (installed if missing), Python 3.12 and dependencies, `.env` with local secrets, Claude Code global setup and a `doctor` check. Options: `--agents LIST`, `--env dev|uat`, `--no-global`, `--start`. Telegram values can be exported first (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CONTROL_CHAT_ID`, `TELEGRAM_ALLOWED_USER_IDS`); see `scripts/install.sh --help`.
-
-Agents that should install or connect themselves: point them to [docs/AGENT_CONNECT.md](docs/AGENT_CONNECT.md).
-
-## Quick start (uv commands)
-
-```bash
-uv sync
-```
-
-```bash
-uv run agw setup
-```
-
-`setup` sets up this machine in one go:
-- creates `.env` if needed and fills only missing local secrets
-- registers the gateway's MCP servers in Claude Code (user level)
-- installs the `agent-gateway` skill, plus the permissions and the session hook that connect every git repo in the projects folder (`~/Working` by default)
-
-`uv run agw setup --remove` undoes the global part.
-
-Other coding agents connect the same way, with each agent's own global MCP config and instructions file:
-
-```bash
-uv run agw setup --agents detected
-```
-
-| Agent | MCP config | Instructions |
-|---|---|---|
-| `opencode` | `~/.config/opencode/opencode.json` (`mcp.agent-gateway`, remote) | `~/.config/opencode/AGENTS.md` |
-| `codex` | `~/.codex/config.toml` (marked `[mcp_servers.agent-gateway]` block) | `~/.codex/AGENTS.md` |
-| `antigravity` (alias `gemini`) | `~/.gemini/config/mcp_config.json` (`serverUrl`) | `~/.gemini/GEMINI.md` |
-| `cursor` | `~/.cursor/mcp.json` | paste `agw setup --agents cursor --print-rules` into Cursor > Settings > Rules |
-
-Codex also gets the Claude Code skills (agent-gateway, game-review, ...) as links in `~/.codex/skills` (removed again with `--remove`; its own skills stay), and `agw session --agent codex` runs `codex exec --full-auto` so it can edit the workspace like a Claude session. `--agents` takes names, `all` or `detected`. Each file is backed up once (`*.agw-backup`). Add `--remove` to take the gateway entries out again. Telegram `/setup` has the same on/off buttons per agent. Restart the agent afterwards.
-
-With `MCP_REQUIRE_TOKEN=true` each config also gets an `Authorization: Bearer` header that names `AGW_API_TOKEN` (never the value): export it in the agent's environment. The header syntax follows each tool's docs; only OpenCode's was tried on this Mac.
-
-These agents have no loop of their own, so they take Telegram work only while `agw session --agent opencode|codex|antigravity` runs in the repo. It asks the gateway every minute and starts the agent only when there is work (an idle minute costs nothing); a fresh run that finds unfinished work gets its text back in `in_progress_messages`. Extra arguments go to the agent, e.g. `-- --auto` for OpenCode. Telegram: `/open p# opencode`.
-
-**Reviews and research.** `review_project` runs the game-review skill's `run.sh` in the project's folder (a fresh read-only agent per role/agent, reports in `4_delivery/uat/reviews`), without the gateway's secrets, at most one run per project at a time; `get_review` follows it, and Telegram gets 🔎 at the start and ✅/❌ with the report names at the end. Switch it with `/mcp` like any tool.
-
-**Operator controls.** Approving, running an action and answering a question are the operator's: over REST they need `OPERATOR_TOKEN` (unset = Telegram only), never `API_TOKEN`, which agents hold. `/off` on a window started with `agw session` switches its push and pull sessions together. `/cancel` of work in progress tells the session to stop. New work goes to an idle session of the project before a busy one. A reply to an agent's report reaches that agent (its session, else the project's), and the answer to an agent's question is pushed to the session that asked. `/deploy` shows 🛑 Stop for a running deploy; `/reviews` lists review runs with 🛑 Stop. A deploy left running across a restart still blocks a second one; stopping the gateway reports running deploys and reviews as interrupted. The gateway also logs to `var/agw.log` (5 × 5 MB).
-
-**What Telegram shows.** Every request between agents (🤝 with ✍️ Answer myself / ❌ Cancel) and its answer (💡); `/asks` lists the open ones. Sessions are announced when they connect (🔌) and leave (⚪), and a queued `/send` says when it finally reaches a session (📬). An agent's question has one button per option, and replying to it answers it. A question or escalation Telegram refuses is reported back to the agent, or retried, instead of being lost.
-
-### Environments (prod, dev, uat)
-
-Each environment runs beside the others from this folder, with its own settings file, port and data:
-
-| Env | Settings | Port | Data |
-|---|---|---|---|
-| prod (default) | `.env` | 8000 | `var/` |
-| dev | `.env.dev` | 8001 | `var/dev/` |
-| uat | `.env.uat` | 8002 | `var/uat/` |
-
-```bash
-uv run agw --env dev setup
-```
-
-```bash
-uv run agw --env dev dev
-```
-
-- Agent configs (Claude Code, OpenCode, Codex, Antigravity, Cursor) always point at prod. In dev/uat, `setup --agents`, the global setup and the matching Telegram `/setup` buttons are refused.
-- `uv run agw --env dev setup --repo PATH` connects one test repo to dev (its `.mcp.json` only).
-- Telegram is off in dev/uat until their file has their own bot (and test group). Prod's bot token is refused there, because two gateways polling one bot would steal prod's messages.
-- Paid providers (fal, ...) are off in dev/uat until you add their keys to that file.
-- `AGW_ENV=dev` works too, in place of `--env dev`.
-
-**Prod runs from its own copy.** `../.agw-prod` is a git worktree on `main`, with prod's `.env` and `var/`. The global Claude hook and channel run from its `.venv` too. Work happens here on `develop` (`--env dev`); prod only changes when you release:
-
-```bash
-git -C ../.agw-prod merge --ff-only develop
-```
-
-```bash
-cd ../.agw-prod && uv sync
-```
-
-Then restart prod there (Ctrl-C, `uv run agw dev`). To take prod down on purpose, run `uv run agw stop` there; start it again with `uv run agw dev` in a terminal. The sessions' 10-minute health check never starts the gateway, it only checks that the session still reaches the local MCP servers (and asks you to reconnect with /mcp if not). Sessions opened before this change may still start it in the background; `agw stop` keeps those out too.
-
-```bash
-uv run agw dev
-```
-
-`dev` starts the OpenCode server (when `OPENCODE_ENABLED=true`) and the gateway on `127.0.0.1:8000`. Then send `/menu` to the bot in your Telegram group.
-
-**3D models (Meshy).** `generate_art(..., output="model3d")` makes a 3D model instead of an image: from text (preview mesh, then a textured refine) or from a reference image (`image_path`), as glb/fbx/obj/usdz/stl. Set `MESHY_API_KEY` with `/keys` (nothing else: Meshy always uses its newest model): the tool appears without a restart. It goes through the same approval and review as images: the operator sees Meshy's preview with ✅ Accept / ✏️ Feedback (Feedback makes a revised model), and agents get `get_task_result(...).models[0].path` only after Accept. Every connected agent (Claude Code, OpenCode, Codex, Antigravity, Cursor) uses it through the same `agent-gateway` MCP server. Meshy charges credits per task (needs a paid plan; failed tasks are refunded).
-
-`/mcp` in Telegram switches each tool agents call (`generate_art`, `delegate_task`, `ask_agent`, ...) on or off while the gateway runs: the next call obeys, no restart. The choice is saved and survives restarts. A switch never touched starts from the config (`generate_art`: fal's `enabled` in `config/providers/models.yaml`; the rest: on). Turning `generate_art` off also stops image generation in workflows.
-
-`/agents` lists every agent in three groups: 🖥 app (desktop app or IDE, e.g. Claude desktop, Cursor), ⌨️ CLI (terminal: `agw session`, Codex, OpenCode, ...) and ☁️ API (connectors the gateway calls for tasks: OpenAI, Gemini, DeepSeek, Claude Code headless, OpenCode server, image generation). Sessions get pause/resume and close buttons (close asks first); API agents switch on/off live, like `/mcp`. Claude Code sessions report app or CLI by themselves (from `CLAUDE_CODE_ENTRYPOINT`); other agents are grouped by name. The old role list is `/roles`.
-
-`/keys` shows the provider keys and models that `config/providers/models.yaml` names (`api_key_env`, `model_env`): missing, or set (last 4 characters) and whether the value is saved or comes from `.env`. ✏️ asks for the value in a private chat with the bot (open it once with /start). The bot deletes that message at once, saves the value in the gateway database encrypted with `AGW_SECRET_KEY` from `.env`, and reloads the model and image providers without a restart. Saved values win over `.env` and are loaded again at every start. 🗑 clears a saved value (asks first); `.env` applies again. `uv run agw setup` adds `AGW_SECRET_KEY` when missing. Keep it: without it the saved values cannot be read (re-enter them), and a copy of the database alone reveals nothing. Only allowlisted users; values are never logged or shown back. Telegram keeps chats on its servers, so prefer keys you can rotate.
-
-**Deploy from Telegram.** `/deploy` (or 🚀 in `/menu`) lists the projects that have `4_delivery/deploy/deploy.sh`, then asks for UAT or PROD, the branch (main/develop first, then newest), and dry run or real deploy, and shows a confirmation (PROD real deploys are flagged). It runs `deploy.sh <env> [--dry-run]` in a separate deploy worktree next to the project (`../.agw-deploy/<repo>`, checked out at that branch), so the project's own checkout and uncommitted work are never touched; gitignored `4_delivery/deploy/.env.deploy` is linked in. One deploy per project at a time. The start and the real outcome (exit code, commit, last error line) are posted with `report_deployment`, and the log file follows (kept in `var/deploys`). The first deploy of a project creates the worktree, so the engine imports everything once.
-
-**Models per project.** Providers are set up once and shared; each project picks which models its workflow roles use.
-
-1. `/providers` lists every provider (from `config/providers/models.yaml` plus ones added in Telegram). ➕ adds an OpenAI-compatible preset (OpenRouter, Groq, Mistral, xAI, Together, Fireworks, Qwen/DashScope, Moonshot, Zhipu, Z.AI, Ollama, LM Studio), kept in the database; no YAML edit, no restart. Set its key with `/keys`. (Preset URLs are the providers' documented OpenAI-compatible endpoints; check them against the provider if a call fails.)
-2. A provider can run several models: `/findmodel openrouter qwen` lists the provider's own model ids (tap to copy), `/addmodel openrouter qwen/qwen3-coder` adds one.
-3. `/plan p#` sets, per workflow role (designer, implementer, assistant, ...), an ordered list of models and runtimes for that project. A step for that role tries them first, then the role's defaults; a model that fails or is switched off in `/agents` falls through to the next. A project without a plan keeps the defaults.
-
-| Command | Purpose |
-|---|---|
-| `uv run agw setup` | secrets + global setup (`--agents LIST` other agents, `--repo PATH…` per-repo files, `--template` for template repos, `--remove`) |
-| `uv run agw dev` | OpenCode + gateway together |
-| `uv run agw doctor` | what is configured and reachable (also on Telegram: `/setup`) |
-| `uv run agw open <name>` | open a project folder in a Claude session (Telegram: `/open`) |
-| `agw session [--agent opencode\|codex\|antigravity]` | in a repo: Claude Code that takes work from Telegram (push + pull), or another agent run once a minute |
-| `uv run agw serve [--port 8000] [--reload]` | gateway only (REST, Telegram, `/mcp`) |
-| `uv run agw opencode` | `opencode serve` with `OPENCODE_PASSWORD`/`OPENCODE_URL` from `.env` |
-| `uv run agw validate` | validate `config/` |
-
-Older names still work: `init-env`, `mcp-setup`, `global-setup`, `repo-setup`.
-
-## Setup
-
-Requires [uv](https://docs.astral.sh/uv/) (`brew install uv`) and git. uv installs Python 3.12 from `.python-version`.
-
-```bash
-uv sync --locked
-```
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env` (blank values are treated as unset). Then start the gateway:
-
-```bash
-uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
-```
-
-At startup the gateway:
-- discovers configured MCP servers
-- runs free health checks (`claude --version`, `GET /models`)
-- recovers interrupted tasks from `var/state.db`
-- starts Telegram long polling if `TELEGRAM_BOT_TOKEN` is set
-
-## Using it
-
-**REST** (all `/api/v1/*` endpoints need `Authorization: Bearer $API_TOKEN`):
-
-```bash
-curl -s -H "Authorization: Bearer $API_TOKEN" -F "file=@sales.csv;type=text/csv" http://127.0.0.1:8000/api/v1/attachments
+curl -s -H "Authorization: Bearer $API_TOKEN" -F "file=@examples/sales.csv;type=text/csv" http://127.0.0.1:8000/api/v1/attachments
 ```
 
 ```bash
 curl -s -H "Authorization: Bearer $API_TOKEN" -H 'content-type: application/json' -d '{"objective":"aggregate the sales by region","attachment_ids":["att_…"],"data":{"group_by":["region"],"metrics":{"amount":["sum","count"]}}}' http://127.0.0.1:8000/api/v1/tasks
 ```
 
-Endpoints:
+```bash
+curl -s -H "Authorization: Bearer $API_TOKEN" http://127.0.0.1:8000/api/v1/tasks/tsk_…/result
+```
 
-| Endpoint | Purpose |
+The task is routed to the data plugin (`data/aggregate`). Its output is validated, and the result
+lists the artifacts: `aggregated.csv` (validation `passed`), `data_summary.md` and `result.json`.
+`GET /api/v1/artifacts/<id>/content` returns the CSV:
+
+```text
+region,amount_sum,amount_count
+EU,17,2
+US,13,2
+APAC,12,1
+```
+
+More recorded runs (parallel steps, retries, crash recovery, approvals) are in
+[docs/DEMO_EVIDENCE.md](docs/DEMO_EVIDENCE.md).
+
+## Features
+
+- **Telegram control.** `/send` work to a session, `/open` a project in a new session, list
+  `/sessions` and `/agents`, `/cancel` work, `/deploy`, switch MCP tools on or off with `/mcp`, and
+  manage provider `/keys`. Only allowlisted users in the control group can do this.
+- **Wake on work, no polling.** Idle sessions wait on a long-poll (`agw wait`) or on a hook. No model
+  runs until a message is queued for them.
+- **Answers come back to the asker.** Results of delegated tasks, art reviews, project reviews and
+  answered questions are pushed to the session that asked, in that same tool.
+- **Agent to agent.** `ask_agent` sends a request to another session. Every request and answer is
+  copied to the group, and the operator can step in.
+- **Questions and approvals.** Questions with buttons are re-sent every 30 minutes until answered.
+  Passcode confirmation covers risky steps. `close_question` closes the Telegram copy when the
+  question was answered in the session.
+- **Reviewed art.** `generate_art` makes images (fal, OpenAI) and 3D models (Meshy). Each one is
+  approved and reviewed in Telegram before the agent can use it. Paid calls run only when requested.
+- **Project reviews.** `review_project` runs independent QA or product reviews (benchmark, parity,
+  playtest, ideation) on a fresh, read-only agent.
+- **Deploys.** `/deploy` runs a project's `deploy.sh` for UAT or PROD in a separate worktree and
+  reports the result.
+- **Workflow engine.** Agents, capabilities, providers, routes, workflows and policies are declared in
+  YAML under [`config/`](config/). Runs are durable, survive restarts, retry with bounds, pass quality
+  gates and check every tool call against policy.
+- **Local first.** Everything listens on `127.0.0.1`. Secrets live in `.env` or are encrypted in the
+  database, and they are redacted from logs.
+
+## Supported agents
+
+| Agent | Connected by `agw setup` | How Telegram work reaches it |
+|---|---|---|
+| Claude Code (app or CLI) | user MCP servers, `agent-gateway` skill, SessionStart and UserPromptSubmit hooks | the session runs `agw wait` in the background; it exits with instructions when work arrives |
+| Codex (desktop) | `~/.codex/config.toml`, `AGENTS.md`, skills, a hook that records the open thread | the gateway pushes queued work into the open Codex thread |
+| Cursor | `~/.cursor/mcp.json`, `~/.cursor/hooks.json` | the `stop` hook waits and returns the work as the next message |
+| Antigravity | `~/.gemini/config/mcp_config.json`, `GEMINI.md` | a detached `agw wait --agent antigravity` wakes the conversation through `agentapi` |
+| OpenCode, CLI agents | their MCP config and `AGENTS.md` | `agw session --agent <name>` starts a run only when there is work |
+
+Every agent uses the same MCP tools:
+
+- **Messages:** `get_messages`, `reply_message`
+- **Reports:** `submit_report`, `report_deployment`
+- **Operator questions:** `request_human_input`, `get_human_response`, `close_question`
+- **Other agents:** `ask_agent`, `get_ask`, `list_agents`
+- **Tasks:** `delegate_task`, `get_task_status`, `get_task_result`, `cancel_task`
+- **Art:** `generate_art`
+- **Reviews:** `review_project`, `get_review`
+- **Capabilities:** `list_capabilities`, `get_capability_details`
+
+Agents that should install or connect themselves can follow
+[docs/AGENT_CONNECT.md](docs/AGENT_CONNECT.md).
+
+## Quick start
+
+Requirements:
+- macOS or Linux, with git.
+- [uv](https://docs.astral.sh/uv/). The installer adds it if missing, and uv brings Python 3.12.
+- A Telegram bot, for remote control (optional).
+
+```bash
+git clone https://github.com/datnguyeniosdev/SMAgent.git agent-gateway
+```
+
+```bash
+cd agent-gateway && scripts/install.sh --agents detected
+```
+
+The installer is idempotent. It installs the dependencies and creates `.env` with generated local
+secrets. Then it connects Claude Code and every other agent it finds, and ends with `agw doctor`. To
+include Telegram, export its values first:
+
+```bash
+TELEGRAM_BOT_TOKEN=... TELEGRAM_CONTROL_CHAT_ID=-100... TELEGRAM_ALLOWED_USER_IDS=123 scripts/install.sh
+```
+
+Then start the gateway and keep it running:
+
+```bash
+uv run agw dev
+```
+
+```bash
+curl -s http://127.0.0.1:8000/health
+```
+
+Restart your agents so they load the new MCP servers and hooks. Then open a project folder (one with
+`.git`, `AGENTS.md` or `CLAUDE.md` under the projects folder, `~/Working` by default) and send `/menu`
+to the bot.
+
+| Command | Purpose |
 |---|---|
-| `GET /health` | health check (no auth) |
-| `POST /api/v1/tasks` | generic `TaskRequest`; `workflow` = explicit definition; `tool` = direct tool; legacy `description` + `workflow` enum still works |
-| `GET /api/v1/tasks/{id}` | task + workflow steps |
-| `/api/v1/tasks/{id}/result` · `/workflow` · `/events` · `/artifacts` · `/cancel` · `/answer` | result envelope, definition + step records, events, artifacts, cancel, answer a clarification |
-| `GET /api/v1/approvals` · `POST /api/v1/approvals/{id}` | pending approvals; `{"approve": true}` |
-| `/api/v1/config/validate` · `POST /api/v1/config/reload` · `/api/v1/agents/registry` | configuration diagnostics, validated reload, agents/capabilities with executor eligibility |
-| `/api/v1/tasks/{id}/reports` · `POST /api/v1/reports/{id}/feedback` · `/api/v1/tasks/{id}/handoffs` · `/api/v1/human-input` | reports with screenshots, feedback, handoff records, human input |
-| `POST /api/v1/maintenance/cleanup-artifacts` | retention cleanup (never touches active or referenced artifacts) |
-| `/mcp` | gateway MCP server (Streamable HTTP, same bearer token) |
-| `GET /api/v1/artifacts/{id}/content` | download an artifact |
-| `/api/v1/tools` · `/capabilities` · `/plugins` · `POST /api/v1/plugins/{id}/activate\|deactivate` | registry views and plugin control |
-| `/api/v1/agents` · `/sessions` · `/attachments` · `/messages` · `POST /api/v1/actions/{token}/execute` | Phase 1 endpoints, unchanged |
+| `uv run agw setup [--agents LIST\|detected\|all] [--remove]` | local secrets, plus connecting Claude Code and other agents |
+| `uv run agw dev` | start the gateway (and OpenCode when it is enabled) |
+| `uv run agw stop` | stop it |
+| `uv run agw doctor` | show what is configured and reachable |
+| `uv run agw repo-setup PATH` | refresh the gateway block in one repo's `CLAUDE.md` |
+| `agw wait` | in a repo: wait for that folder's Telegram work (agents run this themselves) |
+| `agw session --agent opencode\|codex\|antigravity` | run a CLI agent only when work arrives |
+| `uv run agw validate` | validate `config/` |
 
-**Telegram** (control group, allowlisted users):
-- `/task <text>` with optional attachments, then pick a button: 🤖 Auto, a domain, or a legacy workflow.
-- Reply to a report in the linked Discussion Group (or `/feedback <task_id|report_id> <text>`) to give feedback; it starts the configured follow-up workflow.
-- `/tool <name> <json>` · `/tools` · `/status` · `/report <id>` · `/steps <id>` · `/stop <id>` · `/retry <id>` · `/answer <id> <text>` · `/approvals` · `/plugins` · `/capabilities` · `/agents` · `/agents_status` · `/sessions`
+Telegram setup (bot, group, IDs), environments (prod, dev, uat side by side), deploys, providers and
+the REST API are covered in the [operator guide](docs/OPERATOR_GUIDE.md).
 
-Reports, tool results, approvals and failures go to the report channel or control group.
+## How it works
 
-### Telegram setup
+```text
+ Telegram group ──► Bot ──► Orchestrator ──► Channel hub ──► agent sessions (wait / hooks / push)
+      ▲                         │                 ▲                   │
+      │                         ▼                 └── MCP /mcp ◄──────┘  get_messages, reply_message, ...
+      └──── reports ◄── Workflow engine ──► tools · plugins · MCP servers · model providers
+                                    (config/: agents, capabilities, routes, workflows, policies)
+```
 
-1. Create the bot with @BotFather and set `TELEGRAM_BOT_TOKEN`.
-2. Add it to a private **control group**. Disable privacy mode (`/setprivacy`) if you want albums.
-3. Add it as **admin with "Post messages"** to the **report channel**. Linking the channel to the group (Discussion) is optional and grants nothing.
-4. Send a message in each, then run this to get the IDs:
+- **Gateway:** a FastAPI app (`app/main.py`) that serves REST, Telegram (polling or webhook) and an
+  MCP server at `/mcp`.
+- **Channel hub (`app/channel.py`):**
+  - One pull session per project folder and tool, for example `ClaudeCode(App)-MarioClone`.
+  - Sessions have leases, expire when idle and are reported when dropped.
+  - Messages are queued per session; answers are routed back to the tool that asked.
+- **Workflow engine:** state is kept in SQLite (`var/state.db`), so runs survive restarts.
+  - Steps are planned by domain plugins (software, documents, data, media, Unity).
+  - Every tool call is checked against `config/policies`.
+- **Details:** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
+  [docs/GENERIC_PLATFORM_ARCHITECTURE.md](docs/GENERIC_PLATFORM_ARCHITECTURE.md).
 
-   ```bash
-   uv run python -m scripts.smoke_telegram --discover
-   ```
+## Documentation
 
-5. Set `TELEGRAM_CONTROL_CHAT_ID`, `TELEGRAM_REPORT_CHANNEL_ID` and `TELEGRAM_ALLOWED_USER_IDS`.
-6. Verify with a real tool task whose reports go to Telegram:
-
-   ```bash
-   uv run python -m scripts.smoke_telegram
-   ```
-
-## Providers, runtimes, MCP
-
-| What | Enable with |
+| Topic | Doc |
 |---|---|
-| OpenCode runtime (**verified**) | `opencode serve` with `OPENCODE_SERVER_PASSWORD`, then `OPENCODE_ENABLED=true`, `OPENCODE_PASSWORD`, optional `OPENCODE_MODEL`, `OPENCODE_SHELL_ALLOWLIST` |
-| Claude Code runtime | `CLAUDE_CODE_ENABLED=true` and a working `claude` login. Run the gateway outside Claude Code (nested sessions are refused) |
-| OpenAI / DeepSeek | `OPENAI_API_KEY` + `OPENAI_MODEL` / `DEEPSEEK_API_KEY` |
-| Image generation | `OPENAI_API_KEY` + `OPENAI_IMAGE_MODEL` |
-| MCP servers | `MCP_SERVERS` JSON: only `allowed_tools` are registered; non-read-only tools need `mcp:execute` in `TOOL_PERMISSIONS` plus approval |
-| Plugins | `PLUGINS`, `PLUGIN_PERMISSIONS`, `TOOL_PERMISSIONS`, `PLUGIN_CONFIG` |
-| QA | `QA_COMMANDS` (JSON name → command, no shell), `QA_SANDBOX=docker` for isolation |
+| Running it (Telegram, environments, deploys, providers, REST) | [OPERATOR_GUIDE.md](docs/OPERATOR_GUIDE.md) |
+| Connecting an agent | [AGENT_CONNECT.md](docs/AGENT_CONNECT.md) |
+| Architecture | [ARCHITECTURE.md](docs/ARCHITECTURE.md) · [GENERIC_PLATFORM_ARCHITECTURE.md](docs/GENERIC_PLATFORM_ARCHITECTURE.md) |
+| Config-driven gateway | [CONFIG_DRIVEN_GATEWAY.md](docs/CONFIG_DRIVEN_GATEWAY.md) |
+| Capabilities | [CAPABILITY_REGISTRY.md](docs/CAPABILITY_REGISTRY.md) · [CAPABILITY_MATRIX.md](docs/CAPABILITY_MATRIX.md) |
+| Workflows | [WORKFLOWS.md](docs/WORKFLOWS.md) · [WORKFLOW_ENGINE.md](docs/WORKFLOW_ENGINE.md) · [WORKFLOW_RECOVERY.md](docs/WORKFLOW_RECOVERY.md) |
+| Plugins | [PLUGIN_DEVELOPMENT.md](docs/PLUGIN_DEVELOPMENT.md) · [software](docs/SOFTWARE_ENGINEERING_PLUGIN.md) · [documents](docs/RESEARCH_DOCUMENTS_PLUGIN.md) · [data](docs/DATA_PROCESSING_PLUGIN.md) · [media](docs/MEDIA_PLUGIN.md) · [unity](docs/UNITY_PLUGIN.md) |
+| Security model | [docs/SECURITY.md](docs/SECURITY.md) · [SECURITY_MODEL.md](docs/SECURITY_MODEL.md) · [WORKFLOW_SECURITY.md](docs/WORKFLOW_SECURITY.md) |
+| Demo evidence | [DEMO_EVIDENCE.md](docs/DEMO_EVIDENCE.md) |
+| Design history (phase plans and audits) | [docs/history/](docs/history/) |
 
-## Tests
-
-Unit, regression, real-local and recovery tests (no network, no paid calls):
+## Development
 
 ```bash
-uv run pytest
+uv sync
 ```
 
 ```bash
-uv run ruff check .
+uv run pytest -q
 ```
 
 ```bash
-uv run ruff format --check .
+uv run ruff check . && uv run ruff format --check .
 ```
 
-Opt-in real integrations (free checks; add `RUN_PAID=1` for paid calls). Missing configuration reports `SKIPPED` / `NOT CONFIGURED`, never a pass:
+The tests make no network or paid calls. Real integrations are opt-in: add `RUN_PAID=1` to allow paid
+calls. Anything not configured reports `SKIPPED`, never a pass.
 
 ```bash
 RUN_INTEGRATION=1 uv run pytest tests/integration -rs
 ```
 
-Re-run every demonstration for real and regenerate the evidence:
-
-```bash
-uv run python -m scripts.demo --unity-project /path/to/UnityProject
-```
-
-```bash
-uv run python -m scripts.render_evidence
-```
-
 ## Limitations
 
-- **Not sandboxed:** the Claude Code runtime and `QA_SANDBOX=none` run on the host.
-- **Process-local:** single process, single tenant. Quick Action buttons don't survive restarts (approvals are re-issued).
-- **Rule-based plugins:** planning is deterministic (no model-assisted planning yet), and document extraction is rule-based; there's no web research.
-- **Unverified integrations:** agent implementation, review, summarization and image generation are implemented but unverified here (credentials and runtime are blocked).
+- **Single user, single machine:** one allowlist and one process. Not built for multi-tenant hosting.
+- **Agents run as you:** agent runtimes and `QA_SANDBOX=none` execute on the host. Point the gateway
+  only at repositories you trust.
+- **Alpha:** interfaces and config may change between versions. See the [changelog](CHANGELOG.md).
+- More in [docs/SECURITY.md](docs/SECURITY.md#known-limitations).
 
-See [SECURITY.md](docs/SECURITY.md#known-limitations).
+## Contributing
+
+Issues and pull requests are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) and the
+[Code of Conduct](CODE_OF_CONDUCT.md).
+
+## Security
+
+Please report vulnerabilities privately, as described in [SECURITY.md](SECURITY.md). Do not open
+public issues for them.
+
+## License
+
+[MIT](LICENSE) © 2026 Darren Nguyen

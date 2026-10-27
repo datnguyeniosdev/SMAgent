@@ -1,7 +1,10 @@
 [project]
 name = "agent-gateway"
 version = "0.1.0"
-description = "Telegram-controlled multi-agent gateway and orchestration MVP"
+description = "Run your coding agents (Claude Code, Codex, Cursor, Antigravity, OpenCode) from Telegram through one local gateway"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "Darren Nguyen", email = "datnguyen.iosdev@gmail.com" }
 ]
@@ -18,6 +21,10 @@ dependencies = [
     "pyyaml>=6.0.3",
     "uvicorn[standard]>=0.54.0",
 ]
+
+[project.urls]
+Repository = "https://github.com/datnguyeniosdev/SMAgent"
+Issues = "https://github.com/datnguyeniosdev/SMAgent/issues"
 
 [project.scripts]
 agw = "app.cli:main"

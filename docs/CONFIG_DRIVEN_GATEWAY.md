@@ -1,6 +1,6 @@
 # Config-Driven Gateway
 
-Audit: [CONFIG_UPGRADE_AUDIT.md](CONFIG_UPGRADE_AUDIT.md).
+Audit: [CONFIG_UPGRADE_AUDIT.md](history/CONFIG_UPGRADE_AUDIT.md).
 
 This upgrade puts a declarative layer on top of the existing engine, store, tool subsystem and task service. Nothing was rewritten. Telegram, REST, CLI and the new MCP server all call the same `Orchestrator` (task service) and `CollaborationService`.
 

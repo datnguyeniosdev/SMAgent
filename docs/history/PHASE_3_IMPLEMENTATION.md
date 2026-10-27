@@ -1,6 +1,6 @@
 # Phase 3 Implementation: Generic Platform
 
-Audit: [PHASE_3_ARCHITECTURE_AUDIT.md](PHASE_3_ARCHITECTURE_AUDIT.md). Architecture: [GENERIC_PLATFORM_ARCHITECTURE.md](GENERIC_PLATFORM_ARCHITECTURE.md).
+Audit: [PHASE_3_ARCHITECTURE_AUDIT.md](PHASE_3_ARCHITECTURE_AUDIT.md). Architecture: [GENERIC_PLATFORM_ARCHITECTURE.md](../GENERIC_PLATFORM_ARCHITECTURE.md).
 
 ## Changes
 
@@ -9,7 +9,7 @@ Audit: [PHASE_3_ARCHITECTURE_AUDIT.md](PHASE_3_ARCHITECTURE_AUDIT.md). Architect
 | Generic intake | `app/intake.py` | `TaskRequest` with constraints, preferences, output format, mode, direct tool, explicit workflow, deadlines, approval flag, idempotency key, correlation/parent ids; legacy workflows mapped to plugin task types |
 | Classification and planning | `app/planner.py` | deterministic routing (explicit → classified → model fallback → clarification), explainable `RoutingDecision`, plan validation against registry and policy, constraints preserved. Model-assisted planning is **not** implemented (no verified model) |
 | Capability registry | `app/capabilities.py` | manifests and status ladder with evidence and health checks; drives router availability |
-| Workflow engine | `app/workflow.py`, `app/engine.py` | see [WORKFLOW_ENGINE.md](WORKFLOW_ENGINE.md) |
+| Workflow engine | `app/workflow.py`, `app/engine.py` | see [WORKFLOW_ENGINE.md](../WORKFLOW_ENGINE.md) |
 | Plugin system | `app/plugins/base.py` | manifests, permission ceiling, prefix rule, isolation, activate/deactivate |
 | Plugins | `app/plugins/{software,documents,data,media,unity}.py` | see plugin docs |
 | Unity extraction | removed from core: Unity prompt, design pipeline, asset dir, `UNITY_PATH` env | `tests/test_platform.py::test_core_has_no_domain_specific_dependencies` |
@@ -31,4 +31,4 @@ Three or more categories ran end to end through intake → planner → engine �
 - unity inspect of a real project
 - cross-domain report
 
-Media generation and the Unity editor show honest `unsupported` errors. See [DEMO_EVIDENCE.md](DEMO_EVIDENCE.md).
+Media generation and the Unity editor show honest `unsupported` errors. See [DEMO_EVIDENCE.md](../DEMO_EVIDENCE.md).

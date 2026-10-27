@@ -1,9 +1,9 @@
 # Phase 4 Implementation: Workflow Engine
 
 Audit: [PHASE_4_AUDIT.md](PHASE_4_AUDIT.md).
-- Engine: [WORKFLOW_ENGINE.md](WORKFLOW_ENGINE.md)
-- Recovery: [WORKFLOW_RECOVERY.md](WORKFLOW_RECOVERY.md)
-- Security: [WORKFLOW_SECURITY.md](WORKFLOW_SECURITY.md)
+- Engine: [WORKFLOW_ENGINE.md](../WORKFLOW_ENGINE.md)
+- Recovery: [WORKFLOW_RECOVERY.md](../WORKFLOW_RECOVERY.md)
+- Security: [WORKFLOW_SECURITY.md](../WORKFLOW_SECURITY.md)
 
 ## Files
 
@@ -27,7 +27,7 @@ Quick Action tokens are in memory, so approvals are re-issued after a restart. S
 4. Engine retries reused the tool executor's dedupe key, so retries returned the cached failure without re-executing. The key now includes the attempt number (`test_engine_retry_reexecutes_real_tool`).
 5. Runtime errors inside plugin operations (Claude 401) were classified `unknown`. They now keep their real category and outcome (`failed`/`auth`).
 
-## Demonstrations (real, see [DEMO_EVIDENCE.md](DEMO_EVIDENCE.md))
+## Demonstrations (real, see [DEMO_EVIDENCE.md](../DEMO_EVIDENCE.md))
 
 | Demo | Outcome |
 |---|---|

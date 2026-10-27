@@ -78,7 +78,7 @@ a gateway is already running and starts nothing.
 | OpenCode | `uv run agw setup --agents opencode` | restart OpenCode |
 | Codex | `uv run agw setup --agents codex` | restart Codex |
 | Antigravity (Gemini CLI) | `uv run agw setup --agents antigravity` | restart Antigravity |
-| Cursor | `uv run agw setup --agents cursor` | paste `uv run agw setup --agents cursor --print-rules` into Cursor > Settings > Rules; restart Cursor |
+| Cursor | `uv run agw setup --agents cursor` | restart Cursor; approve the new hooks if Cursor asks |
 
 Tools load when a session starts, so a session that ran the setup does not see the tools until it is
 restarted. Tell the operator that, with the exact command, instead of continuing without them.
@@ -98,11 +98,15 @@ folder name. Claude Code gets it from the session-start hook. Use the same name 
 
 - **Take work from Telegram:** call `get_messages(project, agent="<your tool>", client="app"|"cli", session_id=<the id it
   returned before>)`. Do each request, then `reply_message(session_id, message_id, text)`. Messages
-  with `meta.kind == "answer"` answer your own `ask_agent`: use them, no reply. Claude Code polls
-  every minute with a recurring job (the hook asks for it), plus a 10-minute check that the session still reaches the local MCP servers (it never starts the
-  gateway; if the tools are gone it asks for `/mcp` reconnect). Other agents take work while
-  `agw session --agent <you>` runs in the repo (Telegram: `/open p# <you>`), or when the user says to
-  check Telegram. Answer only messages handed to your own session_id. `busy` means you still owe an
+  with `meta.kind == "answer"` answer your own `ask_agent`: use them, no reply. Do not poll.
+  How work wakes you:
+  - **Claude Code** runs `agw wait` in the background (the session-start hook gives the command). It
+    exits with instructions when work arrives. Start it again after you reply.
+  - **Cursor** is woken by its `stop` hook.
+  - **Antigravity** runs `agw wait --agent antigravity` once, and it keeps running by itself.
+  - **Codex desktop** gets work pushed into the open thread by the gateway.
+  - **Other CLI agents** take work while `agw session --agent <you>` runs in the repo (Telegram:
+    `/open p# <you>`). Answer only messages handed to your own session_id. `busy` means you still owe an
   answer; a fresh run finds that request's text in `in_progress_messages`. Notes with
   `meta.kind == "answer"` (answers to your questions, "the operator cancelled m#") need no reply.
 - **Finish a task:** `submit_report(project, text, agent_status)`: a title line plus at most 5 short

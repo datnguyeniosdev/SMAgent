@@ -1,6 +1,6 @@
 # Capability Matrix
 
-Status as of 2026-10-20 on this machine, backed by commands actually run (see [DEMO_EVIDENCE.md](DEMO_EVIDENCE.md), [PHASE_2_AUDIT.md](PHASE_2_AUDIT.md), and the opt-in suite `RUN_INTEGRATION=1 uv run pytest tests/integration -rs`).
+Status as of 2026-10-20 on this machine, backed by commands actually run (see [DEMO_EVIDENCE.md](DEMO_EVIDENCE.md), [PHASE_2_AUDIT.md](history/PHASE_2_AUDIT.md), and the opt-in suite `RUN_INTEGRATION=1 uv run pytest tests/integration -rs`).
 
 **Legend.**
 - **VERIFIED**: real operation succeeded with checked output.
