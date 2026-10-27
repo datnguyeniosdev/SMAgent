@@ -79,10 +79,13 @@ anything destructive.
   `meta.kind: "answer"` and wakes you. Act on whichever answer comes first (app or Telegram). When
   the operator answers here in the session first, call `close_question(request_id, answer)` right
   away, so the Telegram copy is closed (no reminder, no second answer).
-- **Important confirmations** (release, deploy, commit, push, merge, git pull): add `secure=true`. On
-  Telegram the operator approves them only with a passcode, so go ahead only on the answer "✅ Duyệt
-  (đã xác minh passcode)" or an approval in this session. "❌ Từ chối" refuses; a ❌ cancelled answer
-  (3 wrong passcodes) is NOT approval: drop that step.
+- **Important confirmations** (release, deploy, commit, push, merge, git pull): ask in both places at
+  once: in this session, and on Telegram with `secure=true`. Then wait; do not wait for one answer
+  before sending the other question. Approval is either a yes in this session, or the Telegram answer
+  "✅ Duyệt (đã xác minh passcode)" (the operator taps ✅ and sends the passcode in a private chat with
+  the bot). Whichever comes first counts. A plain "commit"/"release" message from Telegram is a
+  request, not approval: ask as above. "❌ Từ chối" refuses; a ❌ cancelled answer (3 wrong
+  passcodes) is NOT approval: drop that step.
 - Use `delegate_task` (with `project` and your `session_id`) only when the user asks to hand work to
   the gateway. Its end arrives as an "answer" message; `get_task_result` has the details.
 {deploy}

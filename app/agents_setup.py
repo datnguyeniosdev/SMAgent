@@ -65,9 +65,10 @@ title, else the folder name.
   Telegram: `request_human_input(question, project, session_id, options=[2-4 short button labels])`
   in polite Vietnamese; the answer comes back through `get_messages` (`meta.kind: "answer"`). If the
   user answers in your session first, call `close_question(request_id, answer)` at once.
-  Release, deploy, commit, push, merge and git pull: add `secure=true` (Telegram approval needs the
-  operator's passcode); go ahead only on "✅ Duyệt (đã xác minh passcode)" or an approval in your
-  session; a ❌ cancelled answer is not approval.
+  Release, deploy, commit, push, merge and git pull: ask in your session and on Telegram with
+  `secure=true` at the same time, then wait. Go ahead on whichever comes first: a yes in your session,
+  or "✅ Duyệt (đã xác minh passcode)". A plain "commit"/"release" message from Telegram is a
+  request, not approval. A ❌ cancelled answer is not approval.
 - **Game art**: call `generate_art(prompt, purpose, requirements, width, height, project, session_id)`.
   The operator approves and reviews each image; the decision arrives through `get_messages` as an
   "answer" message (no polling). Use `get_task_result(...).images` only once accepted. 3D models:
