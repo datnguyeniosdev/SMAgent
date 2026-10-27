@@ -600,12 +600,63 @@ class ChannelHub:
             open_ = [x for x in self.sessions.values() if x.cwd == path]
             busy = [m for x in open_ for m in self.in_progress(x.session_id)]
             status = ("working" if busy else "idle" if open_
-                      else "closed" if Path(path).is_dir() else "deleted")  # fmt: skip
+                      else "closed" if Path(path).is_dir() and not c.get("deleted") else "deleted")  # fmt: skip
             nums = ",".join(f"s{x.num}" for x in open_)
             tasks = c.get("tasks") or []
             task = f"m{busy[0].get('num')}" if busy else (tasks[-1]["tag"] if tasks else "")
             out.append({**c, "path": path, "status": status, "sessions": nums, "task": task})
         return sorted(out, key=lambda c: c.get("created_at", ""), reverse=True)
+
+    def find_child(self, ref: str) -> dict | None:
+        """A child by its folder name (ui-ab12) or lane, when exactly one is not deleted."""
+        kids = [c for _, p in self.projects() for c in self.children(p) if c["status"] != "deleted"]
+        hits = [c for c in kids if Path(c["path"]).name == ref] or [
+            c for c in kids if c["lane"] == ref
+        ]
+        return hits[0] if len(hits) == 1 else None
+
+    def prune_child(self, path: str) -> str:
+        """Delete a child's folder only when nothing is lost: no open session in it, inside
+        <repo>/.agw-children (symlinks resolved), no uncommitted tracked edits, and its HEAD is the
+        branch tip in the project repo (fetched back). The branch stays; the record is marked
+        deleted. The operator confirms with a button (Telegram). Raises ValueError when it refuses."""
+        c = self.svc.store.get("channel_child", path)
+        if c is None:
+            raise ValueError(f"no child folder {path}")
+        if c.get("deleted"):
+            return "already deleted"
+        if any(
+            x.cwd == path or x.cwd.startswith(path + "/") for x in self.sessions.values() if x.cwd
+        ):
+            raise ValueError("a session is still open in it: /close it first")
+        repo = Path(c.get("repo") or "/nonexistent").resolve()
+        home, real = (repo / CHILDREN).resolve(), Path(path).resolve()
+        if home.parent != repo or real.parent != home or Path(path).parent.resolve() != home:
+            raise ValueError(f"not a folder inside {repo / CHILDREN}")
+        branch = c["branch"]
+        if real.is_dir():
+            tip = _git(repo, "rev-parse", "--verify", "-q", f"refs/heads/{branch}")
+            if not tip or tip != _git(real, "rev-parse", "--verify", "-q", "HEAD"):
+                raise ValueError(f"branch {branch} is not in the project repo as the copy has it "
+                                 "(not fetched back yet)")  # fmt: skip
+            setup = {
+                "CLAUDE.md",
+                ".mcp.json",
+                ".claude/",
+                ".claude/settings.local.json",
+            }  # gateway-made
+            dirty = [ln[3:] for ln in (_git(real, "status", "--porcelain") or "").splitlines()
+                     if ln[3:] not in setup]  # fmt: skip
+            if dirty:  # tracked edits or new files never committed: they would be lost
+                raise ValueError(f"it has uncommitted changes: {', '.join(dirty[:5])}")
+            if (real / ".git").is_file():  # a git worktree: git drops it and its admin files
+                _git(repo, "worktree", "remove", "--force", str(real))
+            shutil.rmtree(real, ignore_errors=True)
+            if real.exists():
+                raise ValueError(f"could not delete {real}")
+        self.svc.store.put("channel_child", path, {**c, "deleted": now().isoformat()})
+        self.svc.store.event("channel.child_pruned", path=path, branch=branch)
+        return f"deleted; branch {branch} kept in the project repo"
 
     def _tag(self, path: str, msg: dict) -> None:
         """Remember which request a child folder got: m# and its first words."""
@@ -735,11 +786,15 @@ class ChannelHub:
                     "path": old["path"]}  # fmt: skip
         try:
             repo = await asyncio.to_thread(_toplevel, main.cwd)
-            path, branch = await asyncio.to_thread(_worktree, repo, lane)
+            free, started = shutil.disk_usage(repo).free, time.monotonic()
+            path, branch, base, target, provider = await asyncio.to_thread(_worktree, repo, lane)
         except ValueError:  # no git repo, worktree failed: it stays with the main
             msg.update(session_id=session_id, delivered_at=now().isoformat())
             self._set(msg, "delivered")
             raise
+        self.svc.store.event("channel.child_created", path=str(path), branch=branch, provider=provider,
+                             seconds=round(time.monotonic() - started, 2), free_before=free,
+                             free_after=shutil.disk_usage(repo).free)  # fmt: skip
         from app.config import ENV_PORTS, env_name
         from app.repo_setup import setup_repo
 
@@ -747,7 +802,8 @@ class ChannelHub:
         await asyncio.to_thread(setup_repo, path, url, msg["project"], False)
         self.svc.store.put("channel_child", str(path), {"project": msg["project"], "lane": lane,
                            "branch": branch, "repo": str(repo), "parent": session_id, "path": str(path),
-                           "agent": main.agent or "claude_code", "created_at": now().isoformat()})  # fmt: skip
+                           "agent": main.agent or "claude_code", "created_at": now().isoformat(),
+                           "base": base, "target": target, "provider": provider})  # fmt: skip
         self._tag(str(path), msg)
         msg["wait_cwd"] = str(path)
         self._set(msg, "pending")
@@ -1164,6 +1220,11 @@ class ChannelHub:
         # a child's answer (to the operator or another agent) brings its branch into the project repo
         child = self.svc.store.get("channel_child", rec.get("cwd") or "")
         fetched = bool(child) and await asyncio.to_thread(_fetch_back, child)
+        overlap = ""
+        if fetched or (child or {}).get("provider") == "worktree":  # its branch is in the repo
+            others = [c for c in self.children(rec["project"]) if c["status"] != "deleted"
+                      and c["path"] != child["path"] and c.get("repo") == child.get("repo")]  # fmt: skip
+            overlap = await asyncio.to_thread(_overlap_report, child, others)
         if msg is not None and msg.get("kind") == "answer":  # answers need no reply
             self._set(msg, "done")
             return {"note": "that message was an answer to your own ask; nothing to reply"}
@@ -1183,6 +1244,8 @@ class ChannelHub:
         body = text.strip() + note
         if fetched:
             body += f"\n\n(branch {child['branch']} is in the project repo for review)"
+        if overlap:
+            body += f"\n{overlap}"
         mode = rec.get("mode", "push")
         agent = (s.agent if s else "") or rec.get("agent") or "claude_code"
         return await self.svc.collab.submit_report(
@@ -1242,35 +1305,75 @@ def _trust(path: Path, repo: Path) -> bool:
     return True
 
 
-def _worktree(repo: Path, lane: str) -> tuple[Path, str]:
+def _git(cwd, *args: str) -> str | None:
+    """stdout of a read-only git command, None when it fails."""
+    out = subprocess.run(
+        ["git", "-C", str(cwd), *args], capture_output=True, text=True, timeout=300
+    )
+    return out.stdout.strip() if out.returncode == 0 else None
+
+
+def _worktree(repo: Path, lane: str) -> tuple[Path, str, str, str, str]:
     """A child's own copy of the project and branch: <repo>/.agw-children/<lane>-<id>. An APFS
     copy-on-write clone (almost no disk until files change; ignored build caches come along, so
     engines need no re-import), reset to the last commit on a new branch agw/<lane>-<id>: the main
     folder's unfinished edits stay out. Its branch lives in the copy's .git (see _fetch_back).
-    Where cloning fails (not APFS, the repo is itself a worktree): a git worktree in the same place."""
+    Where cloning fails (not APFS, the repo is itself a worktree): a git worktree in the same place.
+    Returns (path, branch, base: the commit it starts from, target: the repo's branch then, provider:
+    clone | worktree)."""
     name = f"{lane}-{new_id('w')[-4:]}"
     branch, home = f"agw/{name}", repo / CHILDREN
     path = home / name
     home.mkdir(exist_ok=True)
     (home / ".gitignore").write_text("*\n")  # never part of the repo itself
     (home / ".gdignore").touch()  # Godot: do not import the copies
+    target = _git(repo, "symbolic-ref", "--short", "-q", "HEAD") or ""  # "" when detached
     if (repo / ".git").is_dir():
         path.mkdir()
         items = [str(x) for x in repo.iterdir() if x.name != CHILDREN]
+        copied = subprocess.run(["cp", "-cR", *items, str(path)], capture_output=True, timeout=900)
+        base = copied.returncode == 0 and _git(path, "rev-parse", "--verify", "-q", "HEAD")
         git = ["git", "-C", str(path)]
-        steps = (["cp", "-cR", *items, str(path)], [*git, "checkout", "-q", "-f", "-B", branch, "HEAD"],
-                 [*git, "clean", "-fdq"])  # fmt: skip
-        ok = all(
-            subprocess.run(cmd, capture_output=True, timeout=900).returncode == 0 for cmd in steps
-        )
+        ok = bool(base) and all(subprocess.run(cmd, capture_output=True, timeout=900).returncode == 0
+                                for cmd in ([*git, "checkout", "-q", "-f", "-B", branch, base],
+                                            [*git, "clean", "-fdq"]))  # fmt: skip
         if ok:
-            return path, branch
+            return path, branch, base, target, "clone"
         shutil.rmtree(path, ignore_errors=True)
-    out = subprocess.run(["git", "-C", str(repo), "worktree", "add", "-b", branch, str(path)],
+    base = _git(repo, "rev-parse", "--verify", "-q", "HEAD") or ""
+    out = subprocess.run(["git", "-C", str(repo), "worktree", "add", "-b", branch, str(path), base or "HEAD"],
                          capture_output=True, text=True, timeout=900)  # fmt: skip
     if out.returncode != 0:
         raise ValueError(f"git worktree add failed: {(out.stderr or out.stdout).strip()[:300]}")
-    return path, branch
+    return path, branch, base, target, "worktree"
+
+
+def _changed(repo: Path, base: str, branch: str) -> set[str]:
+    """Files a branch changed since its base, as the project repo has it (empty: unknown)."""
+    names = _git(repo, "diff", "--name-only", base, f"refs/heads/{branch}") if base else None
+    return set(names.splitlines()) if names else set()
+
+
+def _overlap_report(child: dict, others: list[dict]) -> str:
+    """Read-only, after the branch is in the project repo: files that conflict with its target
+    branch (`git merge-tree`, git >= 2.38; it writes only loose objects, no ref or working tree) and
+    files other lanes of the project changed too. "" when there is nothing to say."""
+    repo, branch, lines = Path(child.get("repo") or ""), child["branch"], []
+    short = lambda files: ", ".join(sorted(files)[:5]) + (" …" if len(files) > 5 else "")  # noqa: E731
+    if target := child.get("target"):
+        out = subprocess.run(["git", "-C", str(repo), "merge-tree", "--write-tree", "--name-only",
+                              "--no-messages", target, f"refs/heads/{branch}"],
+                             capture_output=True, text=True, timeout=300)  # fmt: skip
+        if out.returncode == 1:  # 1: conflicts (tree id, then the conflicted files); >1: error
+            lines.append(
+                f"conflicts with {target}: {short(set(out.stdout.splitlines()[1:]) - {''})}"
+            )
+    mine = _changed(repo, child.get("base") or "", branch)
+    for o in others if mine else []:
+        # ponytail: other lanes count as they are in the project repo (their last fetch-back)
+        if both := mine & _changed(repo, o.get("base") or "", o["branch"]):
+            lines.append(f"also changed by lane {o['lane']}: {short(both)}")
+    return "\n".join(lines)
 
 
 def _fetch_back(child: dict) -> bool:

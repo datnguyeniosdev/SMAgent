@@ -66,6 +66,7 @@ HELP = (
 /open &lt;folder|p#&gt; [opencode|codex|antigravity] [new] — open an agent session (default Claude;
   /open alone: buttons)
 /close &lt;s#&gt; · /off &lt;s#&gt; · /on &lt;s#&gt; — close a session, or stop/resume giving it work
+/children prune &lt;lane&gt; — delete a closed 🧭 child's folder (its branch stays), confirmed
 /main &lt;s#&gt; — make it its project's 👑 main session: it routes project requests to 🧭 child sessions
 /agents — every agent: 🖥 app (desktop/IDE), ⌨️ CLI, ☁️ API, with on/off and close buttons
 Reply to any gateway message (text or photos) to give feedback or answer it.
@@ -540,6 +541,7 @@ class TelegramGateway:
         r.message(Command("reviews"))(self.on_reviews)
         r.message(Command("open"))(self.on_open)
         r.message(Command("close"))(self.on_close)
+        r.message(Command("children"))(self.on_children)
         r.message(Command("main"))(self.on_main)
         r.message(Command("cancel"))(self.on_cancel)
         r.message(Command("tools"))(self.on_tools)
@@ -559,6 +561,7 @@ class TelegramGateway:
         r.callback_query(F.data.startswith("g:"))(self.on_setup_button)
         r.callback_query(F.data.startswith("t:"))(self.on_mcp_button)
         r.callback_query(F.data.startswith("y:"))(self.on_agents_button)
+        r.callback_query(F.data.startswith("cp:"))(self.on_prune_button)
         r.callback_query(F.data.startswith("x:"))(self.on_keys_button)
         r.callback_query(F.data.startswith("v:"))(self.on_providers_button)
         r.callback_query(F.data.startswith("pl:"))(self.on_plan_button)
@@ -769,6 +772,7 @@ class TelegramGateway:
             icon = {"working": "▶️", "idle": "💤", "closed": "⚪"}
             lines += [f"   🧭 {escape(c['lane'])} · {icon[c['status']]} {c['status']} {c['sessions']} · "
                       f"{escape(c['task'])} · <code>{escape(c['branch'])}</code>"
+                      + (f" from {escape(c.get('target') or '?')}@{c['base'][:7]}" if c.get("base") else "")
                       for c in hub.children(name) if c["status"] != "deleted"]  # fmt: skip
         if not hub.projects():
             lines.append("none yet (a project appears once a session opens for it)")
@@ -1248,6 +1252,51 @@ class TelegramGateway:
             return
         what = await asyncio.to_thread(self.orch.channel.close, s)
         await m.answer(f"🔌 <b>s{s.num}</b> closed ({escape(s.project)}) · {escape(what)}")
+
+    async def on_children(self, m: TgMessage, command: CommandObject):
+        """/children prune <lane|folder>: delete a child's folder after a confirm button."""
+        if not self._authorized_msg(m):
+            return
+        verb, _, ref = (command.args or "").strip().partition(" ")
+        c = self.orch.channel.find_child(ref.strip()) if verb == "prune" else None
+        if c is None:
+            await m.answer(
+                "Usage: /children prune &lt;lane or folder&gt; (one not deleted; lanes in /list)"
+            )
+            return
+        name = Path(c["path"]).name
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=f"Yes, delete {name}"[:60], callback_data=f"cp:yes:{name}"),
+            InlineKeyboardButton(text="Keep it", callback_data=f"cp:no:{name}"),
+        ]])  # fmt: skip
+        await m.answer(f"Delete the folder <code>{escape(c['path'])}</code> ({escape(c['status'])})? Branch "
+                       f"<code>{escape(c['branch'])}</code> stays in the project repo.", reply_markup=kb)  # fmt: skip
+
+    async def on_prune_button(self, q: CallbackQuery):
+        chat_id = q.message.chat.id if q.message else None
+        if not self.authorized(q.from_user.id, chat_id):
+            await q.answer("Not authorized.", show_alert=True)
+            return
+        _, verb, name = q.data.split(":", 2)
+        if verb != "yes":
+            await q.answer("Kept.")
+            return
+        hub = self.orch.channel
+        c = next(
+            (c for _, p in hub.projects() for c in hub.children(p) if Path(c["path"]).name == name),
+            None,
+        )
+        if c is None:
+            await q.answer("That child folder is unknown.", show_alert=True)
+            return
+        try:
+            what = await asyncio.to_thread(hub.prune_child, c["path"])
+        except ValueError as e:
+            await q.answer()
+            await q.message.answer(f"🧹 {escape(name)} not deleted: {escape(str(e))}")
+            return
+        await q.answer()
+        await q.message.answer(f"🧹 {escape(name)}: {escape(what)}")
 
     async def on_main(self, m: TgMessage, command: CommandObject):
         """/main <s#>: that session becomes its project's main (it routes the project's requests)."""

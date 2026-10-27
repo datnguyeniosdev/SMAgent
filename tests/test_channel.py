@@ -831,3 +831,180 @@ def test_child_folders_are_trusted_only_under_a_trusted_project(tmp_path, monkey
     data = json.loads(cfg.read_text())
     assert data["other"] == 1 and "/w/no/.agw-children/x" not in data["projects"]
     assert data["projects"]["/w/ok/.agw-children/x"]["hasTrustDialogAccepted"] is True
+
+
+async def _lanes(settings, cfg_dir, tmp_path, monkeypatch):
+    """A tmp git repo (A.txt, B.txt), its main session and hub; dispatch(lane) opens a child."""
+    import subprocess
+
+    from app import channel as ch
+    from app import projects
+    from tests.test_config_gateway import make
+
+    repo = tmp_path / "game"
+    repo.mkdir()
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", str(repo)]
+    subprocess.run([*git, "init", "-q"], check=True)
+    (repo / "README.md").write_text(f"# {PROJECT}\n")
+    (repo / "A.txt").write_text("a\n")
+    (repo / "B.txt").write_text("b\n")
+    subprocess.run([*git, "add", "."], check=True)
+    subprocess.run([*git, "commit", "-qm", "init"], check=True)
+    monkeypatch.setattr(projects, "projects_root", lambda: tmp_path)
+    monkeypatch.setattr(ch, "CLAUDE_JSON", tmp_path / "claude.json")  # never the real one
+    orch, _ = make(settings, cfg_dir, [])
+    hub = orch.channel
+    hub.launch = lambda path, agent: None
+    monkeypatch.setattr(hub, "_ops", lambda html: None)
+    main, _, _ = hub.pull(PROJECT, None, str(repo), 0, "claude_code", "app")
+
+    async def dispatch(lane: str, text: str = "work") -> dict:
+        m, _ = hub.send(PROJECT, text)
+        hub.pull(PROJECT, main.session_id)
+        r = await hub.dispatch(main.session_id, m["message_id"], lane)
+        return {**r, "msg": m}
+
+    def sh(cwd, *args) -> str:
+        cmd = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", str(cwd), *args]
+        return subprocess.run(cmd, capture_output=True, text=True, check=True).stdout.strip()
+
+    return orch, hub, repo, dispatch, sh
+
+
+async def test_child_records_its_base_and_target_and_how_it_was_made(
+    settings, cfg_dir, tmp_path, monkeypatch
+):
+    from tests.test_config_gateway import gateway
+
+    orch, hub, repo, dispatch, sh = await _lanes(settings, cfg_dir, tmp_path, monkeypatch)
+    head, branch = sh(repo, "rev-parse", "HEAD"), sh(repo, "symbolic-ref", "--short", "HEAD")
+    r = await dispatch("ui")
+    rec = orch.store.get("channel_child", r["path"])
+    assert rec["base"] == head and rec["target"] == branch
+    assert rec["provider"] in ("clone", "worktree") and sh(r["path"], "rev-parse", "HEAD") == head
+    ev = [e["data"] for e in orch.store.events() if e["type"] == "channel.child_created"]
+    assert len(ev) == 1 and ev[0]["provider"] == rec["provider"] and ev[0]["seconds"] >= 0
+    assert ev[0]["free_before"] > 0 and ev[0]["free_after"] > 0
+
+    (repo / "A.txt").write_text("moved on\n")  # the repo advances: the child's base does not
+    sh(repo, "commit", "-qam", "later")
+    r2 = await dispatch("ui")  # the lane's child is closed (never connected): reopened
+    assert r2["to"] == "reopened" and r2["path"] == r["path"]
+    kid = next(c for c in hub.children(PROJECT) if c["lane"] == "ui")
+    assert kid["base"] == head and kid["target"] == branch
+    assert f"from {branch}@{head[:7]}" in gateway(orch)._list_text()
+
+
+async def test_forced_fallback_records_a_worktree_child(settings, cfg_dir, tmp_path, monkeypatch):
+    import subprocess
+
+    from app import channel as ch
+
+    orch, hub, repo, dispatch, sh = await _lanes(settings, cfg_dir, tmp_path, monkeypatch)
+    real = subprocess.run
+
+    def run(cmd, *a, **k):  # copy-on-write cloning fails (not APFS)
+        return subprocess.CompletedProcess(cmd, 1) if cmd[0] == "cp" else real(cmd, *a, **k)
+
+    monkeypatch.setattr(ch.subprocess, "run", run)
+    r = await dispatch("build")
+    rec = orch.store.get("channel_child", r["path"])
+    assert rec["provider"] == "worktree" and rec["base"] == sh(repo, "rev-parse", "HEAD")
+    ev = [e["data"] for e in orch.store.events() if e["type"] == "channel.child_created"]
+    assert ev[-1]["provider"] == "worktree"
+    assert {"seconds", "free_before", "free_after"} <= set(ev[-1])
+    assert (Path(r["path"]) / ".git").is_file()  # a real git worktree
+
+
+async def test_fetch_back_reports_conflicts_and_other_lanes_read_only(
+    settings, cfg_dir, tmp_path, monkeypatch
+):
+    orch, hub, repo, dispatch, sh = await _lanes(settings, cfg_dir, tmp_path, monkeypatch)
+    bodies = []
+
+    async def submit_report(task_id, text, *a, **k):
+        bodies.append(text)
+
+    monkeypatch.setattr(orch.collab, "submit_report", submit_report)
+    target = sh(repo, "symbolic-ref", "--short", "HEAD")
+    ui, audio = await dispatch("ui", "fix A"), await dispatch("audio", "fix B")
+    (repo / "A.txt").write_text("target edit\n")  # the target moves on the same line
+    sh(repo, "commit", "-qam", "target edit")
+    tip, status = sh(repo, "rev-parse", "HEAD"), sh(repo, "status", "--porcelain")
+
+    async def work(r, files: dict) -> str:
+        for name, text in files.items():
+            (Path(r["path"]) / name).write_text(text)
+        sh(r["path"], "commit", "-qm", "child work", "--", *files)
+        s, _, _ = hub.pull(PROJECT, None, r["path"], 0, "claude_code", "cli")
+        hub.pull(PROJECT, s.session_id)
+        await hub.reply(s.session_id, "Dạ, xong ạ", r["msg"]["message_id"])
+        return bodies[-1]
+
+    body = await work(audio, {"B.txt": "audio\n"})  # clean: no report line
+    assert "conflicts" not in body and "also changed" not in body
+    body = await work(ui, {"A.txt": "ui edit\n", "B.txt": "ui\n"})
+    assert f"conflicts with {target}: A.txt" in body
+    assert "also changed by lane audio: B.txt" in body
+    # read-only: target ref, HEAD and the project's working tree are untouched
+    assert sh(repo, "rev-parse", target) == tip and sh(repo, "status", "--porcelain") == status
+    assert sh(repo, "symbolic-ref", "--short", "HEAD") == target
+    assert (repo / "A.txt").read_text() == "target edit\n"
+
+
+async def test_prune_child_only_when_nothing_is_lost(settings, cfg_dir, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from app import channel as ch
+    from tests.test_config_gateway import CONTROL, USER, gateway
+
+    orch, hub, repo, dispatch, sh = await _lanes(settings, cfg_dir, tmp_path, monkeypatch)
+    r = await dispatch("ui")
+    path, branch = r["path"], r["branch"]
+    rec = orch.store.get("channel_child", path)
+
+    victim = tmp_path / "victim"  # outside the children folder, directly and through a symlink
+    victim.mkdir()
+    (repo / ".agw-children" / "evil").symlink_to(victim)
+    for bad in (str(victim), str(repo / ".agw-children" / "evil")):
+        orch.store.put("channel_child", bad, {**rec, "path": bad, "lane": "evil"})
+        with pytest.raises(ValueError, match="not a folder inside"):
+            hub.prune_child(bad)
+    assert victim.is_dir()
+
+    if rec["provider"] == "clone":  # a worktree's branch is in the repo from the start
+        with pytest.raises(ValueError, match="not fetched back"):
+            hub.prune_child(path)
+        assert ch._fetch_back(rec)
+    s, _, _ = hub.pull(PROJECT, None, path, 0, "claude_code", "cli")
+    with pytest.raises(ValueError, match="session is still open"):
+        hub.prune_child(path)
+    hub.disconnect(s)
+    (Path(path) / "A.txt").write_text("unsaved\n")
+    with pytest.raises(ValueError, match="uncommitted"):
+        hub.prune_child(path)
+    sh(path, "checkout", "-q", "--", "A.txt")
+    (Path(path) / "new_asset.png").write_bytes(b"x")  # made by the child, never committed
+    with pytest.raises(ValueError, match="new_asset.png"):
+        hub.prune_child(path)
+    (Path(path) / "new_asset.png").unlink()
+
+    gw, said = gateway(orch), []
+
+    async def answer(text=None, reply_markup=None, show_alert=False):
+        said.append((text, reply_markup))
+
+    msg = SimpleNamespace(answer=answer)
+    monkeypatch.setattr(gw, "_authorized_msg", lambda m: True)
+    await gw.on_children(msg, SimpleNamespace(args="prune ui"))
+    data = [b.callback_data for row in said[-1][1].inline_keyboard for b in row]
+    assert data[0] == f"cp:yes:{Path(path).name}" and Path(path).is_dir()  # asked, nothing gone
+    press = SimpleNamespace(data=data[0], from_user=SimpleNamespace(id=USER), answer=answer,
+                            message=SimpleNamespace(chat=SimpleNamespace(id=CONTROL), answer=answer))  # fmt: skip
+    await gw.on_prune_button(press)
+    assert "kept in the project repo" in said[-1][0] and not Path(path).exists()
+    assert sh(repo, "rev-parse", "--verify", f"refs/heads/{branch}")  # the branch stays
+    assert [c["status"] for c in hub.children(PROJECT) if c["path"] == path] == ["deleted"]
+    assert hub.prune_child(path) == "already deleted"  # idempotent
+    await gw.on_prune_button(press)
+    assert "already deleted" in said[-1][0]
