@@ -111,6 +111,13 @@ time, the operator decides on Telegram (resend, another session, open it, answer
 Requests from other agents arrive with `meta.kind: "request"`: do them and answer with `reply_message`;
 the answer goes back to that agent, not to Telegram.
 
+**`UIUX review`.** When the user (here or on Telegram) says "UIUX review", send the UI to the
+UIUXAgent project for review: `ask_agent(to="UIUXAgent", request, session_id=<yours>)`. The request
+names the screens or flow, what they are for, the absolute paths of fresh screenshots (and of the
+relevant UI files), and asks for prioritized findings with concrete fixes. Keep working; when the
+"answer" message arrives, pass its findings to the user (on Telegram when they asked there) and
+change the UI only after they approve. UIUXAgent itself answers such requests with its UI skills.
+
 **Reviews and research (game-review).** When the work needs an evaluation, a second opinion, store or
 competitor research, a clone-vs-original check or feature ideas, do not judge your own work: call
 `review_project(project, mode, role, agent, evidence)` (mode benchmark|parity|playtest|ideation, role

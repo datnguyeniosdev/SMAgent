@@ -58,6 +58,10 @@ title, else the folder name.
   `ask_agent(to=s#|project, request, session_id)`; the answer arrives through `get_messages`
   (`meta.kind: "answer"`), `get_ask` shows it too. The operator
   steps in on Telegram if nobody answers.
+- **`UIUX review`**: when the user says "UIUX review", call `ask_agent(to="UIUXAgent", request,
+  session_id)` with the screens or flow, their purpose, absolute paths of fresh screenshots and UI
+  files, asking for prioritized findings with fixes. Relay the "answer" to the user (on Telegram if
+  they asked there) and change the UI only after they approve.
 - **Reviews and research**: `review_project(project, mode, role, agent, evidence)` runs the game-review
   skill on a fresh read-only agent; pass `session_id`: the result (report paths) arrives through
   `get_messages` as an "answer" message, no polling (`get_review(review_id)` shows it too).
