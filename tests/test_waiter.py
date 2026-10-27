@@ -261,3 +261,42 @@ def test_antigravity_waiter_detaches_and_stops_when_its_conversation_is_gone(
     m1 = {"queued": True, "next": "chm_1"}
     feed(monkeypatch, [m1, m1, m1])
     assert w.wait("P", "/w/p", "app", 8000, agent="antigravity", notify=lambda t: False) == 1
+
+
+async def test_every_gateway_tool_says_when_a_desktop_sessions_waiter_is_not_running(
+    settings, cfg_dir, tmp_path, monkeypatch
+):
+    """Seen in prod: a main woke, worked on (still_working, its own subagent) and ended its turn
+    without restarting its waiter; only reply_message reminded it. Now every tool does."""
+    from mcp.client import Client
+
+    from app.channel import ChannelHub
+    from app.mcp_server import build_mcp_server
+    from tests.test_config_gateway import make
+
+    monkeypatch.setattr(w, "WAITERS", tmp_path / "waiters")
+    orch, _ = make(settings, cfg_dir, [])
+    kw = {"project": "UIUXAgent", "agent": "claude_code", "cwd": "/w/ui", "client": "app"}
+    async with Client(build_mcp_server(orch)) as c:
+        r = (await c.call_tool("get_messages", kw)).structured_content
+        sid = r["session_id"]
+        assert (
+            "waiter is not running" in r["next"]
+            and "wait --project UIUXAgent --cwd /w/ui" in r["next"]
+        )
+        orch.channel.send("UIUXAgent", "review", session_id=sid)
+        await c.call_tool("get_messages", {**kw, "session_id": sid})
+        r = (
+            await c.call_tool("still_working", {"session_id": sid, "note": "half way"})
+        ).structured_content
+        assert "waiter is not running" in r["next"]
+
+        state = w.WAITERS / f"{ChannelHub.pull_id('UIUXAgent', 'claude_code', '/w/ui')}.json"
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text(json.dumps({"pid": os.getpid()}))  # its waiter runs: no reminder
+        r = (await c.call_tool("still_working", {"session_id": sid})).structured_content
+        assert "next" not in r
+        r = (
+            await c.call_tool("get_messages", {**kw, "session_id": sid, "limit": 0})
+        ).structured_content
+        assert "next" not in r

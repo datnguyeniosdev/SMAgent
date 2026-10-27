@@ -570,6 +570,8 @@ def build_mcp_server(svc) -> MCPServer:
             out["in_progress_messages"] = [slim(m) for m in busy]
         if note:
             out["note"] = note
+        if hint := waiter_hint(sess):
+            out["next"] = hint
         return out
 
     @tool
@@ -697,7 +699,10 @@ def build_mcp_server(svc) -> MCPServer:
         /model set another), e.g. "sonnet" for light work. The child answers the sender itself; you
         need not reply to the message."""
         try:
-            return await svc.channel.dispatch(session_id, message_id, lane, brief, to, model)
+            out = await svc.channel.dispatch(session_id, message_id, lane, brief, to, model)
+            if hint := waiter_hint(svc.channel.sessions.get(session_id)):
+                out["next"] = hint
+            return out
         except (ValueError, PermissionError) as e:
             raise GatewayToolError(str(e)) from e
 
@@ -708,7 +713,10 @@ def build_mcp_server(svc) -> MCPServer:
         as stuck and an idle-looking child session is closed after 30 minutes. Do not answer
         early as if done: answer once, with the result."""
         try:
-            return svc.channel.still_working(session_id, note)
+            out = svc.channel.still_working(session_id, note)
+            if hint := waiter_hint(svc.channel.sessions.get(session_id)):
+                out["next"] = hint
+            return out
         except KeyError as e:
             raise GatewayToolError(f"unknown session {session_id}: call get_messages first") from e
 
@@ -745,6 +753,26 @@ def reply_result(rep) -> dict[str, Any]:
                     "note": "your answer went back to the agent that asked"}  # fmt: skip
         return rep
     return {"report_id": rep.report_id, "task_id": rep.task_id}
+
+
+def waiter_hint(s) -> str | None:
+    """A desktop session's waiter is not running (it woke this session and exited): every gateway
+    tool it calls says so, or the session ends its turn deaf to the next request (seen in prod: a
+    main that dispatched or worked on and never restarted it)."""
+    if not (
+        s and s.mode == "pull" and s.cwd and s.kind == "app" and s.agent in ("", "claude_code")
+    ):
+        return None
+    if s.closing or not s.enabled:
+        return None
+    from app.waiter import command, missing
+
+    if not missing(s.project, s.cwd):
+        return None
+    return (
+        "your gateway waiter is not running: start it again before you end this turn, with the Bash "
+        f"tool, run_in_background true: `{command(s.project, s.cwd, s.client)}`"
+    )
 
 
 def ask_view(a: dict) -> dict[str, Any]:
