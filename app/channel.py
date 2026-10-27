@@ -648,6 +648,10 @@ class ChannelHub:
                 self._main_asked.add(_norm(project))
                 self._notify("send_main_offline", project)
             return None
+        if not msg.get("orig_text") and not _has_commit(
+            main.cwd
+        ):  # no children possible: it does it
+            return main
         if not msg.get("orig_text"):
             msg["orig_text"], msg["route"] = msg["text"], True
             rec = self.svc.store.get("channel_main", _norm(project)) or {}
@@ -1184,6 +1188,16 @@ class ChannelHub:
         return await self.svc.collab.submit_report(
             rec["task_id"], body, f"{agent} ({mode} session)", images=images
         )
+
+
+def _has_commit(cwd: str) -> bool:
+    """A git repo with a commit: a child can get its own copy of it (dispatch). A folder that is not
+    one (yet) keeps today's behaviour: its main session does the work itself."""
+    if not cwd:
+        return False
+    out = subprocess.run(["git", "-C", cwd, "rev-parse", "--verify", "-q", "HEAD"], capture_output=True,
+                         timeout=10)  # fmt: skip
+    return out.returncode == 0
 
 
 def _toplevel(cwd: str) -> Path:

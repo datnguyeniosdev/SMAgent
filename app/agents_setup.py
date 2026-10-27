@@ -67,6 +67,13 @@ title, else the folder name.
   session_id)` with the screens or flow, their purpose, absolute paths of fresh screenshots and UI
   files, asking for prioritized findings with fixes. Relay the "answer" to the user (on Telegram if
   they asked there) and change the UI only after they approve.
+- **QA and IP review**: when work needs a QA evaluation or an IP check (originality of names, art,
+  audio, mechanics), or the user says "QA review" / "IP check", call `ask_agent(to="QAIPAgent", ...)`
+  with what to check, spec paths and build/screenshot paths; relay findings, fix only after approval.
+- **Research and planning**: when a project needs market or competitor research, concept validation,
+  a development plan or milestones, or the user says "PO plan", call `ask_agent(to="PO Game Agent",
+  ...)` with the goal, constraints and current state (GDD paths); relay the plan, act only after
+  approval.
 - **Reviews and research**: `review_project(project, mode, role, agent, evidence)` runs the game-review
   skill on a fresh read-only agent; pass `session_id`: the result (report paths) arrives through
   `get_messages` as an "answer" message, no polling (`get_review(review_id)` shows it too).

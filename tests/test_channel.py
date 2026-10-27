@@ -333,9 +333,11 @@ async def test_list_ids_and_send_by_id(settings, cfg_dir):
 
     await gw.on_send(*msg("s2 run the tests"))  # exact session
     assert b.queue.get_nowait()["text"].endswith("run the tests") and "session s2" in answers[-1]
-    await gw.on_send(*msg("p1 fix the menu"))  # project -> its main session, to route
-    text = a.queue.get_nowait()["text"]
-    assert "fix the menu" in text and "dispatch(" in text
+    await gw.on_send(
+        *msg("p1 fix the menu")
+    )  # project -> its main session; no git repo: no children,
+    text = a.queue.get_nowait()["text"]  # so it does the work itself
+    assert text.endswith("fix the menu") and "dispatch(" not in text
     await gw.on_send(*msg("x9 hello"))
     assert "Unknown session or project" in answers[-1] and "SESSIONS" in answers[-1]
 

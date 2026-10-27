@@ -126,6 +126,20 @@ relevant UI files), and asks for prioritized findings with concrete fixes. Keep 
 "answer" message arrives, pass its findings to the user (on Telegram when they asked there) and
 change the UI only after they approve. UIUXAgent itself answers such requests with its UI skills.
 
+**QA and IP review → QAIPAgent.** When the work needs a QA evaluation or an IP check (originality of
+names, art, audio, mechanics against existing games), or the user says "QA review" or "IP check":
+`ask_agent(to="QAIPAgent", request, session_id=<yours>)`. The request names the project and what to
+check, the spec or acceptance criteria (paths), and absolute paths of the build, screenshots or
+assets, and asks for findings by severity with a verdict. Relay the answer to the user and fix things
+only after they approve.
+
+**Research and planning → PO Game Agent.** When a project needs market or competitor research,
+concept validation, a development plan or milestones, or the user says "PO plan": `ask_agent(to="PO
+Game Agent", request, session_id=<yours>)`. The request names the project, the goal, the constraints
+(team, time, platform) and its current state (paths of the GDD and docs), and asks for the plan or
+findings with the decisions the user must make. Relay the answer and act on it only after the user
+approves.
+
 **Reviews and research (game-review).** When the work needs an evaluation, a second opinion, store or
 competitor research, a clone-vs-original check or feature ideas, do not judge your own work: call
 `review_project(project, mode, role, agent, evidence)` (mode benchmark|parity|playtest|ideation, role
