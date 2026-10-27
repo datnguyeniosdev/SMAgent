@@ -291,9 +291,14 @@ class ChannelHub:
 
     def close(self, s: LiveSession) -> str:
         """/close: push -> stop its Claude Code process; pull -> its loop stops at the next round.
-        Closing the main lets the project's next session become the main."""
+        Closing the main lets the project's next session become the main. A child's (or the
+        temporary router's) Terminal window is closed with it."""
         if self.main_for(s.project) is s:
             self.svc.store.put("channel_main", _norm(s.project), {"project": s.project})
+        if wid := (self.child(s) or {}).get("window") or self._router_window(s):
+            from app.launcher import close_terminal_window
+
+            self._background(lambda: close_terminal_window(wid))
         self.svc.store.event("channel.close", task_id=s.task_id, session=s.session_id, mode=s.mode)
         if s.mode == "pull":  # gone from /list now; if its loop is still alive it is told to stop
             self._stopping.add(s.session_id)
@@ -521,9 +526,23 @@ class ChannelHub:
             path.mkdir(exist_ok=True)
             setup_repo(path, f"http://127.0.0.1:{ENV_PORTS[env_name()]}/mcp", project, False)
             _trust(path, repo)
-            self.launch(path, agent)
+            wid = self.launch(path, agent)
+            now_rec = self.svc.store.get("channel_main", _norm(project)) or {}
+            if wid and now_rec.get("router_cwd") == str(path):
+                self.svc.store.put(
+                    "channel_main", _norm(project), {**now_rec, "router_window": wid}
+                )
 
         self._background(make)
+
+    def _remember_window(self, path: str, wid: int | None) -> None:
+        """The child's Terminal window, closed when the child is closed."""
+        if wid and (c := self.svc.store.get("channel_child", path)):
+            self.svc.store.put("channel_child", path, {**c, "window": wid})
+
+    def _router_window(self, s: LiveSession) -> int | None:
+        rec = self.svc.store.get("channel_main", _norm(s.project)) or {}
+        return rec.get("router_window") if s.cwd and s.cwd == rec.get("router_cwd") else None
 
     def _background(self, fn) -> None:
         """Run blocking work (git, opening a Terminal) off the event loop; failures are logged."""
@@ -546,7 +565,7 @@ class ChannelHub:
         its unrouted work comes back, and the router is closed."""
         router_cwd = rec.get("router_cwd") or ""
         self.svc.store.put("channel_main", _norm(main.project), {k: v for k, v in rec.items()
-                           if k not in ("router_cwd", "routed", "router_since")})  # fmt: skip
+                           if k not in ("router_cwd", "routed", "router_since", "router_window")})  # fmt: skip
         for r in [x for x in self.sessions.values() if x.cwd == router_cwd]:
             for m in self.in_progress(r.session_id):  # routing work it took but did not route
                 for k in ("session_id", "delivered_at"):
@@ -554,6 +573,10 @@ class ChannelHub:
                 self._set(m, "pending")
             if r.session_id in self.sessions:
                 self.close(r)
+        if wid := rec.get("router_window"):
+            from app.launcher import close_terminal_window
+
+            self._background(lambda: close_terminal_window(wid))
         routed = "; ".join(rec.get("routed") or []) or "nothing"
         mid = new_id("chm")
         self._enqueue(main, {
@@ -698,8 +721,9 @@ class ChannelHub:
             msg["wait_cwd"] = old["path"]
             self._set(msg, "pending")
             await asyncio.to_thread(_trust, Path(old["path"]), Path(old.get("repo") or ""))
-            await asyncio.to_thread(self.launch, Path(old["path"]), old.get("agent", "") if
-                                    old.get("agent") not in ("", "claude_code") else "")  # fmt: skip
+            wid = await asyncio.to_thread(self.launch, Path(old["path"]), old.get("agent", "") if
+                                          old.get("agent") not in ("", "claude_code") else "")  # fmt: skip
+            self._remember_window(old["path"], wid)
             self._ops(
                 f"🧭 m{msg.get('num')} → reopened child ({lane}) on <code>{old['branch']}</code>"
             )
@@ -725,7 +749,7 @@ class ChannelHub:
         self._set(msg, "pending")
         await asyncio.to_thread(_trust, path, repo)
         agent = main.agent if main.agent not in ("", "claude_code") else ""
-        await asyncio.to_thread(self.launch, path, agent)
+        self._remember_window(str(path), await asyncio.to_thread(self.launch, path, agent))
         self._ops(f"🧭 m{msg.get('num')} → new child ({lane}) on branch <code>{branch}</code>")
         return {"to": "new", "lane": lane, "new_session": True, "branch": branch, "path": str(path)}
 

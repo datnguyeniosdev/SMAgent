@@ -79,18 +79,30 @@ def is_connected(repo: Path) -> bool:
 def terminal_command(repo: Path, agent: str = "") -> str:
     agw = Path(sys.executable).parent / "agw"
     extra = f" --agent {shlex.quote(agent)}" if agent and agent != "claude_code" else ""
-    return f"cd {shlex.quote(str(repo))} && {shlex.quote(str(agw))} session{extra}"
+    # exec: the session replaces the window's shell, so the window ends with it
+    return f"cd {shlex.quote(str(repo))} && exec {shlex.quote(str(agw))} session{extra}"
 
 
-def open_in_terminal(repo: Path, agent: str = "") -> None:
-    """New Terminal.app window running `agw session` in the repo (macOS asks once for permission)."""
+def open_in_terminal(repo: Path, agent: str = "") -> int | None:
+    """New Terminal.app window running `agw session` in the repo (macOS asks once for permission).
+    Returns the window's id, so the gateway can close it with the session (close_terminal_window)."""
     cmd = (
         terminal_command(repo, agent).replace("\\", "\\\\").replace('"', '\\"')
     )  # AppleScript string
-    script = f'tell application "Terminal"\nactivate\ndo script "{cmd}"\nend tell'
+    script = (f'tell application "Terminal"\nactivate\nset t to do script "{cmd}"\n'
+              "return id of (first window whose selected tab is t)\nend tell")  # fmt: skip
     r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
         raise RuntimeError((r.stderr or r.stdout).strip()[:300] or "osascript failed")
+    return int(r.stdout.strip()) if r.stdout.strip().isdigit() else None
+
+
+def close_terminal_window(window_id: int, wait: float = 3) -> None:
+    """Close a window open_in_terminal opened, once its session has ended (a window with a running
+    process would ask first; after `exec` the session is the window's only process)."""
+    time.sleep(wait)
+    script = f'tell application "Terminal" to close (every window whose id is {int(window_id)})'
+    subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=30)
 
 
 def open_project(root: Path, query: str, live_cwds=(), new: bool = False, token: bool = True,

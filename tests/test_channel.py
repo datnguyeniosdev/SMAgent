@@ -672,7 +672,11 @@ async def test_main_session_routes_lanes_to_children_in_worktrees(
 
     orch, _ = make(settings, cfg_dir, [])
     hub, opened, notes = orch.channel, [], []
-    hub.launch = lambda path, agent: opened.append((path, agent))
+    hub.launch = lambda path, agent: opened.append((path, agent)) or 100 + len(opened)  # window id
+    from app import launcher
+
+    closed_windows = []
+    monkeypatch.setattr(launcher, "close_terminal_window", closed_windows.append)
     monkeypatch.setattr(hub, "_ops", notes.append)
     main, _, _ = hub.pull(PROJECT, None, str(repo), 0, "claude_code", "app")
     other, _, _ = hub.pull(PROJECT, None, "/w/other", 0, "codex", "cli")
@@ -737,6 +741,8 @@ async def test_main_session_routes_lanes_to_children_in_worktrees(
     child.last_work -= CHILD_IDLE + timedelta(minutes=1)
     hub._prune()  # idle child: closed, branch kept
     assert child.session_id not in hub.sessions and "kept for review" in notes[-1]
+    await asyncio.sleep(0.2)
+    assert closed_windows == [101]  # its Terminal window goes with it
     assert [c["status"] for c in hub.children(PROJECT) if c["lane"] == "ui"] == ["closed"]
 
     m4, _ = hub.send(PROJECT, "one more ui fix")  # its lane's child is reopened, no new copy
