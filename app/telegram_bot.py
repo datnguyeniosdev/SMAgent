@@ -20,7 +20,7 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError, TelegramRetryAfter
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (
     BotCommand,
@@ -281,7 +281,8 @@ class TelegramGateway:
     # ---------- delivery (Notifier) ----------
 
     async def _send(self, fn, **kw):
-        """Send with Telegram rate-limit backoff and a plain-text fallback on parse errors.
+        """Send with Telegram rate-limit backoff, network-error retries and a plain-text fallback on
+        parse errors.
         Text over Telegram's limit goes out as several messages (nothing is cut); returns the first."""
         if fn == self.bot.send_message and len(kw.get("text", "")) > fmt.MESSAGE_LIMIT:
             first, *more = fmt.chunks(kw["text"])
@@ -296,6 +297,12 @@ class TelegramGateway:
                 if attempt == 2:
                     raise
                 await asyncio.sleep(e.retry_after)
+            except (
+                TelegramNetworkError
+            ):  # a timeout (seen with a photo upload): try again, not lost
+                if attempt == 2:  # ponytail: one that did arrive but timed out shows up twice
+                    raise
+                await asyncio.sleep(3 * (attempt + 1))
             except TelegramBadRequest as e:
                 if "parse" not in str(e).lower() or kw.get("parse_mode", "") is None:
                     raise

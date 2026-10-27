@@ -1283,3 +1283,41 @@ def test_mcp_without_token_serves_only_local_requests(tmp_path, monkeypatch, cfg
         assert c.post("/mcp", json=init, headers=accept).status_code == 403
     assert not _local_request({"client": ("192.168.1.9", 1)}, {b"host": b"127.0.0.1:8000"})
     get_settings.cache_clear()
+
+
+async def test_send_retries_a_network_timeout_instead_of_losing_the_message(
+    settings, cfg_dir, monkeypatch
+):
+    """Seen in prod: a final art report (photo upload) timed out once and was lost."""
+    import asyncio
+
+    from aiogram.exceptions import TelegramNetworkError
+    from aiogram.methods import SendMessage
+
+    orch, _ = make(settings, cfg_dir, [])
+    gw = gateway(orch)
+    slept, calls = [], []
+
+    async def no_wait(s):
+        slept.append(s)
+
+    monkeypatch.setattr(asyncio, "sleep", no_wait)
+
+    async def flaky(**kw):
+        calls.append(kw)
+        if len(calls) == 1:
+            raise TelegramNetworkError(
+                method=SendMessage(chat_id=1, text="x"), message="Request timeout error"
+            )
+        return "sent"
+
+    assert await gw._send(flaky, chat_id=1, text="report") == "sent"
+    assert len(calls) == 2 and slept == [3]
+
+    async def down(**kw):
+        raise TelegramNetworkError(
+            method=SendMessage(chat_id=1, text="x"), message="Request timeout error"
+        )
+
+    with pytest.raises(TelegramNetworkError):  # still failing after 3 tries: the caller logs it
+        await gw._send(down, chat_id=1, text="report")
