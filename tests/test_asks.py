@@ -160,3 +160,26 @@ async def test_no_escalation_right_after_a_restart(settings, cfg_dir, monkeypatc
     assert await orch.asks.check() == []  # sessions have not polled again yet
     orch.asks.started -= timedelta(hours=1)
     assert len(await orch.asks.check()) == 1
+
+
+async def test_two_busy_agents_asking_each_other_reach_the_operator(settings, cfg_dir):
+    """A waits for B and B waits for A, both busy with their own job: no deadlock, each ask goes to
+    the operator once its deadline passes."""
+    orch, _ = make(settings, cfg_dir, [])
+    orch.asks.started -= timedelta(hours=1)  # past the restart grace
+    gateway(orch)
+    hub = orch.channel
+    a, _, _ = hub.pull(A, None, "/w/a", 0, "claude_code")
+    b, _, _ = hub.pull(B, None, "/w/b", 0, "claude_code")
+    for s in (a, b):  # each is busy with a job of its own
+        hub.send(s.project, "own job", session_id=s.session_id)
+        hub.pull(s.project, s.session_id)
+    ab = orch.asks.create(B, "need your atlas", from_session=a.session_id, wait_s=60)
+    ba = orch.asks.create(A, "need your palette", from_session=b.session_id, wait_s=60)
+    assert await orch.asks.check() == []  # before the deadline: waiting is fine
+    for ask in (ab, ba):
+        rec = orch.asks.get(ask["ask_id"])
+        rec["deadline"] = (asks_mod.now() - timedelta(seconds=1)).isoformat()
+        orch.asks._save(rec)
+    assert sorted(await orch.asks.check()) == sorted([ab["ask_id"], ba["ask_id"]])
+    assert {orch.asks.get(x["ask_id"])["state"] for x in (ab, ba)} == {"escalated"}

@@ -1008,3 +1008,48 @@ async def test_prune_child_only_when_nothing_is_lost(settings, cfg_dir, tmp_path
     assert hub.prune_child(path) == "already deleted"  # idempotent
     await gw.on_prune_button(press)
     assert "already deleted" in said[-1][0]
+
+
+async def test_nothing_waits_forever_for_a_child_or_router_that_never_starts(
+    settings, cfg_dir, tmp_path, monkeypatch
+):
+    """A child that never connects: its work goes to the operator as stuck. A temporary router that
+    never connects: given up, the operator is asked, and no second router is opened."""
+    from datetime import timedelta
+
+    from app import channel as ch
+    from app.models import now
+
+    orch, hub, repo, dispatch, sh = await _lanes(settings, cfg_dir, tmp_path, monkeypatch)
+    old = (now() - ch.START_WAIT - timedelta(minutes=1)).isoformat()
+    r = await dispatch("ui", "fix the shop")  # its Terminal never opens: launch does nothing
+    m = orch.store.get("channel_msg", r["msg"]["message_id"])
+    assert m["state"] == "pending" and m["wait_cwd"] == r["path"]
+    hub._expire()
+    assert orch.store.get("channel_msg", m["message_id"])["state"] == "pending"  # still in time
+    m["waiting_since"] = old
+    orch.store.put("channel_msg", m["message_id"], m, state="pending")
+    hub._expire()
+    stuck = orch.store.get("channel_msg", m["message_id"])
+    assert stuck["state"] == "stalled" and "did not start" in stuck["stall_reason"]
+
+    main = hub.main_for(PROJECT)
+    asked, opened = [], []
+    monkeypatch.setattr(hub, "_notify", lambda name, *a, **k: asked.append(name))
+    hub.launch = lambda path, agent: opened.append(path)
+    hub.stall(main.session_id, "rate limit")  # stuck main: a router is opened in the background
+    m2, t2 = hub.send(PROJECT, "fix the score")
+    assert t2 is None
+    rec = orch.store.get("channel_main", ch._norm(PROJECT))
+    assert rec["router_cwd"]
+    rec["router_since"] = old  # it never connected
+    orch.store.put("channel_main", ch._norm(PROJECT), rec)
+    hub._expire()
+    rec = orch.store.get("channel_main", ch._norm(PROJECT))
+    assert rec.get("router_failed") and not rec.get("router_cwd") and "send_main_offline" in asked
+    hub.send(PROJECT, "more work")
+    assert orch.store.get("channel_main", ch._norm(PROJECT)).get("router_cwd") is None  # no reopen
+    hub.active(main.session_id)  # the main works again: it takes everything that waited
+    assert hub.main_for(PROJECT) is main
+    assert not orch.store.get("channel_main", ch._norm(PROJECT)).get("router_failed")
+    assert m2["message_id"] in [x["message_id"] for x in main.queue._queue]

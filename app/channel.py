@@ -40,6 +40,9 @@ log = logging.getLogger(__name__)
 PULL_TTL = timedelta(minutes=5)  # a pull session is open while it polled this recently (/loop 1m)
 LEASE = timedelta(minutes=60)  # an unanswered handed-over message keeps its session busy this long
 CHILD_IDLE = timedelta(minutes=30)  # a child session with nothing to do this long is closed
+START_WAIT = timedelta(
+    minutes=10
+)  # a child or temporary router that has not connected by then failed
 # a free session that leaves work untaken this long is not pulling
 QUEUE_WAIT = timedelta(minutes=10)
 MAX_DELIVERIES = 2  # an unanswered message is handed out again once after its lease, then expires
@@ -425,6 +428,33 @@ class ChannelHub:
     def _take(self, s: LiveSession, msg: dict) -> None:
         s.queue._queue.remove(msg)  # ponytail: asyncio.Queue internals
 
+    def _never_started(self) -> None:
+        """Nothing waits forever for a session that never came: work held for a child that did not
+        connect within START_WAIT goes to the operator as stuck (move or cancel), and a temporary
+        router that did not connect, or got stuck itself, is given up and the operator is asked
+        (make an open session the main, open a new one, or wait)."""
+        late = (now() - START_WAIT).isoformat()
+        for msg in self.svc.store.list("channel_msg", states=["pending"]):
+            if msg.get("wait_cwd") and msg.get("waiting_since", "") < late:
+                path = msg.pop("wait_cwd")
+                self._stall([msg], "", f"its child session in {Path(path).name} did not start within "
+                                       f"{int(START_WAIT.total_seconds() // 60)} min")  # fmt: skip
+        for rec in self.svc.store.list("channel_main"):
+            cwd = rec.get("router_cwd")
+            if not cwd or rec.get("router_since", "") >= late:
+                continue
+            if any(x.cwd == cwd and x.deliverable for x in self.sessions.values()):
+                continue
+            for x in [x for x in self.sessions.values() if x.cwd == cwd]:
+                self.close(x)  # it connected but is stuck too
+            self.svc.store.put("channel_main", _norm(rec["project"]), {**{k: v for k, v in rec.items()
+                               if k not in ("router_cwd", "routed", "router_since", "router_window")},
+                               "router_failed": True})  # fmt: skip
+            self._ops(f"🧭 the temporary router of <b>{escape_html(rec['project'])}</b> did not work; "
+                      "asking you what to do")  # fmt: skip
+            self._main_asked.add(_norm(rec["project"]))
+            self._notify("send_main_offline", rec["project"])
+
     def _untaken(self) -> None:
         """Work a free session leaves untaken for QUEUE_WAIT (its agent is not pulling) goes to the
         operator as stuck, who moves, waits or cancels it."""
@@ -490,6 +520,9 @@ class ChannelHub:
         if main is not None:
             if router_cwd:  # back: the routing context returns to it
                 self._merge_back(main, rec)
+            elif rec.get("router_failed"):
+                self.svc.store.put("channel_main", _norm(project), {k: v for k, v in rec.items()
+                                   if k != "router_failed"})  # fmt: skip
             return main
         if rec.get("pending_new") or not same:  # offline: the operator decides (send_main_offline)
             return None
@@ -500,7 +533,7 @@ class ChannelHub:
         ]
         if routers:
             return max(routers, key=lambda x: x.mode == "push")
-        if not router_cwd:
+        if not router_cwd and not rec.get("router_failed"):  # failed once: the operator decides
             self._open_router(project, rec, same[0])
         return None
 
@@ -773,7 +806,7 @@ class ChannelHub:
                     if c["lane"] == lane and c["status"] == "closed"), None)  # fmt: skip
         if old is not None:  # the lane's child closed: reopen it on its folder, no new copy
             self._tag(old["path"], msg)
-            msg["wait_cwd"] = old["path"]
+            msg["wait_cwd"], msg["waiting_since"] = old["path"], now().isoformat()
             self._set(msg, "pending")
             await asyncio.to_thread(_trust, Path(old["path"]), Path(old.get("repo") or ""))
             wid = await asyncio.to_thread(self.launch, Path(old["path"]), old.get("agent", "") if
@@ -805,7 +838,7 @@ class ChannelHub:
                            "agent": main.agent or "claude_code", "created_at": now().isoformat(),
                            "base": base, "target": target, "provider": provider})  # fmt: skip
         self._tag(str(path), msg)
-        msg["wait_cwd"] = str(path)
+        msg["wait_cwd"], msg["waiting_since"] = str(path), now().isoformat()
         self._set(msg, "pending")
         await asyncio.to_thread(_trust, path, repo)
         agent = main.agent if main.agent not in ("", "claude_code") else ""
@@ -943,6 +976,7 @@ class ChannelHub:
         for project in projects:
             self._flush_pending(project)
         self._untaken()
+        self._never_started()
 
     def _tell_expired(self, msg: dict) -> None:
         rec = self.svc.store.get("channel_session", msg.get("session_id", "")) or {}
@@ -997,7 +1031,9 @@ class ChannelHub:
         """The session's agent works again (a prompt, get_messages): it takes work again, and work it
         left stalled is put to the operator once: go on here, move it, or cancel."""
         if s := self.sessions.get(session_id):
-            s.stalled = ""
+            was, s.stalled = s.stalled, ""
+            if was:  # work that waited for it (a stuck main's project work) goes out now
+                self._flush_pending(s.project)
         msgs = [m for m in self.svc.store.list("channel_msg", states=["stalled"])
                 if m.get("stalled_session") == session_id and not m.get("back_asked")]  # fmt: skip
         for m in msgs:
