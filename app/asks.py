@@ -227,9 +227,9 @@ class AskService:
             a["state"] == "delivered"
             and target is None
             and msg.get("state") == "delivered"
-            and not late
+            and now() - datetime.fromisoformat(a.get("sent_at") or a["created_at"]) < HARD_CAP
         ):
-            return None  # B has it and its lease runs: B may just not have polled since a restart
+            return None  # B has it and its lease runs: B may be working and not have polled since a restart
         best = hub.session_for(a["to_project"])
         if best is not None:  # someone can take it now (e.g. a session opened): deliver there
             if a["state"] == "queued" or target is None or not target.deliverable:

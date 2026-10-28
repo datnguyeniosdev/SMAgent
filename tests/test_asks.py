@@ -162,6 +162,32 @@ async def test_no_escalation_right_after_a_restart(settings, cfg_dir, monkeypatc
     assert len(await orch.asks.check()) == 1
 
 
+async def test_a_holder_working_through_a_restart_keeps_its_ask(settings, cfg_dir):
+    """Seen in prod: a child had the ask, the gateway restarted, the child kept working without polling;
+    past the deadline the ask was resent to the main, cancelling the child's delivery."""
+    orch, _ = make(settings, cfg_dir, [])
+    orch.asks.started -= timedelta(hours=1)
+    gateway(orch)
+    hub = orch.channel
+    a, _, _ = hub.pull(A, None, "/w/a", 0, "claude_code")
+    hub.pull(B, None, "/w/b", 0, "claude_code")
+    hub.pull(B, None, "/w/b/.agw-children/qa-1", 0, "claude_code")
+    ask = orch.asks.create(B, "re-test", from_session=a.session_id)
+    holder = ask["delivered_to"]
+    hub.pull(B, holder)
+    hub.sessions.pop(holder)  # restart: the holder has not polled again, it is working
+    rec = orch.asks.get(ask["ask_id"])
+    rec["deadline"] = (asks_mod.now() - timedelta(seconds=1)).isoformat()
+    orch.asks._save(rec)
+    assert await orch.asks.check() == []
+    assert orch.asks.get(ask["ask_id"])["message_id"] == ask["message_id"]  # not resent to the main
+    rec = orch.asks.get(ask["ask_id"])
+    rec["sent_at"] = (asks_mod.now() - asks_mod.HARD_CAP - timedelta(seconds=1)).isoformat()
+    orch.asks._save(rec)
+    await orch.asks.check()
+    assert orch.asks.get(ask["ask_id"])["message_id"] != ask["message_id"]  # past the cap: moved on
+
+
 async def test_two_busy_agents_asking_each_other_reach_the_operator(settings, cfg_dir):
     """A waits for B and B waits for A, both busy with their own job: no deadlock. Live sessions are
     given until the hard cap (a long QA pass is not stuck), then each ask goes to the operator."""
