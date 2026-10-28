@@ -3,8 +3,8 @@
 push  `agw session` in a terminal: a stdio shim (app/channel_shim.py) holds an SSE stream and turns
       each message into a `notifications/claude/channel` event (Claude Code channels, research
       preview, >= 2.1.80); the session starts working at once. Answers go through the shim's `reply`.
-pull  any session (desktop app, VS Code, terminal): `/loop 1m` calls the MCP tool `get_messages`
-      and answers with `reply_message`. Works without channels, up to one loop interval late.
+pull  any session (desktop app, VS Code, terminal): the `agw wait` waiter (app/waiter.py) wakes it to
+      call the MCP tool `get_messages`, answered with `reply_message`; a 30-minute cron is the safety net.
 
 Each session has an operator switch (/on, /off, persisted per session id). Messages go to an open,
 enabled, non-blocked session of the project (push preferred, newest first) and otherwise wait.
@@ -37,7 +37,7 @@ from pathlib import Path
 from app.models import new_id, now
 
 log = logging.getLogger(__name__)
-PULL_TTL = timedelta(minutes=5)  # a pull session is open while it polled this recently (/loop 1m)
+PULL_TTL = timedelta(minutes=5)  # a pull session is open while it (or its waiter) polled this recently
 LEASE = timedelta(minutes=60)  # an unanswered handed-over message keeps its session busy this long
 CHILD_IDLE = timedelta(minutes=30)  # a child session with nothing to do this long is closed
 BUSY = timedelta(minutes=30)  # one still_working call keeps a session busy this long
@@ -300,7 +300,7 @@ class ChannelHub:
         """/close: push -> stop its Claude Code process; pull -> its loop stops at the next round.
         Closing the main lets the project's next session become the main. A child's (or the
         temporary router's) Terminal window is closed with it."""
-        if self.main_for(s.project) is s:
+        if self.main_for(s.project) is s and not self.pinned(s.project):  # a pinned main stays
             self.svc.store.put("channel_main", _norm(s.project), {"project": s.project})
         if wid := (self.child(s) or {}).get("window") or self._router_window(s):
             from app.launcher import close_terminal_window
@@ -508,13 +508,31 @@ class ChannelHub:
         """The child record of a session opened by dispatch (lane, branch, worktree), else None."""
         return self.svc.store.get("channel_child", s.cwd) if s.cwd else None
 
-    def set_main(self, s: LiveSession, flush: bool = True) -> None:
-        """/main s#, or the first session of a project: it routes the project's work."""
+    def set_main(self, s: LiveSession, flush: bool = True, pin: bool | None = None) -> None:
+        """/main s# (pin=True: the operator's choice, never replaced automatically), or the first
+        session of a project: it routes the project's work. pin=None keeps the project's pin."""
+        pin = self.pinned(s.project) if pin is None else pin
         self.svc.store.put("channel_main", _norm(s.project), {"project": s.project,
-                           "session_id": s.session_id, "cwd": s.cwd, "agent": s.agent, "kind": s.kind})  # fmt: skip
+                           "session_id": s.session_id, "cwd": s.cwd, "agent": s.agent, "kind": s.kind,
+                           "pinned": pin})  # fmt: skip
         self._main_asked.discard(_norm(s.project))
         if flush:  # not from main_for, which may run inside a flush (a message queued twice)
             self._flush_pending(s.project)
+
+    def pinned(self, project: str) -> bool:
+        return bool((self.svc.store.get("channel_main", _norm(project)) or {}).get("pinned"))
+
+    def unpin_main(self, project: str) -> None:
+        """/main p# auto: the gateway may choose the project's main again."""
+        rec = self.svc.store.get("channel_main", _norm(project)) or {"project": project}
+        self.svc.store.put("channel_main", _norm(project), {**rec, "pinned": False})
+
+    def auto_main(self) -> bool:
+        """Whether a project without a main gets one automatically (/main auto on|off)."""
+        return (self.svc.store.get("channel_setting", "auto_main") or {}).get("on", True)
+
+    def set_auto_main(self, on: bool) -> None:
+        self.svc.store.put("channel_setting", "auto_main", {"on": on})
 
     def want_new_main(self, project: str) -> None:
         """The operator opens a new main: the next session of the project to connect becomes it."""
@@ -533,6 +551,8 @@ class ChannelHub:
         mine = [x for x in self.sessions.values() if _norm(x.project) == _norm(project)
                 and not self.child(x) and not (router_cwd and x.cwd == router_cwd)]  # fmt: skip
         if rec is None or not (rec.get("session_id") or rec.get("pending_new")):
+            if (rec or {}).get("pinned") or not self.auto_main():  # the operator chooses (/main)
+                return None
             ready = [x for x in mine if x.deliverable]
             if not ready:
                 return None
@@ -768,7 +788,9 @@ class ChannelHub:
             return self.session_for(project, exclude=exclude)
         if main is None:
             rec = self.svc.store.get("channel_main", _norm(project)) or {}
-            if rec.get("session_id") and _norm(project) not in self._main_asked:
+            if (rec.get("session_id") or rec.get("pinned") or not self.auto_main()) and _norm(
+                project
+            ) not in self._main_asked:
                 self._main_asked.add(_norm(project))
                 self._notify("send_main_offline", project)
             return None

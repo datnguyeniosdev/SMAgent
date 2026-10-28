@@ -71,7 +71,9 @@ HELP = (
 /list all — also idle projects' details and closed lanes · /forget &lt;p#&gt; — drop an old project name
 /auto — 🌙 auto-accept on/off: while you are away every question is answered (secure ones approved,
   else the first option); switching on takes the passcode
-/main &lt;s#&gt; — make it its project's 👑 main session: it routes project requests to 🧭 child sessions
+/main [p#] &lt;s#&gt; — pin it as its project's 👑 main session (routes project requests to 🧭 child
+  sessions; never replaced automatically) · /main p# auto — unpin · /main auto on|off — choose mains
+  automatically for every project, or only by /main
 /model [p# child|router opus|sonnet|haiku|default] — the Claude model of a project's child sessions and temporary router
 /agents — every agent: 🖥 app (desktop/IDE), ⌨️ CLI, ☁️ API, with on/off and close buttons
 Reply to any gateway message (text or photos) to give feedback or answer it.
@@ -836,7 +838,7 @@ class TelegramGateway:
         live = hub.live()
         lines = ["🖥 <b>SESSIONS</b>"]
         lines += [session_line(x, self.orch.channel) for x in live] or [
-            "none open · terminal: <code>agw session</code> (⚡ push) · any session: /loop + get_messages (🔄 pull)"
+            "none open · terminal: <code>agw session</code> (⚡ push) · any session: agw wait + get_messages (🔄 pull)"
         ]
         lines += ["", "📁 <b>PROJECTS</b>"]
         waiting = {}
@@ -1441,16 +1443,35 @@ class TelegramGateway:
         """/main <s#>: that session becomes its project's main (it routes the project's requests)."""
         if not self._authorized_msg(m):
             return
-        ref = (command.args or "").strip()
-        s = self.orch.channel.find(ref) if ref else None
-        if s is None or self.orch.channel.child(s):
+        hub, args = self.orch.channel, (command.args or "").lower().split()
+        if len(args) == 2 and args[0] == "auto" and args[1] in ("on", "off"):
+            hub.set_auto_main(args[1] == "on")
+            await say(m, "👑 Main tự động: " + ("bật ạ" if hub.auto_main() else
+                                                 "tắt; chỉ /main chọn session chính ạ"))  # fmt: skip
+            return
+        project = None
+        if args and re.fullmatch(r"p\d+", args[0]):
+            project = next((n for num, n in hub.projects() if num == int(args[0][1:])), None)
+            if project is None:
+                await say(m, "Không tìm thấy project đó ạ (/list).")
+                return
+            args = args[1:]
+            if args == ["auto"]:
+                hub.unpin_main(project)
+                await say(m, f"👑 <b>{escape(project)}</b>: đã bỏ ghim session chính ạ")
+                return
+        s = hub.find(args[0]) if len(args) == 1 else None
+        if s is None or hub.child(s) or (project and channel_norm(s.project) != channel_norm(project)):
+            pins = [f"p{num} {escape(n)}" for num, n in hub.projects() if hub.pinned(n)]
             await say(
                 m,
-                "Usage: /main &lt;s#&gt; (an open session that is not a 🧭 child; ids from /list)",
+                "Usage: /main [p#] &lt;s#&gt; (an open session of that project, not a 🧭 child; ids "
+                "from /list) · /main p# auto · /main auto on|off\n"
+                f"Auto: {'on' if hub.auto_main() else 'off'} · pinned: {', '.join(pins) or 'none'}",
             )
             return
-        self.orch.channel.set_main(s)
-        await say(m, f"👑 {session_line(s, self.orch.channel)}")
+        hub.set_main(s, pin=True)
+        await say(m, f"👑📌 {session_line(s, hub)}")
 
     async def send_main_offline(self, project: str) -> None:
         """The project's main session is gone and project work waits: wait, open a new main, or make
@@ -1487,7 +1508,7 @@ class TelegramGateway:
             if s is None:
                 await q.answer("Session đó không còn mở ạ.", show_alert=True)
                 return
-            hub.set_main(s)
+            hub.set_main(s, pin=True)
             await q.answer()
             if q.message:
                 await q.message.answer(f"👑 {session_line(s, hub)}")

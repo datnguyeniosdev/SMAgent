@@ -153,7 +153,7 @@ Telegram /send 2048 fix the pause menu
 - **Cancel:** `/cancel` on a waiting request drops it. On one already in progress it only marks it cancelled: the session isn't interrupted, and its answer is labelled cancelled.
 - **Auto-start when a project opens:**
   - `repo-setup` installs a `SessionStart` hook (`agw hook-session-start`) in `.claude/settings.local.json`. It tells Claude to create exactly one every-minute job (checked with `CronList` first). Hooks can't wake an idle session, so in the desktop app this happens with the session's first message.
-  - `agw session` starts a fresh session with the loop as its first prompt (`--no-loop` to skip). A resumed session (`--continue` / `--resume`) restores its recurring job instead.
+  - `agw session` starts no loop: push delivers into it, and the SessionStart hook starts the `agw wait` waiter plus one 30-minute safety cron (`SAFETY_CRON`), as in every other session.
 
 ### Receiving updates: polling or webhook
 

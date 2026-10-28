@@ -541,7 +541,7 @@ def build_mcp_server(svc) -> MCPServer:
         from other agents (ask_agent; meta.kind "request" -> answer with reply_message) plus answers to
         your own asks (meta.kind "answer" -> use them, no reply). agent: your tool, e.g. "claude_code";
         client: "app" when you run as a desktop app or in an IDE, "cli" in a terminal.
-        Call it when the `agw wait` waiter wakes you (or from `/loop 1m`).
+        Call it when the `agw wait` waiter wakes you (or from its 30-minute safety cron).
         Each message: message_id, text (the request), meta.
         Do each request, then answer it with reply_message(message_id=..., session_id=...).
         The session stays registered while it polls (5 min); the operator can switch it off (/off)."""
@@ -724,6 +724,19 @@ def build_mcp_server(svc) -> MCPServer:
             raise GatewayToolError(f"unknown session {session_id}: call get_messages first") from e
 
     @tool
+    async def set_main(session_id: str) -> dict[str, Any]:
+        """Only when the user asks for it in this session: make this session its project's 👑 main
+        (pinned, as /main p# s# on Telegram: never replaced automatically). A 🧭 child cannot."""
+        s = svc.channel.sessions.get(session_id)
+        if s is None:
+            raise GatewayToolError(f"unknown session {session_id}: call get_messages first")
+        if svc.channel.child(s):
+            raise GatewayToolError("a 🧭 child session cannot be the main")
+        svc.channel.set_main(s, pin=True)
+        svc.channel._ops(f"👑📌 {svc.channel._label(s)} made itself the main of {html.escape(s.project)}")
+        return {"main": session_id, "project": s.project, "pinned": True}
+
+    @tool
     async def get_ask(ask_id: str) -> dict[str, Any]:
         """State of an ask: queued | delivered | escalated (the operator is deciding) | answered (with
         the answer) | cancelled."""
@@ -803,6 +816,7 @@ TOOL_NAMES = [
     "ask_agent",
     "dispatch",
     "still_working",
+    "set_main",
     "get_ask",
     "review_project",
     "get_review",

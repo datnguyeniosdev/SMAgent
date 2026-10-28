@@ -431,7 +431,9 @@ def test_session_start_hook_and_loop_prompt(tmp_path):
         "CronDelete" in hint
         and "run_in_background" in hint
         and "wait --project '2048 Shooter (K05)' --cwd /w/r" in hint
-        and "CronCreate" not in hint
+        and "CronCreate" in hint  # one 30-minute safety net, not a per-minute poll
+        and "'*/30 * * * *'" in hint
+        and "get_messages" in hint
     )
     assert main(["hook-session-start", "--project", PROJECT]) == 0
 
@@ -1366,3 +1368,48 @@ def test_a_poll_without_cwd_never_makes_a_twin_that_takes_the_projects_work(sett
     hub.disconnect(lane)
     s, _, _ = hub.pull(PROJECT, None)  # one session left: that is the caller
     assert s is main
+
+
+async def test_a_pinned_main_and_auto_off_are_never_replaced_automatically(
+    settings, cfg_dir, monkeypatch
+):
+    from app.channel import _norm
+    from tests.test_config_gateway import make
+
+    orch, _ = make(settings, cfg_dir, [])
+    hub, asked = orch.channel, []
+    monkeypatch.setattr(hub, "_notify", lambda name, *a, **k: asked.append(name))
+    a, _, _ = hub.pull(PROJECT, None, "/w/a", 0, "claude_code", "app")
+    b, _, _ = hub.pull(PROJECT, None, "/w/b", 0, "claude_code", "cli")
+    assert hub.main_for(PROJECT) is a and not hub.pinned(PROJECT)  # chosen automatically
+    hub.set_main(b, pin=True)  # /main p# s#
+    hub.close(b)  # the pinned main goes: a does not take over, the operator is asked
+    assert hub.main_for(PROJECT) is None and hub.pinned(PROJECT)
+    _, target = hub.send(PROJECT, "work")
+    assert target is None and asked.count("send_main_offline") == 1
+    hub.unpin_main(PROJECT)  # /main p# auto
+    hub.svc.store.put("channel_main", _norm(PROJECT), {"project": PROJECT})  # (b's record gone)
+    assert hub.main_for(PROJECT) is a  # unpinned: chosen automatically again
+
+    hub.set_auto_main(False)  # /main auto off: no project gets a main by itself
+    hub.svc.store.put("channel_main", _norm(PROJECT), {"project": PROJECT})
+    assert hub.main_for(PROJECT) is None
+    hub.set_main(a, pin=True)
+    assert hub.main_for(PROJECT) is a
+
+
+async def test_a_session_makes_itself_the_pinned_main_with_set_main(settings, cfg_dir):
+    from mcp.client import Client
+
+    from app.mcp_server import build_mcp_server
+    from tests.test_config_gateway import make
+
+    orch, _ = make(settings, cfg_dir, [])
+    kw = {"project": PROJECT, "agent": "claude_code", "cwd": "/w/a", "client": "app"}
+    async with Client(build_mcp_server(orch)) as c:
+        a = (await c.call_tool("get_messages", kw)).structured_content["session_id"]
+        b = (await c.call_tool("get_messages", {**kw, "cwd": "/w/b"})).structured_content["session_id"]
+        assert orch.channel.main_for(PROJECT).session_id == a  # chosen automatically
+        r = (await c.call_tool("set_main", {"session_id": b})).structured_content
+    assert r["pinned"] and orch.channel.main_for(PROJECT).session_id == b
+    assert orch.channel.pinned(PROJECT)

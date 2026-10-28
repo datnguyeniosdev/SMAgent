@@ -206,6 +206,9 @@ once the command has finished, call `report_deployment`:
 """
 
 
+SAFETY_CRON = "*/30 * * * *"  # the waiter wakes sessions; this only catches a waiter that died
+
+
 def loop_prompt(project: str, client: str = "", agent: str = "claude_code") -> str:
     """Pull loop: one request at a time; a busy session takes nothing new (no duplicate jobs)."""
     kind = f", client '{client}'" if client else ""
@@ -223,15 +226,18 @@ def loop_prompt(project: str, client: str = "", agent: str = "claude_code") -> s
 
 def session_start_hint(project: str, cwd: str = "") -> str:
     """SessionStart hook output (added to Claude's context): start the background waiter (`agw wait`),
-    which wakes Claude only when Telegram work is queued; it replaces the old per-minute cron poll
-    and the 10-minute health check, which cost a full-context model run each time."""
+    which wakes Claude only when Telegram work is queued, plus one SAFETY_CRON job in case the waiter
+    died unnoticed (the old per-minute poll cost a full-context model run each minute: 1440 a day)."""
     from app.waiter import command
 
-    cmd = command(project, cwd or os.getcwd(), client_kind())
+    cwd = cwd or os.getcwd()
+    cmd = command(project, cwd, client_kind())
+    prompt = loop_prompt(project, client_kind()).replace("this folder", f"'{cwd}'")
     return (
         f"agent-gateway: this project ({project}) takes work from Telegram. Before anything else in "
         "this session, call CronList and delete (CronDelete) every job whose prompt mentions "
-        "get_messages or /health: the waiter replaces them. Then start the gateway waiter once with the "
+        "get_messages or /health, then create exactly one safety net with CronCreate (cron "
+        f"'{SAFETY_CRON}', recurring true, prompt: {prompt}). Then start the gateway waiter once with the "
         f"Bash tool, run_in_background true: `{cmd}`. It costs nothing while idle and exits only when "
         "there is work; its output says what to do. Never run two. Then continue with the user's request."
     )

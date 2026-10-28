@@ -489,7 +489,6 @@ def cmd_session(args) -> int:
             "npm install -g @anthropic-ai/claude-code@latest"
         )
     from app.global_setup import installed as global_installed
-    from app.projects import project_for
 
     mcp = json.loads(Path(".mcp.json").read_text()) if Path(".mcp.json").exists() else {}
     local = mcp.get("mcpServers", {}).get(CHANNEL_NAME)
@@ -497,15 +496,8 @@ def cmd_session(args) -> int:
         raise SystemExit(
             "no channel server here: run `uv run agw setup` (all repos) or `agw setup --repo <repo>`"
         )
+    # no /loop: push delivers here, and the SessionStart hook starts the waiter and its safety cron
     env = {**_clean_env(), "AGW_CHANNEL": "1"}  # the shim only listens in sessions started here
-    if (
-        not args.claude_args and not args.no_loop
-    ):  # fresh session: also pull (resumed ones restore it)
-        from app.repo_setup import loop_prompt
-
-        project = (local or {}).get("args", [None])[-1] or project_for(Path.cwd())
-        if project:
-            args.claude_args = [f"/loop 1m {loop_prompt(project, 'cli')}"]
     # the channel option takes several values, so it goes last: a prompt after it would be read as a channel
     argv = [
         claude,
@@ -841,7 +833,7 @@ def main(argv: list[str] | None = None) -> int:
     sp = sub.add_parser(
         "session", help="(in a repo) open Claude Code that takes work from Telegram"
     )
-    sp.add_argument("--no-loop", action="store_true", help="do not start the pull loop")
+    sp.add_argument("--no-loop", action="store_true", help=argparse.SUPPRESS)  # (no loop any more)
     sp.add_argument(
         "--model", default="", help="Claude model for the session (opus, sonnet, haiku or an id)"
     )
