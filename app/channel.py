@@ -941,6 +941,14 @@ class ChannelHub:
             msg["wait_cwd"], msg["waiting_since"] = old["path"], now().isoformat()
             self._set(msg, "pending")
             await asyncio.to_thread(_trust, Path(old["path"]), Path(old.get("repo") or ""))
+            if old.get("repo") and await asyncio.to_thread(
+                _carry, Path(old["repo"]), Path(old["path"])
+            ):
+                from app.config import ENV_PORTS, env_name
+                from app.repo_setup import setup_repo  # rules changed in the project since: again
+
+                url = f"http://127.0.0.1:{ENV_PORTS[env_name()]}/mcp"
+                await asyncio.to_thread(setup_repo, Path(old["path"]), url, msg["project"], False)
             agent = old.get("agent", "") if old.get("agent") not in ("", "claude_code") else ""
             model = model or old.get("model") or self.models(msg["project"])["child"]
             wid = await asyncio.to_thread(self.launch, Path(old["path"]), agent, model)
@@ -970,6 +978,7 @@ class ChannelHub:
         from app.repo_setup import setup_repo
 
         url = f"http://127.0.0.1:{ENV_PORTS[env_name()]}/mcp"
+        await asyncio.to_thread(_carry, Path(repo), path)  # (then the gateway section on top)
         await asyncio.to_thread(setup_repo, path, url, msg["project"], False)
         self.svc.store.put("channel_child", str(path), {"project": msg["project"], "lane": lane,
                            "branch": branch, "repo": str(repo), "parent": session_id, "path": str(path),
@@ -1542,6 +1551,38 @@ CLAUDE_JSON = (
 )  # Claude Code's per-folder trust (tests point it elsewhere)
 TRUST_KEYS = ("hasTrustDialogAccepted", "enabledMcpjsonServers", "disabledMcpjsonServers",
               "hasClaudeMdExternalIncludesApproved", "hasClaudeMdExternalIncludesWarningShown")  # fmt: skip
+
+
+CARRY = ("CLAUDE.md", "AGENTS.md", "GEMINI.md", ".claude")  # the project's agent rules and skills
+CARRY_SKIP = {"worktrees", "scheduled_tasks.lock"}  # (the app's own worktrees, a lock)
+
+
+def _carry(repo: Path, child: Path) -> int:
+    """The project's rules, skills, subagents and agent settings that git does not carry (untracked
+    or ignored, e.g. a global `CLAUDE.md` ignore or `.claude/` in .gitignore): copied into its child,
+    which is a git worktree and would start without them. A file the child lacks, or one changed in
+    the project since, is copied; returns how many."""
+    n = 0
+    for name in CARRY:
+        src = repo / name
+        files = (
+            [src]
+            if src.is_file()
+            else sorted(p for p in src.rglob("*") if p.is_file())
+            if src.is_dir()
+            else []
+        )
+        for f in files:
+            rel = f.relative_to(repo)
+            if CARRY_SKIP & set(rel.parts):
+                continue
+            dst = child / rel
+            if dst.exists() and dst.stat().st_mtime >= f.stat().st_mtime:
+                continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(f, dst)
+            n += 1
+    return n
 
 
 def _trust(path: Path, repo: Path) -> bool:

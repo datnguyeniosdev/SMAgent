@@ -1487,3 +1487,38 @@ async def test_work_typed_into_the_main_is_routed_to_a_child_never_done_there(se
     _, got, _ = hub.pull(PROJECT, worker.session_id)
     assert got and "fix the shop button" in got[0]["text"]
     assert hub.in_progress(main.session_id) == []  # the main holds nothing: free to route
+
+
+def test_a_child_gets_the_projects_rules_and_skills_that_git_does_not_carry(tmp_path):
+    import os
+
+    from app.channel import _carry
+
+    repo, kid = tmp_path / "game", tmp_path / "game/.agw-children/ui-1"
+    (repo / ".claude/skills/ui-review").mkdir(parents=True)
+    (repo / ".claude/skills/ui-review/SKILL.md").write_text("review")
+    (repo / ".claude/agents").mkdir()
+    (repo / ".claude/agents/qa.md").write_text("qa agent")
+    (repo / ".claude/worktrees/x").mkdir(parents=True)
+    (repo / ".claude/worktrees/x/big.bin").write_text("not this")
+    (repo / "CLAUDE.md").write_text("# House rules\\nNo magic numbers.")
+    kid.mkdir(parents=True)
+    (kid / "AGENTS.md").write_text("tracked, already here")
+
+    assert _carry(repo, kid) == 3
+    assert (kid / ".claude/skills/ui-review/SKILL.md").read_text() == "review"
+    assert (kid / ".claude/agents/qa.md").exists() and "No magic numbers" in (
+        kid / "CLAUDE.md"
+    ).read_text()
+    assert (
+        not (kid / ".claude/worktrees").exists()
+        and (kid / "AGENTS.md").read_text() == "tracked, already here"
+    )
+    assert _carry(repo, kid) == 0  # nothing new
+    (repo / ".claude/skills/ui-review/SKILL.md").write_text("review v2")
+    later = (kid / ".claude/skills/ui-review/SKILL.md").stat().st_mtime + 5
+    os.utime(repo / ".claude/skills/ui-review/SKILL.md", (later, later))
+    assert (
+        _carry(repo, kid) == 1
+        and (kid / ".claude/skills/ui-review/SKILL.md").read_text() == "review v2"
+    )
