@@ -309,9 +309,11 @@ def update_mcp_json(repo: Path, url: str, token: bool = True, project: str = "")
     base = url.removesuffix("/mcp")
     if base != "http://127.0.0.1:8000":  # dev/uat gateway: the shim follows the same one
         data["mcpServers"][CHANNEL]["env"] = {"AGW_URL": base}
-    server = {"type": "http", "url": url}
-    if token:  # MCP_REQUIRE_TOKEN=false: local sessions connect without a header
-        server["headers"] = {"Authorization": "Bearer ${AGW_API_TOKEN}"}
+    if token:  # ponytail: the stdio proxy sends no token; with one, HTTP (no reconnect)
+        server = {"type": "http", "url": url,
+                  "headers": {"Authorization": "Bearer ${AGW_API_TOKEN}"}}  # fmt: skip
+    else:  # over the stdio proxy, which reconnects when the gateway restarts (HTTP alone does not)
+        server = {"type": "stdio", "command": str(agw), "args": ["mcp-stdio", "--url", url]}
     data.setdefault("mcpServers", {})[SERVER] = server
     path.write_text(json.dumps(data, indent=2) + "\n")
 

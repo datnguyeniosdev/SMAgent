@@ -66,7 +66,8 @@ def test_repo_setup_without_token_writes_no_header(tmp_path):
     repo.mkdir()
     setup_repo(repo, URL, "P", token=False)
     server = json.loads((repo / ".mcp.json").read_text())["mcpServers"]["agent-gateway"]
-    assert server == {"type": "http", "url": URL}
+    assert server["type"] == "stdio" and server["args"] == ["mcp-stdio", "--url", URL]  # reconnects
+    assert "headers" not in server
 
 
 def test_detect_project_ignores_notes_after_the_name(tmp_path):
