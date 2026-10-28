@@ -300,3 +300,62 @@ async def test_every_gateway_tool_says_when_a_desktop_sessions_waiter_is_not_run
             await c.call_tool("get_messages", {**kw, "session_id": sid, "limit": 0})
         ).structured_content
         assert "next" not in r
+
+
+async def test_hash_main_splits_one_conversation_off_as_the_pinned_main_desktop_first(
+    settings, cfg_dir, monkeypatch
+):
+    from tests.test_config_gateway import make
+
+    orch, _ = make(settings, cfg_dir, [])
+    hub = orch.channel
+    p, cwd = "Ball Shot (K10)", "/w/ball-shot"
+    base = hub.pull_id(p, "claude_code", cwd, "app")
+    one = hub.peek(p, "claude_code", cwd, "app", instance="local_one")
+    two = hub.peek(p, "claude_code", cwd, "app", instance="local_two")
+    assert one["session_id"] == two["session_id"] == base  # one folder + tool: one shared session
+
+    main, why = hub.claim_main(
+        p, "claude_code", cwd, "app", "local_two"
+    )  # #Main in conversation two
+    assert why is None and main.session_id.startswith(base + "_")
+    assert hub.main_for(p) is main and hub.pinned(p)
+    assert (
+        hub.peek(p, "claude_code", cwd, "app", instance="local_two")["session_id"]
+        == main.session_id
+    )
+    assert hub.peek(p, "claude_code", cwd, "app", instance="local_one")["session_id"] == base
+
+    term, why = hub.claim_main(
+        p, "claude_code", "/w/ball-shot", "cli", "term"
+    )  # #Main in a terminal
+    assert term is None and "desktop app" in why and hub.main_for(p) is main  # the app keeps it
+    app2, why = hub.claim_main(p, "claude_code", cwd, "app", "local_one")  # another desktop #Main
+    assert why is None and hub.main_for(p) is app2
+
+    hub.disconnect(app2)  # pinned only while connected
+    assert not hub.pinned(p)
+    assert hub.peek(p, "claude_code", cwd, "app", instance="local_one")["session_id"] == base
+
+    monkeypatch.setenv(
+        "CLAUDE_CODE_HOST_SESSION_ID", "local_two"
+    )  # the waiter inside conversation two
+    assert w.instance() == "local_two"
+    assert hub.pull_id(p, "claude_code", cwd, "", w.instance()) == main.session_id
+
+
+def test_the_waiter_follows_its_conversation_when_it_becomes_the_main(
+    tmp_path, monkeypatch, capsys
+):
+    from app.channel import ChannelHub
+
+    monkeypatch.setattr(w, "WAITERS", tmp_path)
+    monkeypatch.setenv("CLAUDE_CODE_HOST_SESSION_ID", "local_two")
+    base = ChannelHub.pull_id("P", "claude_code", "/w/p", "app")
+    own = ChannelHub.pull_id("P", "claude_code", "/w/p", "app", "local_two")
+    feed(monkeypatch, [{"session_id": base, "queued": False},
+                       {"session_id": own, "queued": False},  # #Main: the gateway says its own id
+                       {"session_id": own, "queued": True, "next": "chm_9"}])  # fmt: skip
+    assert w.wait("P", "/w/p", "app", 8000) == 0
+    assert f"session_id '{own}'" in capsys.readouterr().out
+    assert (tmp_path / f"{own}.json").exists() and not (tmp_path / f"{base}.json").exists()

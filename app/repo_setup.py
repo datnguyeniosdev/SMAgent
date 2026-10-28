@@ -129,6 +129,13 @@ copy of the project (and branch, in a git repo). If you are a 🧭 child (opened
 `.agw-children`), work on your `agw/` branch, commit your work there before you answer (that commit
 needs no approval; a copy without git has no branch: say which files you changed), answer with
 `reply_message` as usual, and merge nothing without the operator's approval.
+When the user writes `#Main` in this session (here, not from Telegram or another agent), make it the
+project's 👑 main: run with Bash the `agw` of your waiter command with `main` in place of `wait ...`
+(e.g. `/path/to/agw main`), then use the session_id it prints. The conversation gets its own
+session (other conversations of this folder and tool keep sharing one) and stays the pinned main
+until it disconnects; a desktop-app main is not taken over by a terminal one. In a 🧭 child it also
+leaves its lane: from then on you are the main (route, do not work), not a child. Other agent tools:
+`set_main(session_id)`.
 
 **`UIUX review`.** When the user (here or on Telegram) says "UIUX review", send the UI to the
 UIUXAgent project for review: `ask_agent(to="UIUXAgent", request, session_id=<yours>)`. The request

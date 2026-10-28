@@ -574,7 +574,7 @@ def cmd_hook_prompt(args) -> int:
     stopped background tasks), its stdout tells Claude to start it again before the request."""
     from app.config import ENV_PORTS
     from app.projects import client_kind, project_for  # light imports: this runs on every prompt
-    from app.waiter import missing, reminder, tell
+    from app.waiter import instance, missing, reminder, tell
 
     cwd = str(Path.cwd())
     project = project_for(Path(cwd))
@@ -586,6 +586,7 @@ def cmd_hook_prompt(args) -> int:
             agent="claude_code",
             cwd=cwd,
             client=client_kind(),
+            instance=instance(),
         )
     if project and missing(project, cwd):
         print(reminder(project, cwd, client_kind()))
@@ -597,7 +598,7 @@ def cmd_hook_failure(args) -> int:
     The session's unanswered Telegram work goes to the operator to move, wait for, or cancel."""
     from app.config import ENV_PORTS
     from app.projects import client_kind, project_for
-    from app.waiter import tell
+    from app.waiter import instance, tell
 
     try:
         event = json.loads(sys.stdin.read() or "{}")
@@ -608,7 +609,7 @@ def cmd_hook_failure(args) -> int:
     if project:
         reason = " · ".join(str(event[k])[:120] for k in ("error", "error_details") if event.get(k))
         tell("/api/v1/channel/stalled", ENV_PORTS["prod"], project=project, agent="claude_code",
-             cwd=cwd, reason=reason or "API error", client=client_kind())  # fmt: skip
+             cwd=cwd, reason=reason or "API error", client=client_kind(), instance=instance())  # fmt: skip
     return 0
 
 
@@ -650,6 +651,39 @@ def cmd_codex_hook(args) -> int:
     out = hook(event)
     if out:
         print(json.dumps(out))
+    return 0
+
+
+def cmd_main(args) -> int:
+    """#Main typed in a Claude conversation: it becomes its project's pinned 👑 main (its own gateway
+    session, split from the folder's shared one) until it disconnects. Its waiter follows by itself."""
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    from app.config import ENV_PORTS, env_name
+    from app.projects import client_kind, project_for
+    from app.waiter import instance
+
+    cwd = str(Path(args.cwd).resolve())
+    project = args.project or project_for(Path(cwd))
+    if not project:
+        print(f"{cwd} is not a project folder under the projects root.")
+        return 2
+    query = urllib.parse.urlencode({"project": project, "agent": "claude_code", "cwd": cwd,
+                                    "client": client_kind(), "instance": instance()})  # fmt: skip
+    url = f"http://127.0.0.1:{ENV_PORTS[env_name()]}/api/v1/channel/main?{query}"
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, method="POST"), timeout=30) as r:  # noqa: S310
+            out = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        print(f"Not the main: {json.loads(e.read() or b'{}').get('detail') or e}")
+        return 1
+    except OSError as e:
+        print(f"The gateway is not reachable ({e}).")
+        return 1
+    print(f"👑 This session ({out['main']}) is now the pinned main of {out['project']} until it "
+          "disconnects. Use that session_id with get_messages; your waiter switches to it by itself.")  # fmt: skip
     return 0
 
 
@@ -884,6 +918,10 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--client", default="")
     sp.add_argument("--agent", default="claude_code", choices=["claude_code", "antigravity"])
     sp.set_defaults(fn=cmd_wait)
+    sp = sub.add_parser("main")  # #Main: this conversation becomes its project's pinned main
+    sp.add_argument("--project", default="")
+    sp.add_argument("--cwd", default=".")
+    sp.set_defaults(fn=cmd_main)
 
     args, extra = p.parse_known_args(argv)
     if args.cmd == "session":  # everything unknown goes to claude (e.g. --continue, --resume <id>)

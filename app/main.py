@@ -890,25 +890,43 @@ async def channel_peek(
 @app.get("/api/v1/channel/wait", include_in_schema=False)
 async def channel_wait(
     request: Request, project: str, agent: str, cwd: str = "", client: str = "cli", after: str = "",
-    hold: float = 25,
+    hold: float = 25, instance: str = "",
 ):  # fmt: skip
     """`agw wait`: peek held open until a message other than `after` is queued (or the session
     closes), at most `hold` seconds: idle waiters cost one held request per 25 s and wake at once."""
     _local_only(request)
     hub = request.app.state.orch.channel
-    return await hub.wait(project, agent, cwd, client, after, max(0.0, min(hold, 55.0)))
+    return await hub.wait(project, agent, cwd, client, after, max(0.0, min(hold, 55.0)), instance)
 
 
 @app.post("/api/v1/channel/stalled", include_in_schema=False)
 async def channel_stalled(
-    request: Request, project: str, agent: str, cwd: str = "", reason: str = "", client: str = ""
+    request: Request,
+    project: str,
+    agent: str,
+    cwd: str = "",
+    reason: str = "",
+    client: str = "",
+    instance: str = "",
 ):
     """An agent's failure hook (Claude StopFailure, Cursor stop with an error): its work is held for
     the operator on Telegram instead of waiting out the lease."""
     _local_only(request)
     hub = request.app.state.orch.channel
-    held = hub.stall(hub.pull_id(project, agent, cwd, client), reason or "error")
+    held = hub.stall(hub.pull_id(project, agent, cwd, client, instance), reason or "error")
     return {"stalled": [m["message_id"] for m in held]}
+
+
+@app.post("/api/v1/channel/main", include_in_schema=False)
+async def channel_main(
+    request: Request, project: str, agent: str, cwd: str, client: str = "", instance: str = ""
+):
+    """`agw main` (#Main typed in a conversation): it becomes the project's pinned main."""
+    _local_only(request)
+    s, why = request.app.state.orch.channel.claim_main(project, agent, cwd, client, instance)
+    if s is None:
+        raise HTTPException(409, why)
+    return {"main": s.session_id, "project": s.project}
 
 
 class TurnIn(BaseModel):
@@ -934,13 +952,15 @@ async def channel_turn(request: Request, body: TurnIn):
 
 @app.post("/api/v1/channel/active", include_in_schema=False)
 async def channel_active(
-    request: Request, project: str, agent: str, cwd: str = "", client: str = ""
+    request: Request, project: str, agent: str, cwd: str = "", client: str = "", instance: str = ""
 ):
     """The agent's model runs again (a prompt): work it left stalled is put to the operator."""
     _local_only(request)
     hub = request.app.state.orch.channel
     return {
-        "asked": [m["message_id"] for m in hub.active(hub.pull_id(project, agent, cwd, client))]
+        "asked": [
+            m["message_id"] for m in hub.active(hub.pull_id(project, agent, cwd, client, instance))
+        ]
     }
 
 

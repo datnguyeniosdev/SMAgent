@@ -1461,7 +1461,11 @@ class TelegramGateway:
                 await say(m, f"👑 <b>{escape(project)}</b>: đã bỏ ghim session chính ạ")
                 return
         s = hub.find(args[0]) if len(args) == 1 else None
-        if s is None or hub.child(s) or (project and channel_norm(s.project) != channel_norm(project)):
+        if (
+            s is None
+            or hub.child(s)
+            or (project and channel_norm(s.project) != channel_norm(project))
+        ):
             pins = [f"p{num} {escape(n)}" for num, n in hub.projects() if hub.pinned(n)]
             await say(
                 m,

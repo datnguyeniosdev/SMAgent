@@ -37,7 +37,9 @@ from pathlib import Path
 from app.models import new_id, now
 
 log = logging.getLogger(__name__)
-PULL_TTL = timedelta(minutes=5)  # a pull session is open while it (or its waiter) polled this recently
+PULL_TTL = timedelta(
+    minutes=5
+)  # a pull session is open while it (or its waiter) polled this recently
 LEASE = timedelta(minutes=60)  # an unanswered handed-over message keeps its session busy this long
 CHILD_IDLE = timedelta(minutes=30)  # a child session with nothing to do this long is closed
 BUSY = timedelta(minutes=30)  # one still_working call keeps a session busy this long
@@ -210,6 +212,11 @@ class ChannelHub:
             self.sessions.get(s.session_id) is s
         ):  # a newer stream for the same id may have replaced it
             del self.sessions[s.session_id]
+            rec = self.svc.store.get("channel_main", _norm(s.project)) or {}
+            if rec.get("pinned") and rec.get("session_id") == s.session_id:
+                # a #Main or /main is the main only while it is connected: then another is chosen
+                # (automatically, or the next #Main / /main)
+                self.svc.store.put("channel_main", _norm(s.project), {"project": rec.get("project") or s.project})
             self._release(s)
             self._ops(f"⚪ {self._label(s)} left" + (f": {why}" if why else ""))
             self.svc.store.event("channel.disconnected", task_id=s.task_id, session=s.session_id)
@@ -510,14 +517,52 @@ class ChannelHub:
 
     def set_main(self, s: LiveSession, flush: bool = True, pin: bool | None = None) -> None:
         """/main s# (pin=True: the operator's choice, never replaced automatically), or the first
-        session of a project: it routes the project's work. pin=None keeps the project's pin."""
+        session of a project: it routes the project's work. pin=None keeps the project's pin.
+        A 🧭 child made the main (#Main in it) leaves its lane: it is no longer a child, and new
+        lanes are still copied from the project repo, not from its copy."""
         pin = self.pinned(s.project) if pin is None else pin
-        self.svc.store.put("channel_main", _norm(s.project), {"project": s.project,
-                           "session_id": s.session_id, "cwd": s.cwd, "agent": s.agent, "kind": s.kind,
-                           "pinned": pin})  # fmt: skip
+        rec = {"project": s.project, "session_id": s.session_id, "cwd": s.cwd, "agent": s.agent,
+               "kind": s.kind, "pinned": pin}  # fmt: skip
+        if c := self.child(s):
+            self.svc.store.delete("channel_child", s.cwd)
+            rec["repo"] = c.get("repo")
+        elif (old := self.svc.store.get("channel_main", _norm(s.project)) or {}).get(
+            "cwd"
+        ) == s.cwd:
+            rec["repo"] = old.get("repo")  # the same detached folder: keep where lanes come from
+        self.svc.store.put(
+            "channel_main", _norm(s.project), {k: v for k, v in rec.items() if v is not None}
+        )
         self._main_asked.discard(_norm(s.project))
         if flush:  # not from main_for, which may run inside a flush (a message queued twice)
             self._flush_pending(s.project)
+
+    def _pinned_sid(self, project: str) -> str | None:
+        rec = self.svc.store.get("channel_main", _norm(project)) or {}
+        return rec.get("session_id") if rec.get("pinned") else None
+
+    def outranked(self, s: LiveSession) -> LiveSession | None:
+        """The pinned main a session may not take over: a live desktop-app main is kept against a
+        session of another kind (two #Main: the desktop app wins)."""
+        cur = self.sessions.get(self._pinned_sid(s.project) or "")
+        if cur is not None and cur is not s and cur.kind == "app" and s.kind != "app":
+            return cur
+        return None
+
+    def claim_main(self, project: str, agent: str, cwd: str, client: str, instance: str):
+        """#Main typed in a conversation (`agw main`): it leaves the folder's shared session for its
+        own and becomes the project's pinned 👑 main until it disconnects or is removed. Returns
+        (session, None), or (None, why) when a desktop-app main keeps the place."""
+        sid = self.pull_id(project, agent, cwd, client, instance)
+        probe = LiveSession(sid, project, cwd, "", mode="pull", agent=agent, client=client)
+        if cur := self.outranked(probe):
+            return None, f"{self._label(cur)} (desktop app) is the main: a desktop-app main is kept"
+        s, _, _ = self.pull(project, sid, cwd, 0, agent, client)
+        lane = (self.child(s) or {}).get("lane")
+        self.set_main(s, pin=True)
+        left = f" (left 🧭 lane {escape_html(lane)})" if lane else ""
+        self._ops(f"👑📌 {self._label(s)} is the main of {escape_html(project)} (#Main){left}")
+        return s, None
 
     def pinned(self, project: str) -> bool:
         return bool((self.svc.store.get("channel_main", _norm(project)) or {}).get("pinned"))
@@ -592,10 +637,18 @@ class ChannelHub:
             self._open_router(project, rec, same[0])
         return None
 
+    def _repo(self, main: LiveSession) -> Path:
+        """The project repo the main's lanes are copied from: its folder's, or for a main that was a
+        child, the repo its copy came from. Raises ValueError outside a git repo."""
+        rec = self.svc.store.get("channel_main", _norm(main.project)) or {}
+        if rec.get("repo") and rec.get("cwd") == main.cwd:
+            return Path(rec["repo"])
+        return _toplevel(main.cwd)
+
     def _open_router(self, project: str, rec: dict, main: LiveSession) -> None:
         """A temporary router for a stuck main, with the main's agent tool, inside the project."""
         try:
-            repo = _toplevel(main.cwd)
+            repo = self._repo(main)
         except ValueError:
             return
         path = repo / CHILDREN / "router"
@@ -890,7 +943,7 @@ class ChannelHub:
                     "path": old["path"]}  # fmt: skip
         try:
             try:
-                repo = await asyncio.to_thread(_toplevel, main.cwd)
+                repo = await asyncio.to_thread(self._repo, main)
             except ValueError:  # not a git repo: its children get a plain copy of the folder
                 from app.projects import repo_for
 
@@ -1266,28 +1319,38 @@ class ChannelHub:
         return msg
 
     @staticmethod
-    def pull_id(project: str, agent: str, cwd: str, client: str = "") -> str:
+    def pull_id(project: str, agent: str, cwd: str, client: str = "", instance: str = "") -> str:
         """One pull session per project, agent tool and folder (Claude, Codex and OpenCode on the
         same project stay apart), stable across polls that forget to pass session_id. A terminal
-        session (cli) in the folder of a desktop one is another session, not a twin taking its work."""
+        session (cli) in the folder of a desktop one is another session, not a twin taking its work.
+        instance: the agent's own conversation id (Claude's, from its waiter and hooks): two
+        conversations in one folder are two sessions (base id + "_" + its hash)."""
         where = hashlib.sha256(cwd.encode()).hexdigest()[:6] if cwd else "0"
         where += "c" if client == "cli" else ""
-        return f"pull_{_norm(project)[:24]}_{_norm(agent or 'agent')[:12]}_{where}"
+        sid = f"pull_{_norm(project)[:24]}_{_norm(agent or 'agent')[:12]}_{where}"
+        return sid + "_" + hashlib.sha256(instance.encode()).hexdigest()[:4] if instance else sid
 
     def pull(
         self, project: str, session_id: str | None, cwd: str = "", limit: int = 1, agent: str = "",
-        client: str = "",
+        client: str = "", instance: str = "",
     ):  # fmt: skip
         """get_messages: register/refresh a pull session and hand over what is queued for it.
         Nothing new while it still has an unanswered message (no duplicate or parallel jobs), except
         answers to its own questions, which that message is waiting for.
         Returns (session, new messages, messages still in progress)."""
-        sid = session_id or self.pull_id(project, agent, cwd, client)
+        own = self.pull_id(project, agent, cwd, client)
+        mine = self.pull_id(project, agent, cwd, client, instance) if instance else own
+        # conversations of one folder and tool share its session; one has its own only as the
+        # project's #Main (claim_main), until it disconnects
+        sid = session_id or (
+            mine if mine in self.sessions or mine == self._pinned_sid(project) else own
+        )
         if (
             cwd
             and agent
             and sid.startswith("pull_")
-            and sid != (own := self.pull_id(project, agent, cwd, client))
+            and sid != own
+            and not sid.startswith(own + "_")  # a conversation of this folder
         ):
             # a stale id (remembered from before a folder rename or a restart): the folder's session,
             # the one its waiter and the gateway's pushes use
@@ -1343,10 +1406,12 @@ class ChannelHub:
             return None
         return s.queue._queue[0]["message_id"]  # ponytail: asyncio.Queue internals
 
-    def peek(self, project: str, agent: str, cwd: str = "", client: str = "") -> dict:
+    def peek(
+        self, project: str, agent: str, cwd: str = "", client: str = "", instance: str = ""
+    ) -> dict:
         """Keep a pull session listed and say whether it has work, handing nothing out (no model run):
         queued = a new message waits, work = new or unfinished."""
-        s, _, busy = self.pull(project, None, cwd, 0, agent, client)
+        s, _, busy = self.pull(project, None, cwd, 0, agent, client, instance)
         nxt = self._next(s)
         return {"session_id": s.session_id, "closing": s.closing, "enabled": s.enabled,
                 "queued": nxt is not None, "next": nxt,
@@ -1354,16 +1419,16 @@ class ChannelHub:
 
     async def wait(
         self, project: str, agent: str, cwd: str = "", client: str = "", after: str = "",
-        hold: float = 25,
+        hold: float = 25, instance: str = "",
     ) -> dict:  # fmt: skip
         """Long-poll peek (`agw wait`): returns as soon as a message other than `after` is queued or
         the session closes, else after `hold` seconds (under PULL_TTL, so the session stays listed)."""
-        state, end = self.peek(project, agent, cwd, client), time.monotonic() + hold
+        state, end = self.peek(project, agent, cwd, client, instance), time.monotonic() + hold
         while not state["closing"] and state["next"] in (None, after) and time.monotonic() < end:
             await asyncio.sleep(1)  # ponytail: in-process check each second, no event per queue
             s = self.sessions.get(state["session_id"])
             if s is None or self._next(s) not in (None, after):
-                state = self.peek(project, agent, cwd, client)  # closed, or new work
+                state = self.peek(project, agent, cwd, client, instance)  # closed, or new work
         return state
 
     async def reply(

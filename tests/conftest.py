@@ -162,3 +162,10 @@ def cfg_dir(tmp_path):
     d = tmp_path / "config"
     shutil.copytree(Path(__file__).resolve().parents[1] / "config", d)
     return d
+
+
+@pytest.fixture(autouse=True)
+def _outside_a_claude_conversation(monkeypatch):
+    """Tests run the same inside or outside a Claude session: no conversation id from the env."""
+    monkeypatch.delenv("CLAUDE_CODE_HOST_SESSION_ID", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)

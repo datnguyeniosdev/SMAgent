@@ -82,12 +82,26 @@ def antigravity_notify():
     return notify
 
 
-def missing(project: str, cwd: str) -> bool:
+def instance() -> str:
+    """This Claude conversation's id (its waiter and hooks run inside it): the desktop app's
+    session id, stable across app restarts, else Claude Code's own."""
+    return (
+        os.environ.get("CLAUDE_CODE_HOST_SESSION_ID")
+        or os.environ.get("CLAUDE_CODE_SESSION_ID")
+        or ""
+    )
+
+
+def missing(project: str, cwd: str, sid: str | None = None) -> bool:
     """The session's waiter is not running (the app restarted, or it was never started), and the
     operator did not close the session. Cheap: a file read and a signal 0, no gateway call."""
     from app.channel import ChannelHub
 
-    data = _read(WAITERS / f"{ChannelHub.pull_id(project, 'claude_code', cwd)}.json")
+    if sid is None:  # this conversation's own session (#Main), else the folder's shared one
+        sid = ChannelHub.pull_id(project, "claude_code", cwd, "", instance())
+        if not (WAITERS / f"{sid}.json").exists():
+            sid = ChannelHub.pull_id(project, "claude_code", cwd)
+    data = _read(WAITERS / f"{sid}.json")
     if data.get("closed"):
         return False
     try:
@@ -118,8 +132,21 @@ def wait(project: str, cwd: str, client: str, port: int, interval: float = 30,
     """notify(text) -> bool: wake the agent and keep waiting (Antigravity); None: print and exit."""
     from app.channel import ChannelHub
 
-    sid = ChannelHub.pull_id(project, agent, cwd, client)
-    base = {"project": project, "agent": agent, "cwd": cwd, "client": client or "app"}
+    inst = instance() if agent == "claude_code" else ""
+    # the folder's shared session, or this conversation's own once it is the #Main (the gateway says)
+    own = ChannelHub.pull_id(project, agent, cwd, client, inst)
+    sid = (
+        own
+        if (WAITERS / f"{own}.json").exists()
+        else ChannelHub.pull_id(project, agent, cwd, client)
+    )
+    base = {
+        "project": project,
+        "agent": agent,
+        "cwd": cwd,
+        "client": client or "app",
+        "instance": inst,
+    }
     WAITERS.mkdir(parents=True, exist_ok=True)
     path = WAITERS / f"{sid}.json"
     old = {k: v for k, v in _read(path).items() if k != "closed"}  # started again: open again
@@ -141,6 +168,12 @@ def wait(project: str, cwd: str, client: str, port: int, interval: float = 30,
                 state = json.loads(r.read())
         except (OSError, ValueError):
             time.sleep(interval)  # gateway down or restarting: keep waiting, the operator starts it
+            continue
+        if inst and state.get("session_id") and state["session_id"] != sid:  # #Main, or main lost
+            if _read(path).get("pid") == os.getpid():
+                path.unlink(missing_ok=True)
+            sid, path = state["session_id"], WAITERS / f"{state['session_id']}.json"
+            path.write_text(json.dumps({"pid": os.getpid()}))
             continue
         if state.get("closing"):
             path.write_text(json.dumps({"closed": True}))  # the prompt hook must not restart it

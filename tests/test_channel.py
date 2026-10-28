@@ -1383,13 +1383,10 @@ async def test_a_pinned_main_and_auto_off_are_never_replaced_automatically(
     b, _, _ = hub.pull(PROJECT, None, "/w/b", 0, "claude_code", "cli")
     assert hub.main_for(PROJECT) is a and not hub.pinned(PROJECT)  # chosen automatically
     hub.set_main(b, pin=True)  # /main p# s#
-    hub.close(b)  # the pinned main goes: a does not take over, the operator is asked
-    assert hub.main_for(PROJECT) is None and hub.pinned(PROJECT)
-    _, target = hub.send(PROJECT, "work")
-    assert target is None and asked.count("send_main_offline") == 1
-    hub.unpin_main(PROJECT)  # /main p# auto
-    hub.svc.store.put("channel_main", _norm(PROJECT), {"project": PROJECT})  # (b's record gone)
-    assert hub.main_for(PROJECT) is a  # unpinned: chosen automatically again
+    c, _, _ = hub.pull(PROJECT, None, "/w/c", 0, "claude_code", "app")
+    assert hub.main_for(PROJECT) is b  # pinned: a new session does not take over
+    hub.close(b)  # pinned only while it is connected: then chosen automatically again
+    assert not hub.pinned(PROJECT) and hub.main_for(PROJECT) in (a, c)
 
     hub.set_auto_main(False)  # /main auto off: no project gets a main by itself
     hub.svc.store.put("channel_main", _norm(PROJECT), {"project": PROJECT})
@@ -1408,8 +1405,38 @@ async def test_a_session_makes_itself_the_pinned_main_with_set_main(settings, cf
     kw = {"project": PROJECT, "agent": "claude_code", "cwd": "/w/a", "client": "app"}
     async with Client(build_mcp_server(orch)) as c:
         a = (await c.call_tool("get_messages", kw)).structured_content["session_id"]
-        b = (await c.call_tool("get_messages", {**kw, "cwd": "/w/b"})).structured_content["session_id"]
+        b = (await c.call_tool("get_messages", {**kw, "cwd": "/w/b"})).structured_content[
+            "session_id"
+        ]
         assert orch.channel.main_for(PROJECT).session_id == a  # chosen automatically
         r = (await c.call_tool("set_main", {"session_id": b})).structured_content
     assert r["pinned"] and orch.channel.main_for(PROJECT).session_id == b
     assert orch.channel.pinned(PROJECT)
+
+
+async def test_hash_main_in_a_child_detaches_it_from_its_lane_and_makes_it_the_main(
+    settings, cfg_dir
+):
+    from mcp.client import Client
+
+    from app.mcp_server import build_mcp_server
+    from tests.test_config_gateway import make
+
+    orch, _ = make(settings, cfg_dir, [])
+    hub = orch.channel
+    lane_dir = "/w/game/.agw-children/ui-1a2b"
+    orch.store.put("channel_child", lane_dir, {"project": PROJECT, "lane": "ui", "path": lane_dir,
+                                               "repo": "/w/game", "branch": "agw/ui-1a2b"})  # fmt: skip
+    kw = {"project": PROJECT, "agent": "claude_code", "client": "app"}
+    async with Client(build_mcp_server(orch)) as c:
+        await c.call_tool("get_messages", {**kw, "cwd": "/w/game"})
+        kid = (await c.call_tool("get_messages", {**kw, "cwd": lane_dir})).structured_content[
+            "session_id"
+        ]
+        assert hub.child(hub.sessions[kid])
+        r = (await c.call_tool("set_main", {"session_id": kid})).structured_content
+    s = hub.sessions[kid]
+    assert r["detached_from_lane"] == "ui" and hub.child(s) is None
+    assert hub.main_for(PROJECT) is s and hub.pinned(PROJECT)
+    assert all(c["lane"] != "ui" for c in hub.children(PROJECT))
+    assert str(hub._repo(s)) == "/w/game"  # new lanes still come from the project repo

@@ -725,16 +725,26 @@ def build_mcp_server(svc) -> MCPServer:
 
     @tool
     async def set_main(session_id: str) -> dict[str, Any]:
-        """Only when the user asks for it in this session: make this session its project's 👑 main
-        (pinned, as /main p# s# on Telegram: never replaced automatically). A 🧭 child cannot."""
+        """Only when the user asks for it in this session (#Main): make this session its project's
+        👑 main (pinned, as /main p# s# on Telegram: never replaced automatically). A 🧭 child leaves
+        its lane first (detached: no longer a child; its folder and branch stay as they are)."""
         s = svc.channel.sessions.get(session_id)
         if s is None:
             raise GatewayToolError(f"unknown session {session_id}: call get_messages first")
-        if svc.channel.child(s):
-            raise GatewayToolError("a 🧭 child session cannot be the main")
+        if cur := svc.channel.outranked(s):
+            raise GatewayToolError(
+                f"{svc.channel._label(cur)} (desktop app) is the main: a desktop-app main is kept"
+            )
+        lane = (svc.channel.child(s) or {}).get("lane")
         svc.channel.set_main(s, pin=True)
-        svc.channel._ops(f"👑📌 {svc.channel._label(s)} made itself the main of {html.escape(s.project)}")
-        return {"main": session_id, "project": s.project, "pinned": True}
+        left = f" (left 🧭 lane {html.escape(lane)})" if lane else ""
+        svc.channel._ops(
+            f"👑📌 {svc.channel._label(s)} made itself the main of {html.escape(s.project)}{left}"
+        )
+        out = {"main": session_id, "project": s.project, "pinned": True}
+        if lane:
+            out["detached_from_lane"] = lane
+        return out
 
     @tool
     async def get_ask(ask_id: str) -> dict[str, Any]:
@@ -783,7 +793,7 @@ def waiter_hint(s) -> str | None:
         return None
     from app.waiter import command, missing
 
-    if not missing(s.project, s.cwd):
+    if not missing(s.project, s.cwd, s.session_id):
         return None
     return (
         "your gateway waiter is not running: start it again before you end this turn, with the Bash "
