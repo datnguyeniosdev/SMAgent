@@ -306,8 +306,15 @@ async def lifespan(app: FastAPI):
         log.warning("TELEGRAM_BOT_TOKEN not set: Telegram disabled, reports go to the log")
 
     async def ask_watchdog():  # agents waiting on agents: escalate when stuck; expire lost leases
+        purged_at = time.monotonic() - 23 * 3600  # first retention pass an hour after start
         while True:
             await asyncio.sleep(30)
+            if settings.data_retention_days and time.monotonic() - purged_at > 24 * 3600:
+                purged_at = time.monotonic()
+                try:
+                    orch.purge_old(settings.data_retention_days)
+                except Exception:
+                    log.exception("retention pass failed")
             try:
                 await orch.asks.check()
                 await orch.collab.remind_questions()  # unanswered operator questions: every 30 min

@@ -90,6 +90,41 @@ class Store:
             args += states
         return [json.loads(r[0]) for r in self._db.execute(q + " ORDER BY updated_at", args)]
 
+    def purge(
+        self, kind: str, before: str, states: list[str] | None = None, keep: set[str] = frozenset()
+    ) -> int:
+        """Delete `kind` records last updated before `before` (ISO time), only in `states` when
+        given (None = any state), except ids in `keep`. Returns how many went."""
+        q, args = "SELECT id FROM records WHERE kind=? AND updated_at<?", [kind, before]
+        if states is not None:
+            q += f" AND state IN ({','.join('?' * len(states))})"
+            args += states
+        ids = [r[0] for r in self._db.execute(q, args) if r[0] not in keep]
+        with self._lock, self._db:
+            self._db.executemany(
+                "DELETE FROM records WHERE kind=? AND id=?", [(kind, i) for i in ids]
+            )
+        return len(ids)
+
+    def items(self, kind: str) -> list[tuple[str, dict]]:
+        return [(r[0], json.loads(r[1])) for r in
+                self._db.execute("SELECT id, body FROM records WHERE kind=?", (kind,))]  # fmt: skip
+
+    def delete(self, kind: str, rid: str) -> None:
+        with self._lock, self._db:
+            self._db.execute("DELETE FROM records WHERE kind=? AND id=?", (kind, rid))
+
+    def purge_task(self, task_id: str) -> None:
+        """Every record and event of one task (its steps, runs, reports, feedback, approvals...)."""
+        with self._lock, self._db:
+            self._db.execute("DELETE FROM records WHERE task_id=? OR (kind='task' AND id=?)",
+                             (task_id, task_id))  # fmt: skip
+            self._db.execute("DELETE FROM events WHERE task_id=?", (task_id,))
+
+    def purge_events(self, before: str) -> int:
+        with self._lock, self._db:
+            return self._db.execute("DELETE FROM events WHERE ts<?", (before,)).rowcount
+
     def event(
         self,
         type_: str,

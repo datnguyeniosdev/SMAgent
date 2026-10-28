@@ -1330,3 +1330,25 @@ def test_an_envelope_without_a_project_does_not_crash():
     assert hashtag(None) == "#gateway" and hashtag("Glazed Gems (GMA)") == "#Glazed_Gems_GMA"
     html = envelope("answer", "ok", project=None, title="Answer (ask_1)", ref="ask_1")
     assert "#gateway" in html and "dự án" not in html and "ask_1" in html
+
+
+async def test_a_command_reply_over_telegrams_limit_goes_out_in_parts():
+    """Seen in prod: /live with many sessions was over 4096 characters and Telegram refused it."""
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from app.formatting import MESSAGE_LIMIT
+    from app.telegram_bot import say
+
+    sent = []
+
+    async def answer(text, **kw):
+        sent.append((text, kw))
+
+    text = "\n".join(f"s{i} 🔄 Glazed Gems (GMA) · claude_code · ready" for i in range(300))
+    await say(SimpleNamespace(answer=answer), text, reply_markup="kb")
+    assert len(sent) > 1 and all(len(t) <= MESSAGE_LIMIT for t, _ in sent)
+    assert "".join(t for t, _ in sent) == text  # nothing cut
+    assert [kw for _, kw in sent] == [{"reply_markup": "kb"}] + [{}] * (len(sent) - 1)
+    src = Path("app/telegram_bot.py").read_text()
+    assert src.count("m.answer(") == 2  # only inside say(): every command reply goes through it

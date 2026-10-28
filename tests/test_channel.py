@@ -914,7 +914,7 @@ async def test_child_records_its_base_and_target_and_how_it_was_made(
     assert r2["to"] == "reopened" and r2["path"] == r["path"]
     kid = next(c for c in hub.children(PROJECT) if c["lane"] == "ui")
     assert kid["base"] == head and kid["target"] == branch
-    assert f"from {branch}@{head[:7]}" in gateway(orch)._list_text()
+    assert f"from {branch}@{head[:7]}" in gateway(orch)._list_text(full=True)  # a closed lane
 
 
 async def test_forced_fallback_records_a_worktree_child(settings, cfg_dir, tmp_path, monkeypatch):

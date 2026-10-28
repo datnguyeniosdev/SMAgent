@@ -1867,6 +1867,49 @@ class Orchestrator:
         self.store.event("artifacts.cleanup", deleted=len(deleted), kept=kept, retention_days=days)
         return {"deleted": deleted, "kept": kept, "retention_days": days}
 
+    # Finished records deleted by the daily retention job; open work (other states) is never touched.
+    RETENTION = {
+        "channel_msg": ["done", "cancelled", "expired"],
+        "agent_ask": ["answered", "cancelled"],
+        "human_input": ["answered", "expired", "cancelled"],
+        "approval": ["approved", "rejected", "cancelled", "expired"],
+        "tg_msg": None,  # Telegram message -> report links: a reply to a month-old message is not linked
+        "telegram_update": None,  # webhook dedupe keys
+        "ask_tg": None,
+        "channel_session": None,  # sessions gone for good (live ones are kept)
+    }
+
+    def purge_old(self, days: int) -> dict:
+        """Delete finished work older than `days`: tasks with everything they own (artifacts first,
+        then steps, runs, reports, feedback, events), finished messages/asks/questions, old
+        Telegram links and events. Tasks still running, or whose parent is, are kept."""
+        from datetime import timedelta
+
+        cutoff = now() - timedelta(days=days)
+        arts = self.cleanup_artifacts(days)  # before the tasks: it keeps artifacts of unknown tasks
+        active = {t.task_id for t in self.tasks.values() if not t.done}
+        old = [
+            t
+            for t in self.tasks.values()
+            if t.done and t.updated_at < cutoff and t.task_id not in active
+            and t.parent_id not in active
+            and not any(c.parent_id == t.task_id and c.task_id in active for c in self.tasks.values())
+        ]  # fmt: skip
+        for t in old:
+            self.store.purge_task(t.task_id)
+            self.tasks.pop(t.task_id, None)
+        live = set(self.channel.sessions) if self.channel else set()
+        counts = {
+            kind: self.store.purge(kind, cutoff.isoformat(), states,
+                                   keep=live if kind == "channel_session" else frozenset())
+            for kind, states in self.RETENTION.items()
+        }  # fmt: skip
+        counts |= {"task": len(old), "artifact": len(arts["deleted"]),
+                   "event": self.store.purge_events(cutoff.isoformat())}  # fmt: skip
+        self.store.event("retention.purge", days=days, **counts)
+        log.info("retention: deleted %s (older than %d days)", counts, days)
+        return counts
+
     def _approvals_pending(self, task_id: str) -> bool:
         return bool(self._task_approvals(task_id))
 

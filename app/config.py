@@ -78,6 +78,9 @@ class Settings(BaseSettings):
         "provider:image",
     ]  # fmt: skip  # "mcp:execute" is NOT granted by default
     plugin_config: dict[str, dict] = {}  # per-plugin options, keyed by plugin id
+    data_retention_days: int = (
+        30  # finished tasks/messages/logs older than this are deleted daily; 0 = keep
+    )
     mcp_servers: list[dict] = []  # see app.mcp_client.McpServerConfig
 
     # Limits

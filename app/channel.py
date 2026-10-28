@@ -341,6 +341,22 @@ class ChannelHub:
             for x in twins:
                 self._release(x)  # its queued work moves to another enabled session, or waits
 
+    def forget_project(self, name: str) -> str | None:
+        """Drop a project name nothing uses any more (an old name after a rename, a test project):
+        its p-number, main and model records and its old session records. None when done, else why not.
+        Its child folders stay on disk (/children prune). A session opening for it brings it back."""
+        if any(_norm(s.project) == _norm(name) for s in self.sessions.values()):
+            return "it still has an open session (/close it first)"
+        if any(_norm(m.get("project") or "") == _norm(name) for m in self.open_messages()):
+            return "it still has open requests (/queue, /cancel them first)"
+        store = self.svc.store
+        for kind in ("channel_pnum", "channel_main", "channel_model"):
+            store.delete(kind, _norm(name))
+        for sid, r in store.items("channel_session"):
+            if _norm(r.get("project") or "") == _norm(name):
+                store.delete("channel_session", sid)
+        return None
+
     def known_projects(self) -> set[str]:
         return {r["project"] for r in self.svc.store.list("channel_session")} | {
             s.project for s in self.sessions.values()

@@ -67,6 +67,7 @@ HELP = (
   /open alone: buttons)
 /close &lt;s#&gt; · /off &lt;s#&gt; · /on &lt;s#&gt; — close a session, or stop/resume giving it work
 /children prune &lt;lane&gt; — delete a closed 🧭 child's folder (its branch stays), confirmed
+/list all — also idle projects' details and closed lanes · /forget &lt;p#&gt; — drop an old project name
 /main &lt;s#&gt; — make it its project's 👑 main session: it routes project requests to 🧭 child sessions
 /model [p# child|router opus|sonnet|haiku|default] — the Claude model of a project's child sessions and temporary router
 /agents — every agent: 🖥 app (desktop/IDE), ⌨️ CLI, ☁️ API, with on/off and close buttons
@@ -211,6 +212,16 @@ WORKFLOW_LABELS = {
     Workflow.parallel: "⚖️ Parallel",
     Workflow.design_implement_review: "🎨 Design→Code→Review",
 }
+
+
+async def say(m, text: str, **kw):
+    """m.answer that never fails on Telegram's length limit: long text goes out as several messages
+    split at line breaks; buttons stay on the first part."""
+    first, *more = fmt.chunks(text) if len(text) > fmt.MESSAGE_LIMIT else [text]
+    msg = await m.answer(first, **kw)
+    for part in more:
+        await m.answer(part, **{k: v for k, v in kw.items() if k != "reply_markup"})
+    return msg
 
 
 def _image_doc(d) -> bool:
@@ -553,6 +564,7 @@ class TelegramGateway:
         r.message(Command("main"))(self.on_main)
         r.message(Command("model"))(self.on_model)
         r.message(Command("cancel"))(self.on_cancel)
+        r.message(Command("forget"))(self.on_forget)
         r.message(Command("tools"))(self.on_tools)
         r.message(Command("tool"))(self.on_tool)
         r.message(Command("plugins"))(self.on_plugins)
@@ -578,7 +590,7 @@ class TelegramGateway:
 
     async def on_help(self, m: TgMessage):
         if self._authorized_msg(m):
-            await m.answer(HELP)
+            await say(m, HELP)
 
     async def on_menu(self, m: TgMessage):
         if not self._authorized_msg(m):
@@ -593,7 +605,7 @@ class TelegramGateway:
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=t, callback_data=d) for t, d in row] for row in MENU_BUTTONS
         ])  # fmt: skip
-        await m.answer(text, reply_markup=kb)
+        await say(m, text, reply_markup=kb)
 
     async def on_menu_button(self, q: CallbackQuery):
         chat_id = q.message.chat.id if q.message else None
@@ -761,7 +773,7 @@ class TelegramGateway:
             note = "Removed:\n" + "\n".join(f"• {escape(x)}" for x in steps)
         await self._setup_panel(q.message.answer, note)
 
-    def _list_text(self) -> str:
+    def _list_text(self, full: bool = False) -> str:
         hub = self.orch.channel
         live = hub.live()
         lines = ["🖥 <b>SESSIONS</b>"]
@@ -769,20 +781,37 @@ class TelegramGateway:
             "none open · terminal: <code>agw session</code> (⚡ push) · any session: /loop + get_messages (🔄 pull)"
         ]
         lines += ["", "📁 <b>PROJECTS</b>"]
+        waiting = {}
+        for x in hub.open_messages():
+            waiting[x.get("project")] = waiting.get(x.get("project"), 0) + 1
+        idle, closed = [], 0
+        icon = {"working": "▶️", "idle": "💤", "closed": "⚪"}
         for num, name in hub.projects():
             mine = [x for x in live if x.project == name]
+            lanes = [c for c in hub.children(name) if c["status"] != "deleted"]
+            open_lanes = [c for c in lanes if c["status"] != "closed"]
+            closed += len(lanes) - len(open_lanes)
+            if full:
+                open_lanes = lanes
+            elif not (mine or waiting.get(name) or open_lanes):  # nothing to see: one line for all
+                idle.append(f"p{num} {escape(name)}")
+                continue
             ready = sum(x.deliverable for x in mine)
-            state = (
-                f"{len(mine)} open, {ready} can take work"
-                if mine
-                else "no open session (work waits)"
-            )
+            state = (f"{len(mine)} open, {ready} can take work" if mine
+                     else "no open session (work waits)")  # fmt: skip
+            if waiting.get(name):
+                state += f" · {waiting[name]} request(s) open"
             lines.append(f"<b>p{num}</b> · {escape(name)} · {state}")
-            icon = {"working": "▶️", "idle": "💤", "closed": "⚪"}
             lines += [f"   🧭 {escape(c['lane'])} · {icon[c['status']]} {c['status']} {c['sessions']} · "
                       f"{escape(c['task'])} · {escape(c.get('model') or '')} · <code>{escape(c['branch'])}</code>"
                       + (f" from {escape(c.get('target') or '?')}@{c['base'][:7]}" if c.get("base") else "")
-                      for c in hub.children(name) if c["status"] != "deleted"]  # fmt: skip
+                      for c in open_lanes]  # fmt: skip
+        if idle:
+            lines.append(f"💤 no session, no work: {' · '.join(idle)}")
+        if closed and not full:
+            lines.append(f"⚪ {closed} closed lane(s) hidden: <code>/list all</code> shows them")
+        if idle:
+            lines.append("<code>/forget p#</code> drops an old project name")
         if not hub.projects():
             lines.append("none yet (a project appears once a session opens for it)")
         lines += [
@@ -792,9 +821,10 @@ class TelegramGateway:
         ]
         return "\n".join(lines)
 
-    async def on_live(self, m: TgMessage):
+    async def on_live(self, m: TgMessage, command: CommandObject | None = None):
         if self._authorized_msg(m):
-            await m.answer(self._list_text())
+            full = bool(command and (command.args or "").strip().lower() == "all")
+            await say(m, self._list_text(full))
 
     def _queue_text(self) -> str:
         hub = self.orch.channel
@@ -815,7 +845,7 @@ class TelegramGateway:
 
     async def on_queue(self, m: TgMessage):
         if self._authorized_msg(m):
-            await m.answer(self._queue_text())
+            await say(m, self._queue_text())
 
     async def on_cancel(self, m: TgMessage, command: CommandObject):
         if not self._authorized_msg(m):
@@ -823,12 +853,25 @@ class TelegramGateway:
         ref = (command.args or "").strip()
         msg = self.orch.channel.cancel(ref) if ref else None
         if msg is None:
-            await m.answer("Usage: /cancel &lt;m#&gt; (open requests: /queue)")
+            await say(m, "Usage: /cancel &lt;m#&gt; (open requests: /queue)")
             return
         was = msg.get("cancelled_from")
         note = ("it was already being worked on: the session was told to stop (a late answer is "
                 "marked cancelled)") if was == "delivered" else "it will not be delivered"  # fmt: skip
-        await m.answer(f"🗑 <b>m{msg.get('num')}</b> cancelled · {escape(note)}")
+        await say(m, f"🗑 <b>m{msg.get('num')}</b> cancelled · {escape(note)}")
+
+    async def on_forget(self, m: TgMessage, command: CommandObject):
+        """/forget p#: drop an old project name (renamed, test) from /list. Nothing on disk changes."""
+        if not self._authorized_msg(m):
+            return
+        ref = (command.args or "").strip()
+        name = self.orch.channel.resolve_project(ref) if ref else None
+        if name is None:
+            await say(m, "Usage: /forget &lt;p#&gt; (projects: /list)")
+            return
+        why = self.orch.channel.forget_project(name)
+        await say(m, f"🧹 <b>{escape(name)}</b> forgotten" if why is None
+                  else f"Not forgotten: {escape(why)}")  # fmt: skip
 
     async def on_open(self, m: TgMessage, command: CommandObject):
         """/open <folder|p#> [new]: start a Claude Code session for a project folder on this Mac.
@@ -973,7 +1016,7 @@ class TelegramGateway:
         if text.startswith("/"):
             if text.split()[0].lower() == "/cancel":
                 self._pass_wait.pop(user, None)
-                await m.answer(f"Đã thôi: <code>{request_id}</code> vẫn chờ duyệt.")
+                await say(m, f"Đã thôi: <code>{request_id}</code> vẫn chờ duyệt.")
                 return
             raise SkipHandler()
         try:
@@ -983,7 +1026,7 @@ class TelegramGateway:
             gone = "\n⚠️ Em không xoá được tin passcode: anh tự xoá giúp em ạ."
         if time.monotonic() > deadline:
             self._pass_wait.pop(user, None)
-            await m.answer(f"Quá 5 phút cho <code>{request_id}</code>: bấm ✅ lại ạ." + gone)
+            await say(m, f"Quá 5 phút cho <code>{request_id}</code>: bấm ✅ lại ạ." + gone)
             return
         from app.collaboration import CollaborationError
 
@@ -991,7 +1034,7 @@ class TelegramGateway:
             result = self.orch.collab.check_passcode(request_id, text, str(user))
         except CollaborationError as e:
             self._pass_wait.pop(user, None)
-            await m.answer(f"❌ {escape(str(e))}" + gone)
+            await say(m, f"❌ {escape(str(e))}" + gone)
             return
         if not result.startswith("wrong"):
             self._pass_wait.pop(user, None)
@@ -1000,7 +1043,7 @@ class TelegramGateway:
             "cancelled": f"🚫 Sai passcode 3 lần: <code>{request_id}</code> đã bị huỷ, không chuyển cho agent.",
             "no_passcode": "Chưa cài passcode (TELEGRAM_CONFIRM_PASSCODE): anh xác nhận trực tiếp trên máy ạ.",
         }.get(result) or f"❌ Sai passcode, còn {result.split()[-2]} lần thử: gửi lại ạ."  # fmt: skip
-        await m.answer(note + gone)
+        await say(m, note + gone)
         if result in ("approved", "cancelled"):
             await self.send_control(note)
 
@@ -1057,7 +1100,7 @@ class TelegramGateway:
             return
         rows = self.orch.reviews.recent()
         if not rows:
-            await m.answer("No reviews yet. Agents start them with review_project.")
+            await say(m, "No reviews yet. Agents start them with review_project.")
             return
         icon = {"running": "⏳", "done": "✅", "failed": "❌"}
         text = "<b>Reviews</b>\n" + "\n".join(
@@ -1066,7 +1109,7 @@ class TelegramGateway:
         )  # fmt: skip
         kb = [[InlineKeyboardButton(text=f"🛑 Stop {r['review_id']}", callback_data=f"rv:stop:{r['review_id']}")]
               for r in rows if r["state"] == "running"]  # fmt: skip
-        await m.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb) if kb else None)
+        await say(m, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb) if kb else None)
 
     async def on_review_button(self, q: CallbackQuery):
         chat_id = q.message.chat.id if q.message else None
@@ -1081,7 +1124,7 @@ class TelegramGateway:
 
     async def on_asks(self, m: TgMessage):
         if self._authorized_msg(m):
-            await m.answer(self._asks_text())
+            await say(m, self._asks_text())
 
     async def on_ask_button(self, q: CallbackQuery):
         chat_id = q.message.chat.id if q.message else None
@@ -1257,10 +1300,10 @@ class TelegramGateway:
         ref = (command.args or "").strip()
         s = self.orch.channel.find(ref) if ref else None
         if s is None:
-            await m.answer("Usage: /close &lt;s#&gt; (ids from /list)")
+            await say(m, "Usage: /close &lt;s#&gt; (ids from /list)")
             return
         what = await asyncio.to_thread(self.orch.channel.close, s)
-        await m.answer(f"🔌 <b>s{s.num}</b> closed ({escape(s.project)}) · {escape(what)}")
+        await say(m, f"🔌 <b>s{s.num}</b> closed ({escape(s.project)}) · {escape(what)}")
 
     async def on_children(self, m: TgMessage, command: CommandObject):
         """/children prune <lane|folder>: delete a child's folder after a confirm button."""
@@ -1269,8 +1312,8 @@ class TelegramGateway:
         verb, _, ref = (command.args or "").strip().partition(" ")
         c = self.orch.channel.find_child(ref.strip()) if verb == "prune" else None
         if c is None:
-            await m.answer(
-                "Usage: /children prune &lt;lane or folder&gt; (one not deleted; lanes in /list)"
+            await say(
+                m, "Usage: /children prune &lt;lane or folder&gt; (one not deleted; lanes in /list)"
             )
             return
         name = Path(c["path"]).name
@@ -1278,7 +1321,7 @@ class TelegramGateway:
             InlineKeyboardButton(text=f"Yes, delete {name}"[:60], callback_data=f"cp:yes:{name}"),
             InlineKeyboardButton(text="Keep it", callback_data=f"cp:no:{name}"),
         ]])  # fmt: skip
-        await m.answer(f"Delete the folder <code>{escape(c['path'])}</code> ({escape(c['status'])})? Branch "
+        await say(m, f"Delete the folder <code>{escape(c['path'])}</code> ({escape(c['status'])})? Branch "
                        f"<code>{escape(c['branch'])}</code> stays in the project repo.", reply_markup=kb)  # fmt: skip
 
     async def on_prune_button(self, q: CallbackQuery):
@@ -1316,21 +1359,21 @@ class TelegramGateway:
         if len(args) == 3:
             project = hub.resolve_project(args[0])
             if project is None:
-                await m.answer(f"Unknown project {escape(args[0])} (ids from /list).")
+                await say(m, f"Unknown project {escape(args[0])} (ids from /list).")
                 return
             try:
                 got = hub.set_model(project, args[1].lower(), args[2].lower())
             except ValueError as e:
-                await m.answer(f"⚠️ {escape(str(e))}")
+                await say(m, f"⚠️ {escape(str(e))}")
                 return
-            await m.answer(f"🧠 <b>{escape(project)}</b>: child <code>{got['child']}</code> · router "
+            await say(m, f"🧠 <b>{escape(project)}</b>: child <code>{got['child']}</code> · router "
                            f"<code>{got['router']}</code> (new sessions from now on)")  # fmt: skip
             return
         lines = ["🧠 <b>MODELS</b> (child sessions · temporary router)"]
         lines += [f"<b>p{num}</b> {escape(name)} · {hub.models(name)['child']} · {hub.models(name)['router']}"
                   for num, name in hub.projects()]  # fmt: skip
         lines.append("\n<code>/model p1 child opus</code> · <code>/model p1 router default</code>")
-        await m.answer("\n".join(lines))
+        await say(m, "\n".join(lines))
 
     async def on_main(self, m: TgMessage, command: CommandObject):
         """/main <s#>: that session becomes its project's main (it routes the project's requests)."""
@@ -1339,12 +1382,13 @@ class TelegramGateway:
         ref = (command.args or "").strip()
         s = self.orch.channel.find(ref) if ref else None
         if s is None or self.orch.channel.child(s):
-            await m.answer(
-                "Usage: /main &lt;s#&gt; (an open session that is not a 🧭 child; ids from /list)"
+            await say(
+                m,
+                "Usage: /main &lt;s#&gt; (an open session that is not a 🧭 child; ids from /list)",
             )
             return
         self.orch.channel.set_main(s)
-        await m.answer(f"👑 {session_line(s, self.orch.channel)}")
+        await say(m, f"👑 {session_line(s, self.orch.channel)}")
 
     async def send_main_offline(self, project: str) -> None:
         """The project's main session is gone and project work waits: wait, open a new main, or make
@@ -1412,10 +1456,10 @@ class TelegramGateway:
         ref = (command.args or "").strip()
         s = self.orch.channel.find(ref) if ref else None
         if s is None:
-            await m.answer(f"Usage: /{'on' if on else 'off'} &lt;s#&gt; (ids from /list)")
+            await say(m, f"Usage: /{'on' if on else 'off'} &lt;s#&gt; (ids from /list)")
             return
         self.orch.channel.set_enabled(s, on)
-        await m.answer(session_line(s))
+        await say(m, session_line(s))
 
     async def on_send(self, m: TgMessage, command: CommandObject):
         """Push a request into the open Claude Code session of a project (queued if none is open)."""
@@ -1424,9 +1468,10 @@ class TelegramGateway:
         hub = getattr(self.orch, "channel", None)
         ref, _, text = (command.args or "").strip().partition(" ")
         if hub is None or not ref or not text.strip():
-            await m.answer(
+            await say(
+                m,
                 "Usage: /send &lt;s#|p#|project&gt; &lt;text&gt; (e.g. <code>/send s1 fix the pause menu</code>; "
-                "ids from /list)"
+                "ids from /list)",
             )
             return
         session = hub.find(ref) if re.fullmatch(r"[sS]\d+", ref) else None
@@ -1436,7 +1481,7 @@ class TelegramGateway:
             if found := hub.session_record(int(num.group(1))):
                 offline, project = found[0], found[1]["project"]
         if project is None:
-            await m.answer(f"Unknown session or project {escape(ref)}.\n\n" + self._list_text())
+            await say(m, f"Unknown session or project {escape(ref)}.\n\n" + self._list_text())
             return
         sender = m.from_user.full_name if m.from_user else ""
         msg, target = hub.send(
@@ -1449,12 +1494,12 @@ class TelegramGateway:
         else:
             reason = hub.undeliverable_reason(project) or "no open session"
             status = f"m{msg['num']} queued: {escape(reason)}; delivered when a session can take it"
-        await m.answer(fmt.envelope("feedback", status, project=project, ref=msg["message_id"]))
+        await say(m, fmt.envelope("feedback", status, project=project, ref=msg["message_id"]))
 
     async def on_templates(self, m: TgMessage):
         if self._authorized_msg(m):
             src = m.reply_to_message
-            await m.answer(templates((src.text or src.caption or "") if src else ""))
+            await say(m, templates((src.text or src.caption or "") if src else ""))
 
     async def on_agents(self, m: TgMessage):
         if self._authorized_msg(m):
@@ -1686,9 +1731,9 @@ class TelegramGateway:
             return
         pid, _, text = (command.args or "").strip().partition(" ")
         if pid not in (self.orch.gateway_cfg.providers if self.orch.gateway_cfg else {}):
-            await m.answer("Usage: /findmodel &lt;provider&gt; [text] (providers: /providers)")
+            await say(m, "Usage: /findmodel &lt;provider&gt; [text] (providers: /providers)")
             return
-        await m.answer(await self._find_models(pid, text.strip()))
+        await say(m, await self._find_models(pid, text.strip()))
 
     async def on_addmodel(self, m: TgMessage, command: CommandObject):
         from app import catalog
@@ -1699,8 +1744,9 @@ class TelegramGateway:
         model = model.strip()
         cfg = self.orch.gateway_cfg
         if not cfg or pid not in cfg.providers or not re.fullmatch(r"[\w.:/@+\-]{1,200}", model):
-            await m.answer(
-                "Usage: /addmodel &lt;provider&gt; &lt;model-id&gt; (find ids: /findmodel provider)"
+            await say(
+                m,
+                "Usage: /addmodel &lt;provider&gt; &lt;model-id&gt; (find ids: /findmodel provider)",
             )
             return
         d = cfg.providers[pid]
@@ -1751,14 +1797,15 @@ class TelegramGateway:
         if not ref:
             kb = [[InlineKeyboardButton(text=f"p{n} {name[:40]}", callback_data=f"pl:{n}")]
                   for n, name in self.orch.channel.projects()]  # fmt: skip
-            await m.answer(
+            await say(
+                m,
                 "🗺 Pick a project (or /plan p#):",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
             )
             return
         project = self.orch.channel.resolve_project(ref)
         if project is None:
-            await m.answer("Unknown project: /plan p# (numbers in /list)")
+            await say(m, "Unknown project: /plan p# (numbers in /list)")
             return
         await self._plan_panel(m.answer, project)
 
@@ -2204,7 +2251,7 @@ class TelegramGateway:
         if text.startswith("/"):
             if text.split()[0].lower() in ("/cancel", "/cancelkey"):
                 self._key_wait.pop(user, None)
-                await m.answer(f"Stopped: {name} unchanged.")
+                await say(m, f"Stopped: {name} unchanged.")
                 return
             raise SkipHandler()
         self._key_wait.pop(user, None)
@@ -2214,22 +2261,22 @@ class TelegramGateway:
         except TelegramBadRequest:
             gone = "\n⚠️ I could not delete your message: delete it yourself."
         if time.monotonic() > deadline:
-            await m.answer(f"Too late for {name} (5 minutes): press ✏️ in /keys again." + gone)
+            await say(m, f"Too late for {name} (5 minutes): press ✏️ in /keys again." + gone)
             return
         try:
             value = keys.check(text)
         except ValueError as e:
-            await m.answer(f"❌ {name} not saved: {escape(str(e))}." + gone)
+            await say(m, f"❌ {name} not saved: {escape(str(e))}." + gone)
             return
         try:
             keys.save(self.orch.store, name, value)
         except ValueError as e:  # AGW_SECRET_KEY missing or invalid
-            await m.answer(f"❌ {name} not saved: {escape(str(e))}." + gone)
+            await say(m, f"❌ {name} not saved: {escape(str(e))}." + gone)
             return
         await self._reload_providers()
         log.info("%s set by user=%s", name, user)
         secret = dict(keys.names(self.orch.gateway_cfg)).get(name, True)
-        await m.answer(f"✅ <b>{name}</b> saved: {escape(keys.mask(value, secret))}. "
+        await say(m, f"✅ <b>{name}</b> saved: {escape(keys.mask(value, secret))}. "
                        f"{await self._provider_state(name)}" + gone)  # fmt: skip
 
     async def _reload_providers(self) -> None:
@@ -2267,7 +2314,7 @@ class TelegramGateway:
             f" — prefers {', '.join(p.preference)}"
             for p in self.orch.profiles()
         ]
-        await m.answer("\n".join(lines))
+        await say(m, "\n".join(lines))
 
     async def on_agents_status(self, m: TgMessage):
         if not self._authorized_msg(m):
@@ -2278,32 +2325,33 @@ class TelegramGateway:
             lines.append(f"{icon} <b>{c['name']}</b> [{c['verification']}]")
         busy = list(self.orch._active_calls)
         lines.append(f"Running calls: {len(busy)}")
-        await m.answer("\n".join(lines))
+        await say(m, "\n".join(lines))
 
     async def on_sessions(self, m: TgMessage):
         if not self._authorized_msg(m):
             return
         sess = sorted(self.orch.sessions.values(), key=lambda s: s.created_at)[-10:]
         if not sess:
-            await m.answer("No sessions yet.")
+            await say(m, "No sessions yet.")
             return
-        await m.answer(
+        await say(
+            m,
             "\n".join(
                 f"<code>{s.session_id}</code> {s.role} via {s.connector} (task {s.task_id})"
                 for s in sess
-            )
+            ),
         )
 
     async def on_status(self, m: TgMessage):
         if not self._authorized_msg(m):
             return
         roots = [t for t in self.orch.tasks.values() if not t.parent_id][-10:]
-        await m.answer("\n".join(fmt.task_line(t) for t in roots) or "No tasks yet.")
+        await say(m, "\n".join(fmt.task_line(t) for t in roots) or "No tasks yet.")
 
     async def _arg(self, m: TgMessage, command: CommandObject, usage: str) -> str | None:
         arg = (command.args or "").strip()
         if not arg or " " in arg:
-            await m.answer(f"Usage: {escape(usage)}")
+            await say(m, f"Usage: {escape(usage)}")
             return None
         return arg
 
@@ -2314,7 +2362,7 @@ class TelegramGateway:
             return
         task = self.orch.tasks.get(arg)
         if not task:
-            await m.answer("Unknown task id.")
+            await say(m, "Unknown task id.")
             return
         html, files = self.orch._report_message(task)
         await self._send(m.answer, text=html)
@@ -2327,9 +2375,9 @@ class TelegramGateway:
         try:
             stopped = await self.orch.stop(arg)
         except KeyError:
-            await m.answer("Unknown task or session id.")
+            await say(m, "Unknown task or session id.")
             return
-        await m.answer("Stopped." if stopped else "Task already finished.")
+        await say(m, "Stopped." if stopped else "Task already finished.")
 
     async def on_retry(self, m: TgMessage, command: CommandObject):
         if not self._authorized_msg(m) or not (
@@ -2339,12 +2387,12 @@ class TelegramGateway:
         try:
             new = await self.orch.retry(arg)
         except KeyError:
-            await m.answer("Unknown task id.")
+            await say(m, "Unknown task id.")
             return
         except (ValueError, ConnectorError) as e:
-            await m.answer(escape(str(e)))
+            await say(m, escape(str(e)))
             return
-        await m.answer(f"Retrying as <code>{new.task_id}</code>")
+        await say(m, f"Retrying as <code>{new.task_id}</code>")
 
     async def on_steps(self, m: TgMessage, command: CommandObject):
         if not self._authorized_msg(m) or not (
@@ -2353,7 +2401,7 @@ class TelegramGateway:
             return
         task = self.orch.tasks.get(arg)
         if task is None or not task.run_id:
-            await m.answer("Unknown task or no workflow yet.")
+            await say(m, "Unknown task or no workflow yet.")
             return
         lines = []
         for r in self.orch.load_steps(task.run_id).values():
@@ -2370,16 +2418,16 @@ class TelegramGateway:
             return
         task_id, _, text = (command.args or "").strip().partition(" ")
         if not task_id or not text.strip():
-            await m.answer("Usage: /answer &lt;task_id|request_id&gt; &lt;text&gt;")
+            await say(m, "Usage: /answer &lt;task_id|request_id&gt; &lt;text&gt;")
             return
         try:
             if task_id.startswith("hin_"):  # answer a human-input request (e.g. from an MCP caller)
                 hi = self.orch.collab.answer_human_input(task_id, text, str(m.from_user.id))
-                await m.answer(f"Answer recorded for <code>{hi.request_id}</code>")
+                await say(m, f"Answer recorded for <code>{hi.request_id}</code>")
             else:
-                await m.answer(await self.orch.answer(task_id, text, str(m.from_user.id)))
+                await say(m, await self.orch.answer(task_id, text, str(m.from_user.id)))
         except (ActionError, CollaborationError) as e:
-            await m.answer(escape(str(e)))
+            await say(m, escape(str(e)))
 
     # ---------- report feedback loop ----------
 
@@ -2558,13 +2606,14 @@ class TelegramGateway:
         if not self._authorized_msg(m):
             return
         pend = self.orch.pending_approvals()
-        await m.answer(
+        await say(
+            m,
             "\n".join(
                 f"<code>{a['approval_id']}</code> task {a['task_id']} step {a.get('step_id')}: "
                 f"{escape(fmt.truncate(a['text'], 120))}"
                 for a in pend
             )
-            or "No pending approvals."
+            or "No pending approvals.",
         )
 
     async def on_tools(self, m: TgMessage):
@@ -2582,7 +2631,7 @@ class TelegramGateway:
             return
         name, _, raw = (command.args or "").strip().partition(" ")
         if not name:
-            await m.answer("Usage: /tool &lt;name&gt; &lt;json args&gt;")
+            await say(m, "Usage: /tool &lt;name&gt; &lt;json args&gt;")
             return
         try:
             args = json.loads(raw) if raw.strip() else {}
@@ -2597,9 +2646,9 @@ class TelegramGateway:
             )
             task = await self.orch.submit_request(req)
         except (ValueError, json.JSONDecodeError) as e:
-            await m.answer(f"❌ {escape(str(e))}")
+            await say(m, f"❌ {escape(str(e))}")
             return
-        await m.answer(f"Tool task <code>{task.task_id}</code> created")
+        await say(m, f"Tool task <code>{task.task_id}</code> created")
 
     async def on_plugins(self, m: TgMessage):
         if not self._authorized_msg(m):
@@ -2613,7 +2662,7 @@ class TelegramGateway:
                 )
             else:
                 lines.append(f"🔴 {escape(lp.module)}: {escape(lp.error or '')}")
-        await m.answer("\n".join(lines) or "No plugins.")
+        await say(m, "\n".join(lines) or "No plugins.")
 
     async def on_capabilities(self, m: TgMessage):
         if not self._authorized_msg(m):
@@ -2632,7 +2681,7 @@ class TelegramGateway:
 
     async def on_stray_media(self, m: TgMessage):
         if self._authorized_msg(m):
-            await m.answer("Attachment not used: send media with a <code>/task …</code> caption.")
+            await say(m, "Attachment not used: send media with a <code>/task …</code> caption.")
 
     async def on_album_part(self, m: TgMessage):
         in_discussion = m.chat.id == self.discussion_chat_id and m.from_user is not None
@@ -2710,12 +2759,12 @@ class TelegramGateway:
     async def _create_draft(self, m: TgMessage, text: str, parts: list[TgMessage]):
         text = text.strip()
         if not text:
-            await m.answer("Usage: /task &lt;description&gt; (attachments optional)")
+            await say(m, "Usage: /task &lt;description&gt; (attachments optional)")
             return
         try:
             att_ids = [a for p in parts for a in await self._download(p)]
         except (AttachmentError, TimeoutError) as e:
-            await m.answer(f"❌ Attachment rejected: {escape(str(e) or 'download timed out')}")
+            await say(m, f"❌ Attachment rejected: {escape(str(e) or 'download timed out')}")
             return
         group = f"draft_{m.message_id}"
         base = {"text": text, "attachments": att_ids}
@@ -2741,7 +2790,8 @@ class TelegramGateway:
             )
             for wf, label in WORKFLOW_LABELS.items()
         ]
-        await m.answer(
+        await say(
+            m,
             f"Choose how to handle:\n<i>{escape(fmt.truncate(text, 300))}</i>"
             + (f"\n📎 {len(att_ids)} attachment(s)" if att_ids else ""),
             reply_markup=keyboard(acts),
