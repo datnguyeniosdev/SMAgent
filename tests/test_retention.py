@@ -83,3 +83,19 @@ def test_forget_refuses_a_project_with_open_requests(settings, cfg_dir):
     hub.disconnect(s)
     hub.send("Old Name", "still waiting")
     assert "open requests" in hub.forget_project("Old Name")
+
+
+def test_old_backups_go_after_three_days_by_the_time_in_their_name(settings, cfg_dir):
+    from datetime import datetime
+
+    orch, _ = make(settings, cfg_dir, [])
+    d = orch.s.data_dir
+    old = (datetime.now() - timedelta(days=4)).strftime("%Y%m%d-%H%M%S")
+    new = datetime.now().strftime("%Y%m%d-%H%M%S")
+    (d / f"state.db.bak-{old}").write_text("x")
+    (d / f"artifacts.bak-{old}").mkdir()
+    (d / f"artifacts.bak-{old}/a.png").write_text("x")
+    (d / f"state.db.bak-{new}").write_text("x")
+    (d / "notes.bak-later").write_text("x")  # not a timestamp: not ours
+    assert orch.purge_backups() == 2
+    assert sorted(p.name for p in d.glob("*.bak-*")) == ["notes.bak-later", f"state.db.bak-{new}"]

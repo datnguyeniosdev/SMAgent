@@ -1905,10 +1905,28 @@ class Orchestrator:
             for kind, states in self.RETENTION.items()
         }  # fmt: skip
         counts |= {"task": len(old), "artifact": len(arts["deleted"]),
-                   "event": self.store.purge_events(cutoff.isoformat())}  # fmt: skip
+                   "event": self.store.purge_events(cutoff.isoformat()),
+                   "backup": self.purge_backups()}  # fmt: skip
         self.store.event("retention.purge", days=days, **counts)
         log.info("retention: deleted %s (older than %d days)", counts, days)
         return counts
+
+    def purge_backups(self, keep_days: int = 3) -> int:
+        """Operator backups in the data folder (`<name>.bak-YYYYMMDD-HHMMSS`, a database copy or an
+        artifacts folder set aside before a cleanup) older than `keep_days`, by the time in the name."""
+        import shutil
+        from datetime import datetime, timedelta
+
+        gone = 0
+        for p in self.s.data_dir.glob("*.bak-*"):
+            try:
+                made = datetime.strptime(p.name.rsplit(".bak-", 1)[1], "%Y%m%d-%H%M%S")
+            except ValueError:
+                continue  # not one of ours: left alone
+            if datetime.now() - made > timedelta(days=keep_days):
+                shutil.rmtree(p) if p.is_dir() else p.unlink()
+                gone += 1
+        return gone
 
     def _approvals_pending(self, task_id: str) -> bool:
         return bool(self._task_approvals(task_id))
