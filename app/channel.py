@@ -886,6 +886,7 @@ class ChannelHub:
     ) -> dict:
         """The main session hands a message to a child: `to` (s#), else the open child of that
         lane, else a new child opened in a new git worktree with the main's agent tool."""
+        session_id = self.as_main(session_id)
         main = self.sessions.get(session_id)
         msg = next((m for st in ("delivered", "queued") for m in self.svc.store.list("channel_msg", states=[st])
                     if ref in (m["message_id"], f"m{m.get('num')}")), None)  # fmt: skip
@@ -1124,9 +1125,11 @@ class ChannelHub:
     def own_request(self, session_id: str, text: str) -> dict:
         """Work the user typed straight into the main session: a message of its own, held by the
         main, for dispatch to hand to a child (the main only routes)."""
-        s = self.sessions.get(session_id)
+        s = self.sessions.get(self.as_main(session_id))
         if s is None:
             raise ValueError(f"unknown session {session_id}: call get_messages first")
+        if self.main_for(s.project) is not s:  # checked first: no message left behind on a refusal
+            raise PermissionError(f"only the main session of {s.project} routes its work")
         if not text.strip():
             raise ValueError("text: the request the user typed")
         msg = {"message_id": new_id("chm"), "project": s.project, "text": text.strip(),
@@ -1134,8 +1137,17 @@ class ChannelHub:
                         "project": s.project}, "created_at": now().isoformat()}  # fmt: skip
         msg["meta"]["message_id"] = msg["message_id"]
         msg["num"] = self._number("channel_mnum", msg["message_id"])
-        self.delivered(msg, session_id)
+        self.delivered(msg, s.session_id)
         return msg
+
+    def as_main(self, session_id: str) -> str:
+        """A #Main conversation that names its folder's shared session (an id from before it was
+        the main): its own session. Only the main routes, so a routing call is the main's."""
+        s = self.sessions.get(session_id)
+        main = self.main_for(s.project) if s else None
+        if main is not None and main.session_id.startswith(session_id + "_"):
+            return main.session_id
+        return session_id
 
     def conversation_sid(
         self, project: str, agent: str, cwd: str, client: str = "", instance: str = ""

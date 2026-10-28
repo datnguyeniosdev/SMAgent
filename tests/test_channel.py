@@ -1543,3 +1543,29 @@ async def test_a_report_without_session_id_still_belongs_to_the_agent_of_its_con
         ).structured_content
     task = orch.tasks[r["task_id"]]
     assert (task.request["data"] or {}).get("session_id") == sid  # a Telegram reply goes back there
+
+
+async def test_a_hash_main_routing_with_its_folders_shared_id_still_routes(settings, cfg_dir):
+    from mcp.client import Client
+
+    from app.mcp_server import build_mcp_server
+    from tests.test_config_gateway import make
+
+    orch, _ = make(settings, cfg_dir, [])
+    hub = orch.channel
+    main, _ = hub.claim_main(PROJECT, "claude_code", "/w/g", "app", "local_main")
+    shared, _, _ = hub.pull(PROJECT, None, "/w/g", 0, "claude_code", "app")
+    other, _, _ = hub.pull(PROJECT, None, "/w/other", 0, "codex", "cli")
+    async with Client(build_mcp_server(orch)) as c:
+        r = await c.call_tool("dispatch", {"session_id": shared.session_id, "lane": "ui",
+                                           "text": "build the board", "to": f"s{other.num}"})  # fmt: skip
+        assert not r.is_error, r.content[0].text  # its old (shared) id: still the main routing
+        bad = await c.call_tool(
+            "dispatch", {"session_id": other.session_id, "lane": "ui", "text": "x"}
+        )
+    assert bad.is_error and "only the main" in bad.content[0].text
+    _, got, _ = hub.pull(PROJECT, other.session_id)
+    assert got and got[0]["text"].startswith("build the board")
+    assert hub.in_progress(shared.session_id) == [] and hub.in_progress(main.session_id) == []
+    stray = [m for m in orch.store.list("channel_msg") if m.get("text") == "x"]
+    assert stray == []  # a refused call leaves no message behind
