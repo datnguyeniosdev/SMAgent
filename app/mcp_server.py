@@ -731,6 +731,16 @@ def build_mcp_server(svc) -> MCPServer:
         s = svc.channel.sessions.get(session_id)
         if s is None:
             raise GatewayToolError(f"unknown session {session_id}: call get_messages first")
+        if (
+            s.agent == "claude_code"
+            and s.cwd
+            and s.session_id == svc.channel.pull_id(s.project, s.agent, s.cwd, s.client)
+        ):
+            raise GatewayToolError(
+                "this folder's session is shared by all its Claude conversations: pinning it would "
+                "make every one of them the main. Run `agw main` with Bash instead (the agw of your "
+                "waiter command, `main` in place of `wait ...`): it makes this conversation alone the main"
+            )
         if cur := svc.channel.outranked(s):
             raise GatewayToolError(
                 f"{svc.channel._label(cur)} (desktop app) is the main: a desktop-app main is kept"

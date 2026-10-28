@@ -84,6 +84,11 @@ TOOL_TITLES = {"claude_code": "ClaudeCode", "codex": "Codex", "opencode": "OpenC
                "cursor": "Cursor", "claude_desktop": "ClaudeDesktop"}  # fmt: skip
 
 
+def _conversation(sid: str) -> bool:
+    """A conversation's own session (#Main: folder session id + "_" + 4 hex), not a folder's."""
+    return bool(re.fullmatch(r"pull_.+_[0-9a-f]{6}c?_[0-9a-f]{4}", sid))
+
+
 def short_project(name: str) -> str:
     """'Coinlets: Stack & Merge (formerly "Tini Coin") (TCN)' -> 'Coinlets'; 'Glazed Gems (GMA)' ->
     'GlazedGems': the name before a subtitle or code, without spaces."""
@@ -216,7 +221,9 @@ class ChannelHub:
             if rec.get("pinned") and rec.get("session_id") == s.session_id:
                 # a #Main or /main is the main only while it is connected: then another is chosen
                 # (automatically, or the next #Main / /main)
-                self.svc.store.put("channel_main", _norm(s.project), {"project": rec.get("project") or s.project})
+                self.svc.store.put(
+                    "channel_main", _norm(s.project), {"project": rec.get("project") or s.project}
+                )
             self._release(s)
             self._ops(f"⚪ {self._label(s)} left" + (f": {why}" if why else ""))
             self.svc.store.event("channel.disconnected", task_id=s.task_id, session=s.session_id)
@@ -608,7 +615,9 @@ class ChannelHub:
         # a window's push session and its pull loop are one main (the push one has no agent name);
         # a desktop session in the same folder is another session, not the main's twin
         kind = rec.get("kind") or ("cli" if not rec.get("agent") else "")
-        same = [x for x in mine if x.session_id == rec.get("session_id") or (x.cwd and x.cwd == rec.get("cwd")
+        own = _conversation(rec.get("session_id") or "")  # a #Main: that conversation only, no twin
+        same = [x for x in mine if x.session_id == rec.get("session_id")
+                or (not own and x.cwd and x.cwd == rec.get("cwd")
                 and (x.agent == rec.get("agent") or not x.agent or not rec.get("agent"))
                 and (not kind or x.kind == kind))]  # fmt: skip
         main = max((x for x in same if x.deliverable), key=lambda x: x.session_id == rec.get("session_id"),

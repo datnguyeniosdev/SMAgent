@@ -1402,7 +1402,12 @@ async def test_a_session_makes_itself_the_pinned_main_with_set_main(settings, cf
     from tests.test_config_gateway import make
 
     orch, _ = make(settings, cfg_dir, [])
-    kw = {"project": PROJECT, "agent": "claude_code", "cwd": "/w/a", "client": "app"}
+    kw = {
+        "project": PROJECT,
+        "agent": "codex",
+        "cwd": "/w/a",
+        "client": "app",
+    }  # (Claude: agw main)
     async with Client(build_mcp_server(orch)) as c:
         a = (await c.call_tool("get_messages", kw)).structured_content["session_id"]
         b = (await c.call_tool("get_messages", {**kw, "cwd": "/w/b"})).structured_content[
@@ -1427,7 +1432,7 @@ async def test_hash_main_in_a_child_detaches_it_from_its_lane_and_makes_it_the_m
     lane_dir = "/w/game/.agw-children/ui-1a2b"
     orch.store.put("channel_child", lane_dir, {"project": PROJECT, "lane": "ui", "path": lane_dir,
                                                "repo": "/w/game", "branch": "agw/ui-1a2b"})  # fmt: skip
-    kw = {"project": PROJECT, "agent": "claude_code", "client": "app"}
+    kw = {"project": PROJECT, "agent": "codex", "client": "app"}  # (Claude: agw main)
     async with Client(build_mcp_server(orch)) as c:
         await c.call_tool("get_messages", {**kw, "cwd": "/w/game"})
         kid = (await c.call_tool("get_messages", {**kw, "cwd": lane_dir})).structured_content[
@@ -1440,3 +1445,22 @@ async def test_hash_main_in_a_child_detaches_it_from_its_lane_and_makes_it_the_m
     assert hub.main_for(PROJECT) is s and hub.pinned(PROJECT)
     assert all(c["lane"] != "ui" for c in hub.children(PROJECT))
     assert str(hub._repo(s)) == "/w/game"  # new lanes still come from the project repo
+
+
+async def test_a_shared_folder_session_never_becomes_every_conversations_main(settings, cfg_dir):
+    from mcp.client import Client
+
+    from app.mcp_server import build_mcp_server
+    from tests.test_config_gateway import make
+
+    orch, _ = make(settings, cfg_dir, [])
+    hub = orch.channel
+    kw = {"project": PROJECT, "agent": "claude_code", "cwd": "/w/gems", "client": "app"}
+    async with Client(build_mcp_server(orch)) as c:
+        shared = (await c.call_tool("get_messages", kw)).structured_content["session_id"]
+        bad = await c.call_tool("set_main", {"session_id": shared})
+    assert bad.is_error and "agw main" in bad.content[0].text
+
+    main, _ = hub.claim_main(PROJECT, "claude_code", "/w/gems", "app", "local_ok03")
+    main.enabled = False  # the #Main cannot take work now (off, stalled, ...)
+    assert hub.main_for(PROJECT) is None  # the folder's shared session does not stand in for it
