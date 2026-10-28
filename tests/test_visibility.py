@@ -35,7 +35,7 @@ async def test_asks_and_answers_are_copied_and_sessions_announced(settings, cfg_
     )
 
     ask = orch.asks.create("agent:opencode", "Coin size?", from_session=a.session_id)
-    assert ask["to_session"] == b.session_id  # agent:<tool> finds the session by its tool
+    assert ask["delivered_to"] == b.session_id  # agent:<tool> names the project; its main has it
     await settle()
     kind, kw, mid = gw.bot.sent[-1]
     assert kw["chat_id"] == CONTROL and "AGENT NHỜ" in kw["text"] and "Coin size?" in kw["text"]

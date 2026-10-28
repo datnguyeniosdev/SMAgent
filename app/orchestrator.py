@@ -1871,6 +1871,7 @@ class Orchestrator:
     RETENTION = {
         "channel_msg": ["done", "cancelled", "expired"],
         "agent_ask": ["answered", "cancelled"],
+        "ask_pair": None,  # a conversation between agents, idle that long
         "human_input": ["answered", "expired", "cancelled"],
         "approval": ["approved", "rejected", "cancelled", "expired"],
         "tg_msg": None,  # Telegram message -> report links: a reply to a month-old message is not linked

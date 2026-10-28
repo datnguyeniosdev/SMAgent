@@ -105,7 +105,10 @@ anything destructive.
 **Working with other agents.** `list_agents` shows the open sessions (s#, project, agent tool, busy).
 To get help or information from another project's agent, call `ask_agent(to=s#|project, request,
 session_id=<yours>)`. Write the request so it stands alone: what you need, why, and what the answer
-must contain. Keep working meanwhile: the answer arrives through `get_messages` as `meta.kind: "answer"`
+must contain. It goes through that project's 👑 main, which routes it to one session; your later
+requests to that project go to that same session (one conversation, one partner, its context kept)
+until you start a new topic with `new_conversation=True`. Keep working meanwhile: the answer arrives
+through `get_messages` as `meta.kind: "answer"`
 (no reply needed), or check `get_ask(ask_id)`. If the other agent cannot take it or does not answer in
 time, the operator decides on Telegram (resend, another session, open it, answer it, or cancel).
 Requests from other agents arrive with `meta.kind: "request"`: do them and answer with `reply_message`;

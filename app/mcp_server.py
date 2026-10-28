@@ -670,20 +670,21 @@ def build_mcp_server(svc) -> MCPServer:
     @tool
     async def ask_agent(
         to: str, request: str, session_id: str | None = None, project: str | None = None,
-        wait_s: int = 600,
+        wait_s: int = 600, new_conversation: bool = False,
     ) -> dict[str, Any]:  # fmt: skip
-        """Ask another agent to do something, or for information: to = s# (that session, see
-        list_agents), agent:<tool> (e.g. agent:opencode: an open session of that agent tool, your
-        project's first) or a project (p#, name, fragment: its best session). Pass your own session_id
+        """Ask another agent to do something, or for information: to = a project (p#, name,
+        fragment), or s# / agent:<tool> to name its project. The project's main routes your first
+        request to one of its sessions; your next requests to that project go straight to that same
+        session, so the conversation keeps its context (new_conversation=True: a fresh topic, routed
+        by the main again). Pass your own session_id
         (from get_messages) so the answer reaches your inbox; it arrives there as an "answer"
         message (no reply needed), and get_ask(ask_id) shows it too. Write the request so it stands
         alone: what you need, why, and what the answer must contain. If the other agent cannot take
         it or does not answer within wait_s, the operator is asked on Telegram (resend, another
         session, open it, answer it themself, or cancel); keep doing other work meanwhile."""
         try:
-            a = svc.asks.create(
-                to, request, from_session=session_id, from_project=project, wait_s=wait_s
-            )
+            a = svc.asks.create(to, request, from_session=session_id, from_project=project,
+                                wait_s=wait_s, new_conversation=new_conversation)  # fmt: skip
         except ValueError as e:
             raise GatewayToolError(str(e)) from e
         return ask_view(a)

@@ -61,10 +61,12 @@ class AskService:
 
     def create(
         self, to: str, request: str, from_session: str | None = None, from_project: str | None = None,
-        wait_s: int = DEFAULT_WAIT_S,
+        wait_s: int = DEFAULT_WAIT_S, new_conversation: bool = False,
     ) -> dict:  # fmt: skip
-        """to: s# (that session), agent:<tool> (an open session of that agent tool, the asker's
-        project first) or a project (p#, name, fragment: its best session)."""
+        """to: s#, agent:<tool> (the asker's project first) or a project (p#, name, fragment): it names
+        the project. The request goes to that project's main, which routes it to a child, unless the
+        asker already talks with one there: then to that same session (one conversation keeps one
+        partner and its context, until it ends or new_conversation=True)."""
         me = self.hub.sessions.get(from_session or "")
         if to.strip().lower().startswith("agent:"):
             tool = to.split(":", 1)[1].strip().lower()
@@ -84,12 +86,20 @@ class AskService:
             raise AskError(f"unknown agent or project {to!r} (see list_agents)")
         if not request.strip():
             raise AskError("empty request")
+        key = self._pair_key(from_session, project)
+        if new_conversation:
+            self.svc.store.delete("ask_pair", key)
+        pair = self.svc.store.get("ask_pair", key) or {}
+        partner = self.hub.sessions.get(pair.get("session_id") or "")
+        if pair and (partner is None or not partner.deliverable):
+            self.svc.store.delete("ask_pair", key)  # its partner is gone: the main routes again
+            partner = None
         a = {
             "ask_id": new_id("ask"),
             "from_session": from_session,
             "from_project": me.project if me else from_project,
             "to": to,
-            "to_session": target.session_id if target else None,
+            "to_session": partner.session_id if partner else None,  # else the main routes it
             "to_project": project,
             "request": request.strip()[:4000],
             "created_at": now().isoformat(),
@@ -100,6 +110,22 @@ class AskService:
         self.svc.store.event("ask.created", ask_id=a["ask_id"], to=project, by=a["from_project"])
         self._tell(a, "asked")
         return a
+
+    @staticmethod
+    def _pair_key(from_session: str | None, project: str) -> str:
+        from app.channel import _norm
+
+        return f"{from_session or '-'}|{_norm(project)}"
+
+    def _pair(self, a: dict, msg: dict) -> None:
+        """The session that answered (a child the main routed it to) stays the asker's partner in
+        that project: its next asks go straight there, so the conversation keeps its context."""
+        holder = msg.get("session_id")
+        main = self.hub.main_for(a["to_project"])
+        if a.get("from_session") and holder and (main is None or holder != main.session_id):
+            self.svc.store.put("ask_pair", self._pair_key(a["from_session"], a["to_project"]),
+                               {"session_id": holder, "from_session": a["from_session"],
+                                "to_project": a["to_project"], "since": now().isoformat()})  # fmt: skip
 
     def _tell(self, a: dict, event: str) -> None:
         """Every request between agents, and its answer, is copied to the operator's group."""
@@ -159,6 +185,8 @@ class AskService:
         )
         self._save(a)
         msg = self.svc.store.get("channel_msg", a.get("message_id") or "")
+        if msg:
+            self._pair(a, msg)
         if msg and msg.get("state") in ("pending", "queued", "delivered", "stalled"):
             # answered some other way (the operator, another session): the holder is free again
             self.hub._set(msg, "done")

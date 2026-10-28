@@ -228,3 +228,33 @@ async def test_an_ask_answered_another_way_frees_the_session_that_holds_it(setti
     orch.asks.answer(ask["ask_id"], "done", by="the operator")  # not through B's reply_message
     assert orch.store.get("channel_msg", ask["message_id"])["state"] == "done"
     assert hub.in_progress(b.session_id) == []  # free for its next job
+
+
+async def test_asks_go_through_the_main_and_a_conversation_keeps_its_partner(settings, cfg_dir):
+    orch, _ = make(settings, cfg_dir, [])
+    hub = orch.channel
+    a, _, _ = hub.pull(A, None, "/w/a")
+    main, _, _ = hub.pull(B, None, "/w/b")  # B's main: it routes
+    kid, _, _ = hub.pull(B, None, "/w/b-kid", 0, "codex")  # a session the main hands work to
+    assert hub.main_for(B) is main
+
+    first = orch.asks.create(B, "What coin size?", from_session=a.session_id)
+    assert first["delivered_to"] == main.session_id  # through the main
+    msg = orch.store.get("channel_msg", first["message_id"])
+    assert msg.get("route")  # with the routing note: the main dispatches it, never does it
+    hub.delivered(msg, kid.session_id)  # (what dispatch does: the kid gets it)
+    await hub.reply(kid.session_id, "128 px", first["message_id"])
+
+    again = orch.asks.create(B, "And the font?", from_session=a.session_id)
+    assert (
+        again["to_session"] == again["delivered_to"] == kid.session_id
+    )  # same partner, its context
+
+    fresh = orch.asks.create(
+        B, "New topic: sounds", from_session=a.session_id, new_conversation=True
+    )
+    assert fresh["delivered_to"] == main.session_id  # a new conversation: routed by the main again
+
+    hub.disconnect(kid)  # the partner is gone: the main routes the next one
+    later = orch.asks.create(B, "Still there?", from_session=a.session_id)
+    assert later["delivered_to"] == main.session_id
