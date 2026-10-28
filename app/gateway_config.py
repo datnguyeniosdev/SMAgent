@@ -173,6 +173,7 @@ class PolicyConfig(BaseModel):
         "app.plugins.data",
         "app.plugins.media",
         "app.plugins.unity",
+        "app.plugins.game_research",
     ]
     artifact_retention_days: int = Field(30, ge=1)
 

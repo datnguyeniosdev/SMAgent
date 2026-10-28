@@ -1,0 +1,1 @@
+{"engine": "fixture", "name": "Pip Jump", "version": "0.3.1", "entry": "scripts/player.lua", "levels": ["levels/level1.json", "levels/level2.json"]}

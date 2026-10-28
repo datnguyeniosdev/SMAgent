@@ -57,7 +57,14 @@ class Settings(BaseSettings):
 
     # Plugins: module names under app.plugins (or dotted paths). Permissions are the most any
     # plugin tool may hold; tool_permissions is what a workflow step is granted at runtime.
-    plugins: Annotated[list[str], NoDecode] = ["software", "documents", "data", "media", "unity"]
+    plugins: Annotated[list[str], NoDecode] = [
+        "software",
+        "documents",
+        "data",
+        "media",
+        "unity",
+        "game_research",
+    ]
     plugin_permissions: Annotated[list[str], NoDecode] = [
         "workspace:read",
         "workspace:write",

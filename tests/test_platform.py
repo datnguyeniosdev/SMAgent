@@ -647,6 +647,7 @@ def test_rest_generic_endpoints(tmp_path, monkeypatch):
             "data",
             "media",
             "unity",
+            "game_research",
         }
         assert any(
             t["name"] == "data.profile" for t in c.get("/api/v1/tools", headers=h).json()["tools"]
