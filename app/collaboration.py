@@ -71,6 +71,10 @@ class Feedback(BaseModel):
 
 
 REFUSE = "❌ Từ chối"  # the one answer a secure question takes without the passcode
+APPROVED = "✅ Duyệt (đã xác minh passcode)"
+AUTO_ANSWER = (
+    "Bạn tự quyết theo đề xuất tốt nhất của bạn"  # auto-accept, a question without options
+)
 
 
 class HumanInput(BaseModel):
@@ -793,8 +797,11 @@ class CollaborationService:
         )
         self.store.put("human_input", hi.request_id, hi, task_id=task_id, state=hi.status)
         self.store.event("human_input.requested", task_id=task_id, request_id=hi.request_id)
+        auto = self.auto_accept()
         try:
-            await self._post_question(hi)
+            await self._post_question(
+                hi, "🌙 Auto-accept đang bật: em tự trả lời câu này.\n" if auto else ""
+            )
         except Exception as e:
             log.exception("human input delivery failed")
             hi.status = "expired"  # nobody can answer a question that never arrived
@@ -803,7 +810,43 @@ class CollaborationService:
                 "delivery_failed",
                 f"the question did not reach Telegram ({type(e).__name__}); try again later",
             ) from e
-        return hi
+        return (self._auto_answer(hi) if auto else None) or hi
+
+    # ---- auto-accept: the operator is away; questions are answered so agents do not wait ----
+
+    def auto_accept(self) -> bool:
+        return bool((self.store.get("setting", "auto_accept") or {}).get("on"))
+
+    def auto_passcode_ok(self, text: str) -> bool | None:
+        """Switching auto-accept on takes the passcode (None: no passcode configured)."""
+        import hmac
+
+        code = self.svc.s.telegram_confirm_passcode
+        if code is None:
+            return None
+        return hmac.compare_digest(text.strip().encode(), code.get_secret_value().encode())
+
+    def set_auto_accept(self, on: bool, by: str) -> int:
+        """On: also answers the questions already waiting. Returns how many were answered."""
+        self.store.put("setting", "auto_accept", {"on": on, "by": by, "at": now().isoformat()})
+        self.store.event("auto_accept.on" if on else "auto_accept.off", by=by)
+        if not on:
+            return 0
+        waiting = [
+            HumanInput.model_validate(b) for b in self.store.list("human_input", states=["pending"])
+        ]
+        return sum(self._auto_answer(h) is not None for h in waiting)
+
+    def _auto_answer(self, hi: HumanInput) -> HumanInput | None:
+        """The operator chose this (passcode given when it was switched on): a secure question is
+        approved, otherwise the first option (the agent's recommendation) or "decide yourself"."""
+        text = APPROVED if hi.secure else (hi.options[0] if hi.options else AUTO_ANSWER)
+        try:
+            return self.answer_human_input(
+                hi.request_id, text, "auto-accept", free=True, passcode_ok=hi.secure
+            )
+        except CollaborationError:  # answered or expired meanwhile
+            return None
 
     async def turn_ended(
         self, project: str, session_id: str, label: str, text: str
@@ -934,7 +977,7 @@ class CollaborationService:
         if code is None:
             return "no_passcode"
         if hmac.compare_digest(text.strip().encode(), code.get_secret_value().encode()):
-            self.answer_human_input(request_id, "✅ Duyệt (đã xác minh passcode)", responder, free=True,
+            self.answer_human_input(request_id, APPROVED, responder, free=True,
                                     passcode_ok=True)  # fmt: skip
             self.store.event("human_input.passcode_ok", task_id=hi.task_id, request_id=request_id)
             return "approved"

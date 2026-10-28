@@ -53,6 +53,7 @@ PHOTO_LIMIT = 10 * 1024 * 1024
 ALBUM_WAIT_S = 1.5
 PASSCODE_WAIT_S = 300  # a ✅ on a secure question waits this long for the passcode (private chat)
 APPROVE_PASSCODE = "✅ Duyệt (nhập passcode)"
+AUTO = "auto"  # _pass_wait key: the passcode switches auto-accept on
 
 HELP = (
     """<b>Agent Gateway</b> · <code>/menu</code> for buttons
@@ -68,6 +69,8 @@ HELP = (
 /close &lt;s#&gt; · /off &lt;s#&gt; · /on &lt;s#&gt; — close a session, or stop/resume giving it work
 /children prune &lt;lane&gt; — delete a closed 🧭 child's folder (its branch stays), confirmed
 /list all — also idle projects' details and closed lanes · /forget &lt;p#&gt; — drop an old project name
+/auto — 🌙 auto-accept on/off: while you are away every question is answered (secure ones approved,
+  else the first option); switching on takes the passcode
 /main &lt;s#&gt; — make it its project's 👑 main session: it routes project requests to 🧭 child sessions
 /model [p# child|router opus|sonnet|haiku|default] — the Claude model of a project's child sessions and temporary router
 /agents — every agent: 🖥 app (desktop/IDE), ⌨️ CLI, ☁️ API, with on/off and close buttons
@@ -106,6 +109,7 @@ MENU = [  # the "/" menu: everyday commands only; the rest still work (see /help
     ("close", "Close a session: /close s1"),
     ("off", "Stop giving a session work"),
     ("on", "Resume giving a session work"),
+    ("auto", "Auto-accept questions on/off (passcode)"),
     ("setup", "Status and global setup"),
     ("mcp", "Agent tools on/off"),
     ("keys", "API keys and models"),
@@ -264,7 +268,8 @@ class TelegramGateway:
         ] = {}  # user -> (variable, deadline): /keys entry
         self._pass_wait: dict[
             int, tuple[str, float]
-        ] = {}  # user -> (request_id, deadline): passcode
+        ] = {}  # user -> (request_id or AUTO, deadline): passcode
+        self._auto_tries: dict[int, int] = {}  # user -> wrong passcodes for auto-accept
         self._deploy_wait: dict[str, tuple] = {}  # token -> (repo, env, branch, dry_run): /deploy
         self._deploy_tasks: set[asyncio.Task] = set()  # running deploys (kept referenced)
         self._album_timers: dict[str, asyncio.Task] = {}
@@ -565,6 +570,7 @@ class TelegramGateway:
         r.message(Command("model"))(self.on_model)
         r.message(Command("cancel"))(self.on_cancel)
         r.message(Command("forget"))(self.on_forget)
+        r.message(Command("auto"))(self.on_auto)
         r.message(Command("tools"))(self.on_tools)
         r.message(Command("tool"))(self.on_tool)
         r.message(Command("plugins"))(self.on_plugins)
@@ -603,9 +609,59 @@ class TelegramGateway:
         if stuck:
             text += f" · 🆘 {stuck} agents waiting"
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=t, callback_data=d) for t, d in row] for row in MENU_BUTTONS
+            [InlineKeyboardButton(text=t, callback_data=d) for t, d in row]
+            for row in [*MENU_BUTTONS[:-1], [self._auto_button(), *MENU_BUTTONS[-1]]]
         ])  # fmt: skip
         await say(m, text, reply_markup=kb)
+
+    def _auto_button(self) -> tuple[str, str]:
+        return ("🌙 Auto: ON" if self.orch.collab.auto_accept() else "🌙 Auto: OFF", "m:auto")
+
+    async def on_auto(self, m: TgMessage):
+        if self._authorized_msg(m):
+            await self._toggle_auto(m.from_user.id, m.answer)
+
+    async def _toggle_auto(self, user: int, answer) -> None:
+        """Off: at once. On: the passcode, in a private chat (like a secure ✅)."""
+        collab = self.orch.collab
+        if collab.auto_accept():
+            collab.set_auto_accept(False, str(user))
+            await self.send_control("🌙 Auto-accept đã TẮT: câu hỏi lại chờ anh trả lời ạ.")
+            return
+        if self.s.telegram_confirm_passcode is None:
+            await answer(
+                "Chưa cài passcode (TELEGRAM_CONFIRM_PASSCODE): không bật auto-accept được ạ."
+            )
+            return
+        self._key_wait.pop(user, None)
+        self._pass_wait[user] = (AUTO, time.monotonic() + PASSCODE_WAIT_S)
+        ask = ("🔐 Gửi passcode để BẬT auto-accept trong 5 phút (em xoá tin ngay). Khi bật, mọi câu hỏi "
+               "của agent được tự trả lời, kể cả commit/release. /cancel để thôi.")  # fmt: skip
+        dm = await self._send(self.bot.send_message, chat_id=user, text=ask)
+        if dm is None:
+            me = await self.bot.get_me()
+            await answer(f"🔐 Anh mở https://t.me/{me.username} rồi bấm lại ạ.")
+        elif answer is not None:
+            await answer("🔐 Em đã nhắn riêng anh: gửi passcode ở chat riêng với bot ạ.")
+
+    async def _auto_passcode(self, m: TgMessage, user: int, text: str, gone: str) -> None:
+        ok = self.orch.collab.auto_passcode_ok(text)
+        if ok:
+            self._pass_wait.pop(user, None)
+            self._auto_tries.pop(user, None)
+            n = self.orch.collab.set_auto_accept(True, str(user))
+            await say(m, "✅ Đã bật auto-accept." + gone)
+            await self.send_control(f"🌙 Auto-accept đã BẬT: em tự trả lời mọi câu hỏi (đã trả lời {n} câu "
+                                    "đang chờ). Bấm 🌙 Auto trong /menu hoặc /auto để tắt ạ.")  # fmt: skip
+            return
+        tries = self._auto_tries.get(user, 0) + 1
+        if ok is None or tries >= 3:
+            self._pass_wait.pop(user, None)
+            self._auto_tries.pop(user, None)
+            await say(m, "🚫 Sai passcode 3 lần: auto-accept vẫn tắt." + gone)
+            return
+        self._auto_tries[user] = tries
+        await say(m, f"❌ Sai passcode, còn {3 - tries} lần thử: gửi lại ạ." + gone)
 
     async def on_menu_button(self, q: CallbackQuery):
         chat_id = q.message.chat.id if q.message else None
@@ -639,6 +695,8 @@ class TelegramGateway:
             await answer("🗺 Pick a project:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
         elif view == "templates":
             await answer(templates(""))
+        elif view == "auto":
+            await self._toggle_auto(q.from_user.id, answer)
         else:
             await answer(HELP)
 
@@ -1016,7 +1074,8 @@ class TelegramGateway:
         if text.startswith("/"):
             if text.split()[0].lower() == "/cancel":
                 self._pass_wait.pop(user, None)
-                await say(m, f"Đã thôi: <code>{request_id}</code> vẫn chờ duyệt.")
+                await say(m, "Đã thôi: auto-accept vẫn tắt." if request_id == AUTO
+                          else f"Đã thôi: <code>{request_id}</code> vẫn chờ duyệt.")  # fmt: skip
                 return
             raise SkipHandler()
         try:
@@ -1027,6 +1086,9 @@ class TelegramGateway:
         if time.monotonic() > deadline:
             self._pass_wait.pop(user, None)
             await say(m, f"Quá 5 phút cho <code>{request_id}</code>: bấm ✅ lại ạ." + gone)
+            return
+        if request_id == AUTO:
+            await self._auto_passcode(m, user, text, gone)
             return
         from app.collaboration import CollaborationError
 
