@@ -682,6 +682,9 @@ class CollaborationService:
         ):  # that session, else the project's
             route, fb.route_id = None, "channel"
             text_for_session = f"Telegram reply from the operator:\n{fb.text}"
+            if report is not None and not live:  # no session to hand it to: the main routes it
+                first = (report.text or "").strip().splitlines()[:1]
+                text_for_session += f"\n(It answers the report {report.report_id}: {first[0][:200] if first else ''})"
             for aid in shot_ids:
                 text_for_session += f"\nScreenshot: {self.svc.artifacts.get(aid).path}"
             _msg, target = hub.send(

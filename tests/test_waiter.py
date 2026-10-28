@@ -394,3 +394,33 @@ def test_the_tool_hook_blocks_work_in_the_main_only(tmp_path, monkeypatch, capsy
     assert run("Bash", command="rm -rf build")["permissionDecision"] == "deny"
     role["main"] = False
     assert run("Write", file_path="x.py") is None  # not the main: works as usual
+
+
+def test_the_prompt_hook_tells_a_hash_main_its_own_session_id(tmp_path, monkeypatch, capsys):
+    from app import projects
+    from app.cli import main
+
+    (tmp_path / "gems").mkdir()
+    (tmp_path / "gems/README.md").write_text("# Glazed Gems (GMA)\n")
+    (tmp_path / "gems/AGENTS.md").write_text("x")
+    monkeypatch.setattr(projects, "projects_root", lambda: tmp_path)
+    monkeypatch.chdir(tmp_path / "gems")
+    monkeypatch.setattr(w, "WAITERS", tmp_path / "waiters")
+    monkeypatch.setattr(w, "missing", lambda *a, **k: False)
+    monkeypatch.setenv("CLAUDE_CODE_HOST_SESSION_ID", "local_ok03")
+    role = {"main": True, "session_id": "pull_glazedgemsgma_claudecode_384812_a0ff"}
+
+    def urlopen(url, timeout=None):
+        return Resp(role if "/role?" in getattr(url, "full_url", url) else {})
+
+    monkeypatch.setattr(w.urllib.request, "urlopen", urlopen)
+    assert main(["hook-prompt"]) == 0
+    assert "session_id is 'pull_glazedgemsgma_claudecode_384812_a0ff'" in capsys.readouterr().out
+    from app.channel import ChannelHub
+
+    role["session_id"] = ChannelHub.pull_id(
+        "Glazed Gems (GMA)", "claude_code", str(tmp_path / "gems"), "app"
+    )
+    assert (
+        main(["hook-prompt"]) == 0 and "session_id is" not in capsys.readouterr().out
+    )  # shared: silent

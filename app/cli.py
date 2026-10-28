@@ -601,7 +601,32 @@ def cmd_hook_prompt(args) -> int:
         )
     if project and missing(project, cwd):
         print(reminder(project, cwd, client_kind()))
+    if project and (own := _own_session(project, cwd, client_kind(), instance())):
+        print(f"agent-gateway: this conversation's gateway session_id is '{own}' (its own: it is the "
+              "project's 👑 main). Pass exactly that session_id to get_messages, reply_message and every "
+              "gateway call, not the one the folder's other conversations share.")  # fmt: skip
     return 0
+
+
+def _own_session(project: str, cwd: str, client: str, inst: str) -> str | None:
+    """This conversation's own gateway session, when it has one (#Main), else None (the folder's)."""
+    import urllib.parse
+    import urllib.request
+
+    from app.channel import ChannelHub
+    from app.config import ENV_PORTS
+
+    if not inst:
+        return None
+    query = urllib.parse.urlencode({"project": project, "agent": "claude_code", "cwd": cwd,
+                                    "client": client, "instance": inst})  # fmt: skip
+    try:
+        url = f"http://127.0.0.1:{ENV_PORTS['prod']}/api/v1/channel/role?{query}"
+        with urllib.request.urlopen(url, timeout=3) as r:  # noqa: S310 - fixed local URL
+            sid = json.loads(r.read()).get("session_id")
+    except (OSError, ValueError):
+        return None
+    return sid if sid and sid != ChannelHub.pull_id(project, "claude_code", cwd, client) else None
 
 
 ROUTER_ONLY = (

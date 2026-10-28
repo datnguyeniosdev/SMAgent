@@ -935,7 +935,9 @@ async def channel_role(
 ):
     """PreToolUse hook: is this conversation its project's main (which only routes)?"""
     _local_only(request)
-    return {"main": request.app.state.orch.channel.is_main(project, agent, cwd, client, instance)}
+    hub = request.app.state.orch.channel
+    return {"main": hub.is_main(project, agent, cwd, client, instance),
+            "session_id": hub.conversation_sid(project, agent, cwd, client, instance)}  # fmt: skip
 
 
 class TurnIn(BaseModel):

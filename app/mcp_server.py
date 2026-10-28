@@ -10,9 +10,11 @@ import base64
 import binascii
 import functools
 import html
+import inspect
+import typing
 from typing import Any
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
 from app.agent_registry import CapabilityError
@@ -58,10 +60,13 @@ def build_mcp_server(svc) -> MCPServer:
     )
 
     def tool(fn):
-        """Register fn as an MCP tool that refuses while the operator has switched it off (/mcp)."""
+        """Register fn as an MCP tool that refuses while the operator has switched it off (/mcp).
+        A call without session_id gets the one its MCP connection used last: a report or question
+        sent without it still belongs to that agent session (a Telegram reply finds it)."""
+        takes_sid = "session_id" in inspect.signature(fn).parameters
 
         @functools.wraps(fn)
-        async def gated(*args, **kwargs):
+        async def gated(*args, mcp_ctx: Context | None = None, **kwargs):
             if not svc.switches.on(fn.__name__):
                 raise GatewayToolError(
                     f"{fn.__name__} is switched off by the operator (Telegram /mcp); "
@@ -69,8 +74,29 @@ def build_mcp_server(svc) -> MCPServer:
                 )
             if isinstance(kwargs.get("project"), str):  # some models send "Stack &amp; Merge"
                 kwargs["project"] = html.unescape(kwargs["project"]).strip()
-            return await fn(*args, **kwargs)
+            conn = _connection(mcp_ctx)
+            known = svc.channel.connections.get(conn) if conn else None
+            if takes_sid and not kwargs.get("session_id") and known in svc.channel.sessions:
+                kwargs["session_id"] = known
+            out = await fn(*args, **kwargs)
+            sid = kwargs.get("session_id") or (
+                out.get("session_id") if isinstance(out, dict) else None
+            )
+            if conn and sid in svc.channel.sessions:
+                svc.channel.connections[conn] = sid
+            return out
 
+        sig, hints = inspect.signature(fn), typing.get_type_hints(fn)  # (annotations resolved)
+        params = [
+            p.replace(annotation=hints.get(p.name, p.annotation)) for p in sig.parameters.values()
+        ]
+        ctx = inspect.Parameter(
+            "mcp_ctx", inspect.Parameter.KEYWORD_ONLY, default=None, annotation=Context | None
+        )
+        gated.__signature__ = sig.replace(parameters=[*params, ctx],
+                                          return_annotation=hints.get("return", sig.return_annotation))  # fmt: skip
+        gated.__annotations__ = {**hints, "mcp_ctx": Context | None}
+        del gated.__wrapped__  # (the signature above, with the context, is the tool's)
         return server.tool()(gated)
 
     async def art_3d(prompt, purpose, requirements, project, session_id, image_path, fmt, texture):
@@ -820,6 +846,15 @@ def waiter_hint(s) -> str | None:
         "your gateway waiter is not running: start it again before you end this turn, with the Bash "
         f"tool, run_in_background true: `{command(s.project, s.cwd, s.client)}`"
     )
+
+
+def _connection(ctx) -> str | None:
+    """The agent's MCP connection: its streamable-HTTP session id (one per agent process)."""
+    try:
+        headers = ctx.headers if ctx is not None else None
+    except Exception:  # noqa: BLE001 - no request (a test client, stdio): no connection to remember
+        return None
+    return (headers or {}).get("mcp-session-id")
 
 
 def ask_view(a: dict) -> dict[str, Any]:

@@ -1522,3 +1522,24 @@ def test_a_child_gets_the_projects_rules_and_skills_that_git_does_not_carry(tmp_
         _carry(repo, kid) == 1
         and (kid / ".claude/skills/ui-review/SKILL.md").read_text() == "review v2"
     )
+
+
+async def test_a_report_without_session_id_still_belongs_to_the_agent_of_its_connection(
+    settings, cfg_dir, monkeypatch
+):
+    from mcp.client import Client
+
+    from app import mcp_server
+    from app.mcp_server import build_mcp_server
+    from tests.test_config_gateway import make
+
+    orch, _ = make(settings, cfg_dir, [])
+    monkeypatch.setattr(mcp_server, "_connection", lambda ctx: "conn-uiux-child")
+    kw = {"project": PROJECT, "agent": "claude_code", "cwd": "/w/kid", "client": "cli"}
+    async with Client(build_mcp_server(orch)) as c:
+        sid = (await c.call_tool("get_messages", kw)).structured_content["session_id"]
+        r = (
+            await c.call_tool("submit_report", {"text": "Dạ, xong board ạ", "project": PROJECT})
+        ).structured_content
+    task = orch.tasks[r["task_id"]]
+    assert (task.request["data"] or {}).get("session_id") == sid  # a Telegram reply goes back there

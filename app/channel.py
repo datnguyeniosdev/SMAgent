@@ -144,6 +144,7 @@ class ChannelHub:
     def __init__(self, svc):
         self.svc = svc
         self.sessions: dict[str, LiveSession] = {}
+        self.connections: dict[str, str] = {}  # MCP connection -> the agent session it speaks for
         self._stopping: set[str] = (
             set()
         )  # closed pull sessions: tell their loop to stop if it polls again
@@ -1136,6 +1137,15 @@ class ChannelHub:
         self.delivered(msg, session_id)
         return msg
 
+    def conversation_sid(
+        self, project: str, agent: str, cwd: str, client: str = "", instance: str = ""
+    ) -> str:
+        """Conversations of one folder and tool share its session; one has its own only as the
+        project's #Main (claim_main), until it disconnects."""
+        own = self.pull_id(project, agent, cwd, client)
+        mine = self.pull_id(project, agent, cwd, client, instance) if instance else own
+        return mine if mine in self.sessions or mine == self._pinned_sid(project) else own
+
     def is_main(
         self, project: str, agent: str, cwd: str, client: str = "", instance: str = ""
     ) -> bool:
@@ -1384,12 +1394,7 @@ class ChannelHub:
         answers to its own questions, which that message is waiting for.
         Returns (session, new messages, messages still in progress)."""
         own = self.pull_id(project, agent, cwd, client)
-        mine = self.pull_id(project, agent, cwd, client, instance) if instance else own
-        # conversations of one folder and tool share its session; one has its own only as the
-        # project's #Main (claim_main), until it disconnects
-        sid = session_id or (
-            mine if mine in self.sessions or mine == self._pinned_sid(project) else own
-        )
+        sid = session_id or self.conversation_sid(project, agent, cwd, client, instance)
         if (
             cwd
             and agent
