@@ -498,11 +498,22 @@ def cmd_session(args) -> int:
         )
     # no /loop: push delivers here, and the SessionStart hook starts the waiter and its safety cron
     env = {**_clean_env(), "AGW_CHANNEL": "1"}  # the shim only listens in sessions started here
+    # A first prompt: Claude Code may block channel pushes (then nothing would start this session),
+    # so the session fetches its work itself and starts its waiter (SessionStart hook) on its first turn.
+    from app.projects import project_for
+    from app.repo_setup import loop_prompt
+
+    project = project_for(Path.cwd())
+    first = []
+    if project and not args.claude_args:  # (resuming with --continue/--resume: it already knows)
+        pull = loop_prompt(project, "cli").replace("this folder", repr(str(Path.cwd())))
+        first = [f"agent-gateway opened this session for work. {pull}"]
     # the channel option takes several values, so it goes last: a prompt after it would be read as a channel
     argv = [
         claude,
         *(["--model", args.model] if args.model else []),
         *args.claude_args,
+        *first,
         "--dangerously-load-development-channels",
         f"server:{CHANNEL_NAME}",
     ]

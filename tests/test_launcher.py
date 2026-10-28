@@ -255,3 +255,26 @@ def test_a_slow_terminal_does_not_fail_the_dispatch(tmp_path, monkeypatch):
     monkeypatch.setattr(launcher.subprocess, "run", slow)
     assert launcher.open_in_terminal(tmp_path) is None
     launcher.close_terminal_window(7055, wait=0)  # no exception either
+
+
+def test_a_child_session_starts_with_a_prompt_to_fetch_its_work(tmp_path, monkeypatch):
+    import app.cli as cli
+    from app import projects
+
+    (tmp_path / "game").mkdir()
+    (tmp_path / "game/README.md").write_text("# Ball Shot (K10)\n")
+    (tmp_path / "game/AGENTS.md").write_text("x")
+    (tmp_path / "game/.mcp.json").write_text('{"mcpServers": {"agent-gateway-channel": {}}}')
+    monkeypatch.setattr(projects, "projects_root", lambda: tmp_path)
+    monkeypatch.chdir(tmp_path / "game")
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/bin/claude")
+    monkeypatch.setattr(cli, "_claude_version", lambda c: (9, 9, 9))
+    ran = []
+    monkeypatch.setattr(cli.os, "execvpe", lambda exe, argv, env: ran.append(argv))
+    cli.main(["session", "--model", "opus"])
+    argv = ran[-1]
+    prompt = next(a for a in argv if a.startswith("agent-gateway opened this session"))
+    assert "get_messages" in prompt and "'Ball Shot (K10)'" in prompt and "client 'cli'" in prompt
+    assert argv.index(prompt) < argv.index("--dangerously-load-development-channels")
+    cli.main(["session", "--continue"])  # resuming: no new prompt
+    assert not any(a.startswith("agent-gateway opened") for a in ran[-1])
