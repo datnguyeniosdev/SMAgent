@@ -78,6 +78,9 @@ class Settings(BaseSettings):
         "provider:image",
     ]  # fmt: skip  # "mcp:execute" is NOT granted by default
     plugin_config: dict[str, dict] = {}  # per-plugin options, keyed by plugin id
+    # project -> skills its agents must load first for every request through the gateway (the first
+    # one leads), e.g. CORE_SKILLS='{"UIUXAgent": ["uiux-art-director"]}'
+    core_skills: dict[str, list[str]] = {}
     data_retention_days: int = (
         30  # finished tasks/messages/logs older than this are deleted daily; 0 = keep
     )

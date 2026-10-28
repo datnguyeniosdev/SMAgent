@@ -258,3 +258,24 @@ async def test_asks_go_through_the_main_and_a_conversation_keeps_its_partner(set
     hub.disconnect(kid)  # the partner is gone: the main routes the next one
     later = orch.asks.create(B, "Still there?", from_session=a.session_id)
     assert later["delivered_to"] == main.session_id
+
+
+async def test_a_request_to_a_project_with_core_skills_tells_its_agent_to_load_them(
+    settings, cfg_dir
+):
+    orch, _ = make(settings, cfg_dir, [])
+    orch.s.core_skills = {B: ["uiux-art-director", "game-ui-quality-gate"]}
+    hub = orch.channel
+    a, _, _ = hub.pull(A, None, "/w/a")
+    b, _, _ = hub.pull(B, None, "/w/b")
+    ask = orch.asks.create(B, "Review the shop screen", from_session=a.session_id)
+    text = orch.store.get("channel_msg", ask["message_id"])["text"]
+    assert (
+        "load `uiux-art-director`, `game-ui-quality-gate`" in text
+        and "follow `uiux-art-director`" in text
+    )
+    other, _ = hub.send(A, "plain work")  # a project without core skills: unchanged
+    assert "Core skills" not in other["text"]
+    orch.asks.answer(ask["ask_id"], "done", by="B")  # an answer is not work: no note
+    answer = [m for m in orch.store.list("channel_msg") if m.get("kind") == "answer"][-1]
+    assert "Core skills" not in answer["text"]

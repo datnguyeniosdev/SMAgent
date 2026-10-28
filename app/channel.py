@@ -1102,6 +1102,8 @@ class ChannelHub:
         }
         msg["meta"]["message_id"] = msg["message_id"]
         msg.update(extra or {})
+        if msg.get("kind") != "answer":  # work: the project's core skills lead it
+            msg["text"] += self.skills_note(msg["project"])
         if for_agent:
             msg["for_agent"] = for_agent
         if msg.get("kind"):
@@ -1132,13 +1134,27 @@ class ChannelHub:
             raise PermissionError(f"only the main session of {s.project} routes its work")
         if not text.strip():
             raise ValueError("text: the request the user typed")
-        msg = {"message_id": new_id("chm"), "project": s.project, "text": text.strip(),
+        msg = {"message_id": new_id("chm"), "project": s.project,
+               "text": text.strip() + self.skills_note(s.project),
                "meta": {"source": "session", "sender": "the user (in the main session)",
                         "project": s.project}, "created_at": now().isoformat()}  # fmt: skip
         msg["meta"]["message_id"] = msg["message_id"]
         msg["num"] = self._number("channel_mnum", msg["message_id"])
         self.delivered(msg, s.session_id)
         return msg
+
+    def skills_note(self, project: str) -> str:
+        """The project's core skills (Settings.core_skills): every request through the gateway tells
+        its agent to load them first, instead of hoping they trigger by themselves."""
+        s = getattr(self.svc, "s", None)
+        core = next((v for k, v in (getattr(s, "core_skills", None) or {}).items()
+                     if _norm(k) == _norm(project)), [])  # fmt: skip
+        if not core:
+            return ""
+        names = ", ".join(f"`{n}`" for n in core)
+        return (f"\n\nCore skills of {project}: before anything else, load {names} (Claude Code: the "
+                f"Skill tool; other agent tools: read .claude/skills/<name>/SKILL.md in the project) and "
+                f"follow `{core[0]}`'s workflow for this request; it brings in the others it needs.")  # fmt: skip
 
     def as_main(self, session_id: str) -> str:
         """A #Main conversation that names its folder's shared session (an id from before it was
