@@ -89,6 +89,22 @@ def test_attachment_symlink_refused(store, tmp_path):
         store.read(att)
 
 
+def test_a_changed_input_or_artifact_is_refused_by_its_checksum(store, tmp_path):
+    """Evidence integrity: an input or artifact edited on disk after it was stored is not read."""
+    from app.storage import ArtifactStore
+
+    att = store.save(b"speed = 6", "a.txt", "text/plain", "api")
+    assert store.read(att) == b"speed = 6"
+    att.storage_path.write_bytes(b"speed = 9")
+    with pytest.raises(AttachmentError, match="content changed on disk"):
+        store.read(att)
+    arts = ArtifactStore(tmp_path / "artifacts")
+    art = arts.add("tsk_a", "manifest", "m.json", "{}")
+    art.path.write_text('{"files": []}')
+    with pytest.raises(AttachmentError, match="content changed on disk"):
+        arts.read(art)
+
+
 def test_cleanup_skips_in_use(store):
     att = store.save(b"x", "a.txt", "text/plain", "api", task_id="tsk_a")
     assert store.cleanup_task("tsk_a", in_use={"tsk_a"}) is False

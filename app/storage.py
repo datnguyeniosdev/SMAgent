@@ -155,7 +155,10 @@ class AttachmentStore:
         path = _inside(self.root, att.storage_path)
         if path.is_symlink():
             raise AttachmentError("refusing to read symlink")
-        return path.read_bytes()
+        data = path.read_bytes()
+        if sha256(data) != att.sha256:
+            raise AttachmentError(f"attachment {att.attachment_id} content changed on disk")
+        return data
 
     def cleanup_task(self, task_id: str, in_use: set[str]) -> bool:
         """Delete a task's media directory unless the task is still in use."""
