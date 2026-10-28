@@ -240,3 +240,18 @@ def test_project_dir_follows_a_renamed_folder(settings, cfg_dir, tmp_path, monke
     assert orch.channel.project_dir("Glazed Gems (GMA)") == str(
         root / "ok03-colorever-gem-art-puzzle"
     )
+
+
+def test_a_slow_terminal_does_not_fail_the_dispatch(tmp_path, monkeypatch):
+    """Seen in prod: several mains opened children at once, Terminal answered osascript after 30 s,
+    and dispatch raised although the window opened and its session connected."""
+    import subprocess
+
+    from app import launcher
+
+    def slow(*a, **kw):
+        raise subprocess.TimeoutExpired(a[0], 30)
+
+    monkeypatch.setattr(launcher.subprocess, "run", slow)
+    assert launcher.open_in_terminal(tmp_path) is None
+    launcher.close_terminal_window(7055, wait=0)  # no exception either

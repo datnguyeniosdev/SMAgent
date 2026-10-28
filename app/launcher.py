@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import logging
 import re
 import shlex
 import subprocess
@@ -93,7 +94,13 @@ def open_in_terminal(repo: Path, agent: str = "", model: str = "") -> int | None
     )  # AppleScript string
     script = (f'tell application "Terminal"\nactivate\nset t to do script "{cmd}"\n'
               "return id of (first window whose selected tab is t)\nend tell")  # fmt: skip
-    r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=30)
+    try:
+        r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        # Terminal is slow (several children opening at once): the window still opens and its
+        # session connects on its own; only its id is unknown (it is not closed with the session).
+        logging.getLogger(__name__).warning("Terminal did not answer in 30 s: window id unknown")
+        return None
     if r.returncode != 0:
         raise RuntimeError((r.stderr or r.stdout).strip()[:300] or "osascript failed")
     return int(r.stdout.strip()) if r.stdout.strip().isdigit() else None
@@ -104,7 +111,10 @@ def close_terminal_window(window_id: int, wait: float = 3) -> None:
     process would ask first; after `exec` the session is the window's only process)."""
     time.sleep(wait)
     script = f'tell application "Terminal" to close (every window whose id is {int(window_id)})'
-    subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=30)
+    try:
+        subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:  # the window stays open; nothing else depends on it
+        logging.getLogger(__name__).warning("Terminal did not close window %s in 30 s", window_id)
 
 
 def open_project(root: Path, query: str, live_cwds=(), new: bool = False, token: bool = True,

@@ -158,6 +158,11 @@ class AskService:
             answered_at=now().isoformat(),
         )
         self._save(a)
+        msg = self.svc.store.get("channel_msg", a.get("message_id") or "")
+        if msg and msg.get("state") in ("pending", "queued", "delivered", "stalled"):
+            # answered some other way (the operator, another session): the holder is free again
+            self.hub._set(msg, "done")
+            self.hub._flush_pending(msg.get("project") or a["to_project"])
         if a.get("from_project"):
             self.hub.send(
                 a["from_project"],

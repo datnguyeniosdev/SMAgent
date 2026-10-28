@@ -214,3 +214,17 @@ async def test_two_busy_agents_asking_each_other_reach_the_operator(settings, cf
         orch.asks._save(rec)
     assert sorted(await orch.asks.check()) == sorted([ab["ask_id"], ba["ask_id"]])
     assert {orch.asks.get(x["ask_id"])["state"] for x in (ab, ba)} == {"escalated"}
+
+
+async def test_an_ask_answered_another_way_frees_the_session_that_holds_it(settings, cfg_dir):
+    orch, _ = make(settings, cfg_dir, [])
+    hub = orch.channel
+    a, _, _ = hub.pull(A, None, "/w/a")
+    b, _, _ = hub.pull(B, None, "/w/b")
+    ask = orch.asks.create(B, "Progress?", from_session=a.session_id)
+    _, got, _ = hub.pull(B, b.session_id)
+    assert got[0]["ask_id"] == ask["ask_id"] and hub.in_progress(b.session_id)  # B holds it: busy
+
+    orch.asks.answer(ask["ask_id"], "done", by="the operator")  # not through B's reply_message
+    assert orch.store.get("channel_msg", ask["message_id"])["state"] == "done"
+    assert hub.in_progress(b.session_id) == []  # free for its next job
