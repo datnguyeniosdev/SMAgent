@@ -1344,3 +1344,25 @@ async def test_a_child_working_through_its_pull_loop_is_not_closed_via_its_idle_
     hub._prune()  # now the whole child is idle: closed (a test session has no process to stop)
     closes = [e for e in orch.store.events() if e["type"] == "channel.close"]
     assert loop.session_id not in hub.sessions or any("cc_child" in json.dumps(e) for e in closes)
+
+
+def test_a_poll_without_cwd_never_makes_a_twin_that_takes_the_projects_work(settings, cfg_dir):
+    from tests.test_config_gateway import make
+
+    orch, _ = make(settings, cfg_dir, [])
+    hub = orch.channel
+    main, _, _ = hub.pull(PROJECT, None, "/w/main", agent="claude_code", client="app")
+    lane, _, _ = hub.pull(PROJECT, None, "/w/.agw-children/lane", agent="claude_code", client="app")
+    before = set(hub.sessions)
+    m, _ = hub.send(PROJECT, "progress?")
+
+    ghost, got, _ = hub.pull(PROJECT, None)  # no agent, no cwd: which session is unknown
+    assert got == [] and ghost.session_id not in hub.sessions and set(hub.sessions) == before
+    assert (
+        orch.store.get("channel_msg", m["message_id"])["state"] != "delivered"
+        or orch.store.get("channel_msg", m["message_id"]).get("session_id") in before
+    )
+
+    hub.disconnect(lane)
+    s, _, _ = hub.pull(PROJECT, None)  # one session left: that is the caller
+    assert s is main

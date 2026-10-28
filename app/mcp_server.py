@@ -551,6 +551,9 @@ def build_mcp_server(svc) -> MCPServer:
         if sess.closing:
             note = ("closed by the operator: do not restart the agw wait waiter, delete any recurring "
                     "get_messages job of this session (CronList, then CronDelete) and stop polling")  # fmt: skip
+        elif sess.session_id not in svc.channel.sessions:
+            note = ("several sessions of this project are open: call again with cwd (your working folder) "
+                    "and agent so the gateway knows which one you are; nothing was handed out")  # fmt: skip
         elif not sess.enabled:
             note = "this session is switched off by the operator (/on to resume); do nothing"
         elif busy:
