@@ -54,8 +54,13 @@ def failure_hook_command() -> str:
     return f'"{_agw()}" hook-failure'
 
 
+def tool_hook_command() -> str:
+    return f'"{_agw()}" hook-tool'
+
+
 HOOKS = {"SessionStart": hook_command, "UserPromptSubmit": prompt_hook_command,
-         "StopFailure": failure_hook_command}  # fmt: skip
+         "StopFailure": failure_hook_command, "PreToolUse": tool_hook_command}  # fmt: skip
+MATCHERS = {"PreToolUse": "Edit|Write|MultiEdit|NotebookEdit|Bash"}  # the main's work tools
 
 
 def _ours(entry: dict) -> bool:
@@ -130,11 +135,13 @@ def install(
     for event, cmd in HOOKS.items():  # the hint at start; a waiter check on every prompt
         hooks = data.setdefault("hooks", {}).setdefault(event, [])
         hooks[:] = [h for h in hooks if not _ours(h)]
-        hooks.append({"hooks": [{"type": "command", "command": cmd(), "timeout": 10}]})
+        entry = {"hooks": [{"type": "command", "command": cmd(), "timeout": 10}]}
+        hooks.append({"matcher": MATCHERS[event], **entry} if event in MATCHERS else entry)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + "\n")
     done.append(
-        f"{path}: gateway tools allowed, SessionStart, UserPromptSubmit and StopFailure hooks added"
+        f"{path}: gateway tools allowed, SessionStart, UserPromptSubmit, StopFailure and PreToolUse "
+        "(the main only routes) hooks added"
     )
     skill_file().parent.mkdir(parents=True, exist_ok=True)
     skill_file().write_text(skill_text())

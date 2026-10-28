@@ -359,3 +359,38 @@ def test_the_waiter_follows_its_conversation_when_it_becomes_the_main(
     assert w.wait("P", "/w/p", "app", 8000) == 0
     assert f"session_id '{own}'" in capsys.readouterr().out
     assert (tmp_path / f"{own}.json").exists() and not (tmp_path / f"{base}.json").exists()
+
+
+def test_the_tool_hook_blocks_work_in_the_main_only(tmp_path, monkeypatch, capsys):
+    import io
+
+    from app import projects
+    from app.cli import main
+
+    (tmp_path / "gems").mkdir()
+    (tmp_path / "gems/README.md").write_text("# Glazed Gems (GMA)\n")
+    (tmp_path / "gems/AGENTS.md").write_text("x")
+    monkeypatch.setattr(projects, "projects_root", lambda: tmp_path)
+    asked, role = [], {"main": True}
+
+    def urlopen(url, timeout):
+        asked.append(url)
+        return Resp(role)
+
+    monkeypatch.setattr(w.urllib.request, "urlopen", urlopen)
+
+    def run(tool, **inp):
+        ev = {"tool_name": tool, "tool_input": inp, "cwd": str(tmp_path / "gems")}
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(ev)))
+        assert main(["hook-tool"]) == 0
+        out = capsys.readouterr().out
+        return json.loads(out)["hookSpecificOutput"] if out else None
+
+    denied = run("Edit", file_path="x.py")
+    assert (
+        denied["permissionDecision"] == "deny" and "dispatch" in denied["permissionDecisionReason"]
+    )
+    assert run("Bash", command="/p/.venv/bin/agw wait --project x") is None  # its waiter still runs
+    assert run("Bash", command="rm -rf build")["permissionDecision"] == "deny"
+    role["main"] = False
+    assert run("Write", file_path="x.py") is None  # not the main: works as usual

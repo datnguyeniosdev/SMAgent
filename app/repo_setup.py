@@ -122,7 +122,10 @@ idle for 30 minutes is closed.
 the gateway (for the project, or addressed to it) says you are the main session: do not do it, call
 `dispatch(message_id, lane, brief, session_id)` (lane = the task type: ui, build, art, bugfix-login)
 and stop. The main only routes, so it is never busy when work arrives: no long work, no subagents,
-no waiting in a main turn; routing and short reports need no strong model. Children do the work, on
+no waiting in a main turn; routing and short reports need no strong model. Work the user types
+straight into the main session is routed too: `dispatch(session_id, lane, text=<what they asked>,
+brief)` hands it to a child session (a new conversation); never do it in the main. Edits and shell
+commands (other than `agw`) are blocked in the main by a hook. Children do the work, on
 Opus by default (the project may set another with /model; `model=` overrides it for one task).
 The same lane goes to its child session in order; a new lane opens a new child session in its own
 copy of the project (and branch, in a git repo). If you are a 🧭 child (opened in

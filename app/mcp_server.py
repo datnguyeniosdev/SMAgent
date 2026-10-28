@@ -690,7 +690,13 @@ def build_mcp_server(svc) -> MCPServer:
 
     @tool
     async def dispatch(
-        message_id: str, lane: str, session_id: str, brief: str = "", to: str = "", model: str = ""
+        lane: str,
+        session_id: str,
+        message_id: str = "",
+        brief: str = "",
+        to: str = "",
+        model: str = "",
+        text: str = "",
     ) -> dict[str, Any]:
         """Main session only: route a project request (one whose text says you are the main session)
         instead of doing it. lane: the task type, short (ui, build, art, bugfix-login). The open child
@@ -700,8 +706,12 @@ def build_mcp_server(svc) -> MCPServer:
         to: s# to pick an open session instead. brief: what to do and what to report, standing alone.
         model: for a new (or reopened) child only; empty = the project's child model (Opus unless
         /model set another), e.g. "sonnet" for light work. The child answers the sender itself; you
-        need not reply to the message."""
+        need not reply to the message.
+        text (no message_id): work the user typed straight into this main session: it becomes a
+        message and is routed the same way (the main never does it itself)."""
         try:
+            if not message_id:
+                message_id = svc.channel.own_request(session_id, text or brief)["message_id"]
             out = await svc.channel.dispatch(session_id, message_id, lane, brief, to, model)
             if hint := waiter_hint(svc.channel.sessions.get(session_id)):
                 out["next"] = hint

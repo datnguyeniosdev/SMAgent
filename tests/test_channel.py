@@ -1464,3 +1464,26 @@ async def test_a_shared_folder_session_never_becomes_every_conversations_main(se
     main, _ = hub.claim_main(PROJECT, "claude_code", "/w/gems", "app", "local_ok03")
     main.enabled = False  # the #Main cannot take work now (off, stalled, ...)
     assert hub.main_for(PROJECT) is None  # the folder's shared session does not stand in for it
+
+
+async def test_work_typed_into_the_main_is_routed_to_a_child_never_done_there(settings, cfg_dir):
+    from mcp.client import Client
+
+    from app.mcp_server import build_mcp_server
+    from tests.test_config_gateway import make
+
+    orch, _ = make(settings, cfg_dir, [])
+    hub = orch.channel
+    main, _ = hub.claim_main(PROJECT, "claude_code", "/w/g", "app", "local_main")
+    worker, _, _ = hub.pull(
+        PROJECT, None, "/w/g", 0, "claude_code", "app"
+    )  # the folder's shared one
+    assert hub.is_main(PROJECT, "claude_code", "/w/g", "app", "local_main")
+    assert not hub.is_main(PROJECT, "claude_code", "/w/g", "app", "local_other")
+    async with Client(build_mcp_server(orch)) as c:
+        r = (await c.call_tool("dispatch", {"session_id": main.session_id, "lane": "ui",
+                                            "text": "fix the shop button", "to": f"s{worker.num}"})).structured_content  # fmt: skip
+    assert r  # routed
+    _, got, _ = hub.pull(PROJECT, worker.session_id)
+    assert got and "fix the shop button" in got[0]["text"]
+    assert hub.in_progress(main.session_id) == []  # the main holds nothing: free to route

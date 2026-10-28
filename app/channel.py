@@ -1111,6 +1111,33 @@ class ChannelHub:
                              delivered_to=target and target.session_id)  # fmt: skip
         return msg, target
 
+    def own_request(self, session_id: str, text: str) -> dict:
+        """Work the user typed straight into the main session: a message of its own, held by the
+        main, for dispatch to hand to a child (the main only routes)."""
+        s = self.sessions.get(session_id)
+        if s is None:
+            raise ValueError(f"unknown session {session_id}: call get_messages first")
+        if not text.strip():
+            raise ValueError("text: the request the user typed")
+        msg = {"message_id": new_id("chm"), "project": s.project, "text": text.strip(),
+               "meta": {"source": "session", "sender": "the user (in the main session)",
+                        "project": s.project}, "created_at": now().isoformat()}  # fmt: skip
+        msg["meta"]["message_id"] = msg["message_id"]
+        msg["num"] = self._number("channel_mnum", msg["message_id"])
+        self.delivered(msg, session_id)
+        return msg
+
+    def is_main(
+        self, project: str, agent: str, cwd: str, client: str = "", instance: str = ""
+    ) -> bool:
+        """Whether this conversation is its project's main (PreToolUse hook: the main only routes)."""
+        main = self.main_for(project)
+        ids = {
+            self.pull_id(project, agent, cwd, client),
+            self.pull_id(project, agent, cwd, client, instance),
+        }
+        return main is not None and main.session_id in ids
+
     def _set(self, msg: dict, state: str) -> None:
         msg["state"] = state
         self.svc.store.put("channel_msg", msg["message_id"], msg, state=state)

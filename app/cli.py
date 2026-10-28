@@ -593,6 +593,51 @@ def cmd_hook_prompt(args) -> int:
     return 0
 
 
+ROUTER_ONLY = (
+    "Blocked: this conversation is its project's 👑 main session, which only routes. Do not do the "
+    "work here: hand it to a child session with the agent-gateway tool dispatch(session_id=<yours>, "
+    "lane=<task type>, text=<what the user asked>, brief=<what to do and report>), or to a subagent "
+    "for a quick read-only question. Bash here runs only `agw` (waiter, main)."
+)
+
+
+def cmd_hook_tool(args) -> int:
+    """PreToolUse hook (global): the project's main conversation only routes, so its edits and
+    shell commands (other than agw itself) are denied. Silent and allowed outside a main, or when
+    the gateway does not answer: a hook never blocks an agent by failing."""
+    import urllib.parse
+    import urllib.request
+
+    from app.config import ENV_PORTS
+    from app.projects import client_kind, project_for
+    from app.waiter import instance
+
+    try:
+        event = json.loads(sys.stdin.read() or "{}")
+    except ValueError:
+        return 0
+    if event.get("tool_name") == "Bash" and re.search(
+        r"(^|/|\s)agw\s", (event.get("tool_input") or {}).get("command", "")
+    ):
+        return 0
+    cwd = event.get("cwd") or str(Path.cwd())
+    project = project_for(Path(cwd))
+    if not project:
+        return 0
+    query = urllib.parse.urlencode({"project": project, "agent": "claude_code", "cwd": cwd,
+                                    "client": client_kind(), "instance": instance()})  # fmt: skip
+    try:
+        url = f"http://127.0.0.1:{ENV_PORTS['prod']}/api/v1/channel/role?{query}"
+        with urllib.request.urlopen(url, timeout=3) as r:  # noqa: S310 - fixed local URL
+            main = json.loads(r.read()).get("main")
+    except (OSError, ValueError):
+        return 0
+    if main:
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                          "permissionDecision": "deny", "permissionDecisionReason": ROUTER_ONLY}}))  # fmt: skip
+    return 0
+
+
 def cmd_hook_failure(args) -> int:
     """StopFailure hook (global): the turn ended on an API error (rate limit, billing, overload...).
     The session's unanswered Telegram work goes to the operator to move, wait for, or cancel."""
@@ -910,6 +955,7 @@ def main(argv: list[str] | None = None) -> int:
     sp.set_defaults(fn=cmd_hook_session_start)
     sub.add_parser("hook-prompt").set_defaults(fn=cmd_hook_prompt)  # UserPromptSubmit
     sub.add_parser("hook-failure").set_defaults(fn=cmd_hook_failure)  # StopFailure
+    sub.add_parser("hook-tool").set_defaults(fn=cmd_hook_tool)  # PreToolUse: the main only routes
     sub.add_parser("codex-hook").set_defaults(fn=cmd_codex_hook)  # Codex SessionStart/End
     sub.add_parser("cursor-hook").set_defaults(fn=cmd_cursor_hook)  # Cursor sessionStart/stop
     sp = sub.add_parser("wait")  # pull loop run in the background (app/waiter.py)

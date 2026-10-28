@@ -929,6 +929,15 @@ async def channel_main(
     return {"main": s.session_id, "project": s.project}
 
 
+@app.get("/api/v1/channel/role", include_in_schema=False)
+async def channel_role(
+    request: Request, project: str, agent: str, cwd: str, client: str = "", instance: str = ""
+):
+    """PreToolUse hook: is this conversation its project's main (which only routes)?"""
+    _local_only(request)
+    return {"main": request.app.state.orch.channel.is_main(project, agent, cwd, client, instance)}
+
+
 class TurnIn(BaseModel):
     project: str = Field(max_length=200)
     agent: str = Field(max_length=40)
