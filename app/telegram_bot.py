@@ -1023,8 +1023,9 @@ class TelegramGateway:
                 "ask_tg", f"c:{self.s.telegram_control_chat_id}:{msg.message_id}", {"ask_id": k}
             )
 
-    async def send_question(self, hi, html: str) -> None:
-        """An agent's question for the operator, with one button per option; raises when Telegram refuses."""
+    async def send_question(self, hi, html: str) -> int:
+        """An agent's question for the operator, with one button per option; raises when Telegram
+        refuses. Returns the Telegram message id (its buttons go once it is answered)."""
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=o[:60], callback_data=f"h:{hi.request_id}:{i}")]
             for i, o in enumerate(hi.options)
@@ -1041,6 +1042,16 @@ class TelegramGateway:
                                reply_markup=kb)  # fmt: skip
         if msg is None:
             raise RuntimeError("Telegram did not take the question")
+        return msg.message_id
+
+    async def drop_buttons(self, message_ids: list[int]) -> None:
+        """An answered question: its copies in the control group keep the text, lose the buttons."""
+        for mid in message_ids:
+            try:
+                await self.bot.edit_message_reply_markup(chat_id=self.s.telegram_control_chat_id,
+                                                         message_id=mid, reply_markup=None)  # fmt: skip
+            except Exception as e:  # noqa: BLE001 - already without buttons, or too old to edit
+                log.info("buttons of message %s stay: %s", mid, type(e).__name__)
 
     async def _ask_passcode(self, q: CallbackQuery, request_id: str) -> None:
         """✅ on a secure question: the passcode is asked for in a private chat (like /keys), never in

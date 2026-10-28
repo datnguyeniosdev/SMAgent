@@ -7,6 +7,7 @@ human_input, handoff, telegram_update).
 
 from __future__ import annotations
 
+import asyncio
 import fnmatch
 import hashlib
 import json
@@ -77,6 +78,9 @@ AUTO_ANSWER = (
 )
 
 
+_BG: set = set()  # button removals in flight (kept referenced)
+
+
 class HumanInput(BaseModel):
     request_id: str = Field(default_factory=lambda: new_id("hin"))
     task_id: str | None = None
@@ -96,6 +100,9 @@ class HumanInput(BaseModel):
     )
     attempts: int = 0  # wrong passcodes so far (3: cancelled, never approved)
     auto: bool = False  # forwarded by the gateway from the agent's own chat (turn-end hook)
+    tg_messages: list[
+        int
+    ] = []  # its Telegram copies (first post, reminders): buttons go once answered
 
 
 _ASKS = re.compile(
@@ -906,7 +913,11 @@ class CollaborationService:
             )  # fmt: skip
         n = self.svc.notifier
         if hasattr(n, "send_question"):
-            await n.send_question(hi, html)
+            if mid := await n.send_question(hi, html):
+                hi.tg_messages.append(mid)
+                self.store.put(
+                    "human_input", hi.request_id, hi, task_id=hi.task_id, state=hi.status
+                )
         elif anchor is not None:
             await n.report(anchor, html, control=True)
         elif hasattr(n, "send_control"):
@@ -954,6 +965,7 @@ class CollaborationService:
         hi.status, hi.responder, hi.answered_at = "answered", "session", now()
         hi.response = f"(trả lời trong session) {answer.strip()[:300]}"
         self.store.put("human_input", hi.request_id, hi, task_id=hi.task_id, state=hi.status)
+        self._drop_buttons(hi)
         self.store.event("human_input.closed_in_session", task_id=hi.task_id, request_id=request_id)
         n = self.svc.notifier
         if hasattr(n, "send_control"):
@@ -990,9 +1002,25 @@ class CollaborationService:
         hi.status, hi.responder, hi.answered_at = "cancelled", responder, now()
         hi.response = "❌ Cancelled: 3 wrong passcodes on Telegram"
         self.store.put("human_input", hi.request_id, hi, task_id=hi.task_id, state=hi.status)
+        self._drop_buttons(hi)
         self._tell_asker(hi, f"❌ Your question {request_id} is cancelled: 3 wrong passcodes on Telegram. "
                          "It is NOT approved: do not do it. Drop that step and report it as not done.")  # fmt: skip
         return "cancelled"
+
+    def _drop_buttons(self, hi: HumanInput) -> None:
+        """Answered (on Telegram, in the session, by auto-accept) or cancelled: its Telegram copies
+        lose their buttons, so nobody answers it twice. In the background; a failure is ignored."""
+        drop = getattr(self.svc.notifier, "drop_buttons", None)
+        if not hi.tg_messages or drop is None:
+            return
+        try:
+            task = asyncio.get_running_loop().create_task(drop(list(hi.tg_messages)))
+        except (
+            RuntimeError
+        ):  # no loop (a sync caller): the buttons stay, answering again is refused
+            return
+        _BG.add(task)
+        task.add_done_callback(_BG.discard)
 
     def _tell_asker(self, hi: HumanInput, text: str, responder: str = "gateway") -> None:
         """Push to the agent session that asked (it is woken), else its project's session."""
@@ -1035,6 +1063,7 @@ class CollaborationService:
         self.store.event(
             "human_input.answered", task_id=hi.task_id, request_id=request_id, by=responder
         )
+        self._drop_buttons(hi)
         # the asker gets it without polling
         self._tell_asker(hi, f"💬 The operator answered your question {request_id}:\n{hi.response}",
                          responder)  # fmt: skip

@@ -306,7 +306,8 @@ async def test_question_answered_in_session_closes_the_telegram_copy(settings, c
     async with Client(build_mcp_server(orch)) as c:
         out = (await c.call_tool("close_question", {"request_id": hi.request_id,
                                                     "answer": "Có, merge đi"})).structured_content  # fmt: skip
-    assert out["status"] == "answered" and "trả lời trong session" in gw.bot.sent[-1][1]["text"]
+    said = [kw["text"] for kind, kw, _ in gw.bot.sent if kind == "message"]
+    assert out["status"] == "answered" and "trả lời trong session" in said[-1]
     rec = HumanInput.model_validate(orch.store.get("human_input", hi.request_id))
     rec.created_at -= timedelta(hours=1)
     orch.store.put("human_input", hi.request_id, rec, state=rec.status)

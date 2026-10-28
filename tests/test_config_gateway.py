@@ -99,6 +99,10 @@ class Bot:
     async def send_document(self, **kw):
         return await self._send("document", **kw)
 
+    async def edit_message_reply_markup(self, **kw):
+        self.sent.append(("markup", kw, kw.get("message_id")))
+        return True
+
 
 def gateway(orch):
     gw = TelegramGateway(orch.s, orch, orch.attachments, orch.actions, bot=Bot())

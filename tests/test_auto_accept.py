@@ -67,3 +67,32 @@ async def test_auto_accept_needs_the_passcode_and_answers_every_question_while_o
         "SELECT body FROM records UNION ALL SELECT body FROM events"
     ).fetchall()
     assert not any("Pa55-kode!" in r[0] for r in rows)
+
+
+async def test_an_answered_question_loses_its_telegram_buttons(settings, cfg_dir):
+    import asyncio
+
+    orch, _ = make(settings, cfg_dir, [])
+    gw = gateway(orch)
+    s, _, _ = orch.channel.pull(A, None)
+    collab = orch.collab
+
+    def dropped():
+        return [kw["message_id"] for kind, kw, _ in gw.bot.sent if kind == "markup"]
+
+    on_tg = await collab.request_human_input(
+        "Màu?", options=["Xanh", "Đỏ"], project=A, session_id=s.session_id
+    )
+    mid = gw.bot.sent[-1][2]
+    assert collab.get_human_input(on_tg.request_id).tg_messages == [mid]
+    collab.answer_human_input(on_tg.request_id, "Xanh", "1")  # a button on Telegram
+    await asyncio.sleep(0)
+    assert dropped() == [mid]
+
+    in_app = await collab.request_human_input(
+        "Commit?", project=A, session_id=s.session_id, secure=True
+    )
+    mid2 = gw.bot.sent[-1][2]
+    await collab.close_human_input(in_app.request_id, "yes, in the session")  # answered in the app
+    await asyncio.sleep(0)
+    assert dropped() == [mid, mid2]
