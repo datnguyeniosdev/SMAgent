@@ -768,6 +768,17 @@ def cmd_main(args) -> int:
     return 0
 
 
+def cmd_mcp_stdio(args) -> int:
+    """The gateway's MCP tools over stdio for a Claude Code session; reconnects after a restart."""
+    import asyncio
+
+    from app.config import ENV_PORTS, env_name
+    from app.mcp_proxy import serve
+
+    asyncio.run(serve(args.url or f"http://127.0.0.1:{ENV_PORTS[env_name()]}/mcp"))
+    return 0
+
+
 def cmd_wait(args) -> int:
     from app.config import ENV_PORTS, env_name
     from app.projects import project_for
@@ -1000,6 +1011,9 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--client", default="")
     sp.add_argument("--agent", default="claude_code", choices=["claude_code", "antigravity"])
     sp.set_defaults(fn=cmd_wait)
+    sp = sub.add_parser("mcp-stdio")  # Claude Code's agent-gateway MCP: a proxy that reconnects
+    sp.add_argument("--url", default="")
+    sp.set_defaults(fn=cmd_mcp_stdio)
     sp = sub.add_parser("main")  # #Main: this conversation becomes its project's pinned main
     sp.add_argument("--project", default="")
     sp.add_argument("--cwd", default=".")

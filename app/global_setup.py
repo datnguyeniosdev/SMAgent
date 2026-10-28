@@ -148,18 +148,12 @@ def install(
     done.append(f"skill: {skill_file()}")
     if register_mcp:
         _claude("mcp", "remove", "agent-gateway", "--scope", "user")
-        header = ["--header", f"Authorization: Bearer {token}"] if token else []
-        r = _claude(
-            "mcp",
-            "add",
-            "--transport",
-            "http",
-            "--scope",
-            "user",
-            "agent-gateway",
-            gateway_url,
-            *header,
-        )
+        if token:  # ponytail: the stdio proxy sends no token; with one, HTTP (no reconnect)
+            r = _claude("mcp", "add", "--transport", "http", "--scope", "user", "agent-gateway",
+                        gateway_url, "--header", f"Authorization: Bearer {token}")  # fmt: skip
+        else:  # over a stdio proxy that reconnects when the gateway restarts (HTTP alone does not)
+            r = _claude("mcp", "add", "--scope", "user", "agent-gateway", "--",
+                        str(_agw()), "mcp-stdio", "--url", gateway_url)  # fmt: skip
         done.append(
             "user MCP agent-gateway "
             + ("registered" if r and r.returncode == 0 else "NOT registered")

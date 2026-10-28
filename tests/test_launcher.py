@@ -278,3 +278,38 @@ def test_a_child_session_starts_with_a_prompt_to_fetch_its_work(tmp_path, monkey
     assert argv.index(prompt) < argv.index("--dangerously-load-development-channels")
     cli.main(["session", "--continue"])  # resuming: no new prompt
     assert not any(a.startswith("agent-gateway opened") for a in ran[-1])
+
+
+async def test_the_mcp_proxy_reconnects_while_the_gateway_restarts(monkeypatch):
+    from app import mcp_proxy
+
+    opened, up = [], {"n": 0}
+
+    class FakeClient:
+        def __init__(self, url):
+            opened.append(url)
+
+        async def __aenter__(self):
+            up["n"] += 1
+            if up["n"] < 3:  # down twice: the restart
+                raise OSError("connection refused")
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def list_tools(self):
+            return "tools"
+
+    monkeypatch.setattr(mcp_proxy, "Client", FakeClient)
+    monkeypatch.setattr(mcp_proxy.anyio, "sleep", lambda s: _noop())
+    backend = mcp_proxy.Backend("http://127.0.0.1:8000/mcp")
+    async with mcp_proxy.anyio.create_task_group() as tg:
+        tg.start_soon(backend.run)
+        assert await backend.call(lambda c: c.list_tools()) == "tools"
+        assert len(opened) == 3 and backend.client is not None
+        tg.cancel_scope.cancel()
+
+
+async def _noop():
+    return None
