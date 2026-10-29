@@ -384,6 +384,8 @@ def cmd_repo_setup(args) -> int:
                 "no .mcp.json / local settings: games made from it run `agw setup --repo` themselves)"
             )
             continue
+        kind = _project_kind(r["project"], getattr(args, "kind", None))
+        print(f"   {r['project']!r} is a {kind} project")
         ignored = (
             subprocess.run(
                 ["git", "-C", str(repo), "check-ignore", "-q", ".claude/settings.local.json"]
@@ -400,6 +402,22 @@ def cmd_repo_setup(args) -> int:
     else:
         print("MCP_REQUIRE_TOKEN=false: local sessions connect without a token (restart them).")
     return 0
+
+
+def _project_kind(project: str, kind: str | None) -> str:
+    """The project's type in the gateway registry: set when given, else kept (new projects are
+    products). Written to the gateway's own store, which it reads per request."""
+    from app.project_registry import ProjectRegistry
+    from app.store import Store
+
+    s = _settings()
+    store = Store(s.state_db if s.state_db == ":memory:" else s.data_dir / s.state_db)
+    try:
+        reg = ProjectRegistry(store)
+        p = reg.ensure(project)
+        return (reg.set_kind(p.project_id, kind) if kind else p).kind
+    finally:
+        store.close()
 
 
 CHANNEL_NAME = "agent-gateway-channel"
@@ -623,10 +641,17 @@ def _own_session(project: str, cwd: str, client: str, inst: str) -> str | None:
     try:
         url = f"http://127.0.0.1:{ENV_PORTS['prod']}/api/v1/channel/role?{query}"
         with urllib.request.urlopen(url, timeout=3) as r:  # noqa: S310 - fixed local URL
-            sid = json.loads(r.read()).get("session_id")
+            role = json.loads(r.read())
     except (OSError, ValueError):
         return None
-    return sid if sid and sid != ChannelHub.pull_id(project, "claude_code", cwd, client) else None
+    sid = role.get("session_id")
+    if (
+        not role.get("main")
+        or not sid
+        or sid == ChannelHub.pull_id(project, "claude_code", cwd, client)
+    ):
+        return None  # not the main (any more): nothing to say
+    return sid
 
 
 ROUTER_ONLY = (
@@ -915,6 +940,9 @@ def main(argv: list[str] | None = None) -> int:
 
     def repo_args(sp, required: bool):
         sp.add_argument("--project", help="project name (single repo only; default: from README)")
+        sp.add_argument("--kind", choices=["product", "tool"], default=None,
+                        help="product (default for a new project): one worker on the code, deploys in "
+                        "fresh sessions; tool: requests run in parallel sessions")  # fmt: skip
         sp.add_argument("--template", action="store_true",
                         help="template repo: CLAUDE.md block only, placeholder project, no machine files")  # fmt: skip
         if required:

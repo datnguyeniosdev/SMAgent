@@ -69,7 +69,8 @@ HELP = (
 /close &lt;s#&gt; · /off &lt;s#&gt; · /on &lt;s#&gt; — close a session, or stop/resume giving it work
 /children prune &lt;lane&gt; — delete a closed 🧭 child's folder (its branch stays), confirmed
 /list all — also idle projects' details and closed lanes · /forget &lt;p#&gt; — drop an old project name
-/route [p# central|main] — who routes a project's work: the gateway (central) or its own main
+/route [p# central|main|tool|product] — who routes a project's work (the gateway or its own main)
+  and how it runs (tool: parallel sessions; product: lane dev in order, deploy and qa apart)
 /auto — 🌙 auto-accept on/off: while you are away every question is answered (secure ones approved,
   else the first option); switching on takes the passcode
 /main [p#] &lt;s#&gt; — pin it as its project's 👑 main session (routes project requests to 🧭 child
@@ -942,6 +943,16 @@ class TelegramGateway:
             return
         hub = self.orch.channel
         args = (command.args or "").split()
+        if len(args) == 2 and args[1] in ("tool", "product"):
+            name = hub.resolve_project(args[0])
+            if name is None:
+                await say(m, "Unknown project (projects: /list)")
+                return
+            p = hub.registry.set_kind(hub.registry.ensure(name).project_id, args[1])
+            how = ("its requests run in parallel" if p.kind == "tool"
+                   else "lane dev in order; deploy and qa in lanes of their own")  # fmt: skip
+            await say(m, f"🧭 <b>{escape(p.name)}</b> is a {p.kind}: {how}")
+            return
         if len(args) == 2 and args[1] in ("central", "main"):
             name = hub.resolve_project(args[0])
             if name is None:
@@ -953,13 +964,15 @@ class TelegramGateway:
             await say(m, f"🧭 <b>{escape(p.name)}</b>: {how}")
             return
         gw = hub.gateway_agent()
-        modes = {p.name: p.routing_mode for p in hub.registry.all()}
+        modes = {p.name: f"{p.routing_mode} · {p.kind}" for p in hub.registry.all()}
         rows = [
             f"p{num} {escape(name)} · <b>{modes.get(name, 'main')}</b>"
             for num, name in hub.projects()
         ]
         head = f"🧭 Gateway Agent: {escape(hub._label(gw)) if gw else 'offline'}"
-        await say(m, "\n".join([head, *rows, "", "/route p# central|main"]))
+        await say(
+            m, "\n".join([head, *rows, "", "/route p# central|main · /route p# tool|product"])
+        )
 
     async def on_open(self, m: TgMessage, command: CommandObject):
         """/open <folder|p#> [new]: start a Claude Code session for a project folder on this Mac.

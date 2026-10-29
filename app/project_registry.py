@@ -15,6 +15,9 @@ from pydantic import BaseModel, Field
 from app.models import new_id, now
 
 RoutingMode = Literal["main", "central"]
+# product: a game/app repo, one worker at a time on its code (lane dev), deploy and QA test in lanes
+# of their own; tool: an agent project (UIUX, PO, QA, research) whose requests run in parallel
+ProjectKind = Literal["product", "tool"]
 
 
 def norm(text: str) -> str:
@@ -27,6 +30,7 @@ class Project(BaseModel):
     name: str
     aliases: list[str] = []  # earlier names
     routing_mode: RoutingMode = "main"
+    kind: ProjectKind = "product"
     root: str = ""  # the project folder (from its sessions): lanes are copied from here
     created_at: datetime = Field(default_factory=now)
 
@@ -82,6 +86,13 @@ class ProjectRegistry:
         if not p.root or (len(root) < len(p.root) and p.root.startswith(root + "/")):
             p.root = root
             self._save(p)
+
+    def set_kind(self, ref: str, kind: ProjectKind) -> Project:
+        p = self.resolve(ref)
+        if p is None:
+            raise KeyError(ref)
+        p.kind = kind
+        return self._save(p)
 
     def set_routing_mode(self, ref: str, mode: RoutingMode) -> Project:
         p = self.resolve(ref)

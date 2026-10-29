@@ -553,6 +553,19 @@ class ChannelHub:
         """The child record of a session opened by dispatch (lane, branch, worktree), else None."""
         return self.svc.store.get("channel_child", s.cwd) if s.cwd else None
 
+    def adopt(self, s: LiveSession, lane: str) -> dict:
+        """A conversation in the project's own folder (a former main) becomes a worker of `lane`:
+        it gets that lane's work like a child, but it is never closed for idling or pruned, and
+        nothing is fetched back (it works in the project itself)."""
+        if self.main_for(s.project) is s:
+            self.svc.store.put("channel_main", _norm(s.project), {"project": s.project})
+        root = s.cwd.split("/.claude/worktrees/")[0]
+        rec = {"project": s.project, "lane": _lane_name(lane), "branch": "", "repo": root,
+               "path": s.cwd, "agent": s.agent or "claude_code", "provider": "adopted",
+               "created_at": now().isoformat()}  # fmt: skip
+        self.svc.store.put("channel_child", s.cwd, rec)
+        return rec
+
     def set_main(self, s: LiveSession, flush: bool = True, pin: bool | None = None) -> None:
         """/main s# (pin=True: the operator's choice, never replaced automatically), or the first
         session of a project: it routes the project's work. pin=None keeps the project's pin.
@@ -806,6 +819,8 @@ class ChannelHub:
             raise ValueError(f"no child folder {path}")
         if c.get("deleted"):
             return "already deleted"
+        if c.get("provider") == "adopted":
+            raise ValueError("this is the project's own folder (an adopted worker), never deleted")
         if any(
             x.cwd == path or x.cwd.startswith(path + "/") for x in self.sessions.values() if x.cwd
         ):
@@ -915,40 +930,92 @@ class ChannelHub:
         return None
 
     def _route_central(self, msg: dict, exclude: str | None) -> LiveSession | None:
-        """The gateway places the work itself: a rule's lane (its open child, or a child opened or
-        reopened for it), else the Gateway Agent, which reads it and calls dispatch."""
+        """The gateway places the work: a lane named on it or by a rule; else the Gateway Agent reads
+        it and calls dispatch; with the Gateway Agent offline, the gateway picks the lane itself
+        (default_lane), so no request waits for a router."""
         if msg.get("routing") == "opening":
             return None  # its child is being opened: it is handed over when it connects
         lane = self.rule_lane(msg)
-        if lane:
-            msg["lane"] = lane
-            kids = [x for x in self.sessions.values() if x.deliverable and x.session_id != exclude
-                    and _norm(x.project) == _norm(msg["project"])
-                    and (self.child(x) or {}).get("lane") == lane]  # fmt: skip
-            if kids:
-                kid = max(kids, key=lambda x: x.mode == "push")
-                self._tag(kid.cwd, msg)
-                return kid
-            msg["routing"] = "opening"
-            self._set(msg, "pending")
-            self._spawn(self._open_for(msg, lane))
-            return None
-        gw = self.gateway_agent()
-        if gw is None or gw.session_id == exclude:
-            if "gateway" not in self._main_asked:
+        gw = None if lane else self.gateway_agent()
+        if gw is not None and gw.session_id != exclude:
+            if not msg.get("orig_text"):
+                msg["orig_text"], msg["route"] = msg["text"], True
+                msg["text"] += self._gateway_note(msg)
+            return gw
+        if lane is None:
+            lane = self.default_lane(msg)
+            if "gateway" not in self._main_asked:  # said once; the work does not wait for it
                 self._main_asked.add("gateway")
                 self._notify("send_main_offline", getattr(self.svc.s, "gateway_agent_project", ""))
-            return None
-        if not msg.get("orig_text"):
-            msg["orig_text"], msg["route"] = msg["text"], True
-            msg["text"] += (
-                f"\n\n(You are the Gateway Agent; this request is for the project {msg['project']}, "
-                "which the gateway routes centrally. Do not do it yourself: call dispatch(message_id="
-                f"'{msg['message_id']}', lane=<task type, e.g. ui, build, art, qa>, brief=<what to do "
-                "and what to report>, session_id=<yours>). The lane's child session works in that "
-                f"project's own copy and answers the sender itself. {self.lanes_note(msg['project'])})"
-            )
-        return gw
+        msg["lane"] = lane
+        kid = self._pick_child(msg["project"], lane, exclude, prefer=msg.get("lane_path"))
+        if kid is not None:
+            self._tag(kid.cwd, msg)
+            return kid
+        msg["routing"] = "opening"
+        self._set(msg, "pending")
+        self._spawn(self._open_for(msg, lane))
+        return None
+
+    def kind(self, project: str) -> str:
+        p = self.registry.resolve(project)
+        return p.kind if p else "product"
+
+    def default_lane(self, msg: dict) -> str:
+        """The lane when nobody reads the request: a tool project's shared task lane; a product's
+        deploy or qa lane when the request says so, else its dev lane (one worker on the code)."""
+        if self.kind(msg["project"]) == "tool":
+            return "task"
+        text = msg.get("orig_text") or msg.get("text", "")
+        if re.search(
+            r"(?i)\b(deploy|release|publish|testflight|build (ipa|apk|aab))\b|triển khai|phát hành",
+            text,
+        ):
+            return "deploy"
+        if re.search(r"(?i)\b(qa|test|retest|uat)\b|kiểm thử", text):
+            return "qa"
+        return "dev"
+
+    def _gateway_note(self, msg: dict) -> str:
+        project = msg["project"]
+        policy = (
+            "It is a tool agent: its requests run in parallel, so pick a lane by topic (a new topic "
+            "can get a new lane)."
+            if self.kind(project) == "tool"
+            else "It is a product: code work goes to lane dev (one worker, in order), building, "
+            "release and deploy to lane deploy, QA testing to lane qa, so they never block dev."
+        )
+        return (
+            f"\n\n(You are the Gateway Agent; this request is for the project {project}. Do not do it "
+            f"yourself: call dispatch(message_id='{msg['message_id']}', lane=<lane>, brief=<what to do "
+            f"and what to report>, session_id=<yours>). {policy} The lane's session works in that "
+            f"project's own folder and answers the sender itself. {self.lanes_note(project)})"
+        )
+
+    def _pick_child(self, project: str, lane: str, exclude: str | None = None,
+                    prefer: str | None = None) -> LiveSession | None:  # fmt: skip
+        """The open session to give a lane's work to, or None to open (or reopen) one. A product's
+        lane has one worker, which takes its work in order. A tool project's lane prefers an idle
+        session, opens another while the project has fewer than Settings.tool_parallel open, and
+        beyond that queues behind the least loaded one."""
+        main = self.main_for(project)
+        kids = [x for x in self.sessions.values() if x.deliverable and x.session_id != exclude
+                and x is not main and _norm(x.project) == _norm(project) and self.child(x)]  # fmt: skip
+        same = [x for x in kids if self.child(x).get("lane") == lane]
+        if prefer and (mine := [x for x in same if x.cwd == prefer]):
+            same = mine
+        if self.kind(project) != "tool":
+            if lane == "deploy":
+                return None  # a product deploy builds in a fresh copy of the code as it is now
+            return max(same, key=lambda x: x.mode == "push", default=None)
+        if idle := [x for x in same if self._idle(x)]:
+            return max(idle, key=lambda x: x.mode == "push")
+        cap = int(getattr(getattr(self.svc, "s", None), "tool_parallel", 3) or 3)
+        if len({x.cwd for x in kids}) < cap:
+            return None  # room for one more session
+        pool = same or kids
+        load = lambda x: x.queue.qsize() + len(self.in_progress(x.session_id))  # noqa: E731
+        return min(pool, key=load, default=None)
 
     def _spawn(self, coro) -> None:
         try:
@@ -1042,8 +1109,7 @@ class ChannelHub:
             if target is None:
                 raise ValueError(f"{to} is not an open session of {msg['project']}")
         else:
-            same = [x for x in kids if (self.child(x) or {}).get("lane") == lane]
-            target = max(same, key=lambda x: x.mode == "push", default=None)
+            target = self._pick_child(msg["project"], lane, by, prefer=msg.get("lane_path"))
         for x in self.sessions.values():  # still queued somewhere (a main): taken out first
             for m in [m for m in x.queue._queue if m["message_id"] == msg["message_id"]]:
                 self._take(x, m)
@@ -1061,9 +1127,16 @@ class ChannelHub:
             self._ops(f"🧭 m{msg.get('num')} → {self._label(target)} ({lane})")
             return {"to": f"s{target.num}", "lane": lane, "new_session": False}
         self._set(msg, "pending")  # held for the new child (wait_cwd below)
-        old = next((c for c in self.children(msg["project"])
-                    if c["lane"] == lane and c["status"] == "closed"), None)  # fmt: skip
+        fresh = lane == "deploy" and self.kind(msg["project"]) != "tool"  # never an old copy
+        closed = [c for c in self.children(msg["project"])
+                  if c["lane"] == lane and c["status"] == "closed" and not fresh]  # fmt: skip
+        old = next((c for c in closed if c["path"] == msg.get("lane_path")), None) or next(
+            iter(closed), None
+        )
         if old is not None:  # the lane's child closed: reopen it on its folder, no new copy
+            # its new session has the old one's id: a close still pending for that id would stop it
+            self._stopping -= {sid for sid, r in self.svc.store.items("channel_session")
+                               if r.get("cwd") == old["path"]}  # fmt: skip
             self._tag(old["path"], msg)
             if model:  # reopened with another model: it keeps that one
                 self.svc.store.put("channel_child", old["path"], {**old, "model": model})
@@ -1110,6 +1183,13 @@ class ChannelHub:
                            "agent": agent or "claude_code", "created_at": now().isoformat(),
                            "base": base, "target": target, "provider": provider})  # fmt: skip
         self._tag(str(path), msg)
+        if fresh:
+            msg["text"] += (
+                f"\n\n(Deploy session: this folder is a fresh copy of {msg['project']} at commit "
+                f"{(base or 'the current files')[:12]}, made for this deploy only. Build, test and deploy "
+                "from it; do not change the project's main folder or other lanes. When done, report "
+                "the result yourself (reply_message / submit_report with the build link).)"
+            )
         msg["wait_cwd"], msg["waiting_since"] = str(path), now().isoformat()
         self._set(msg, "pending")
         await asyncio.to_thread(_trust, path, repo)
@@ -1194,7 +1274,9 @@ class ChannelHub:
         cutoff = now() - CHILD_IDLE
         for s in list(self.sessions.values()):
             c = self.child(s)
-            if c is None:
+            if (
+                c is None or c.get("provider") == "adopted"
+            ):  # a user's own conversation: never closed
                 continue
             # a Terminal child is a push session plus its pull loop, one Claude process: the work goes
             # to either, so the child is idle only when all of them are (seen in prod: the push twin
@@ -1266,6 +1348,11 @@ class ChannelHub:
         msg["pinned"] = pinned  # for that session: it waits its turn there
         if pinned:
             msg["for_session"] = target.session_id  # kept across a restart (the queue is in memory)
+        elif session_id and (c := self.svc.store.get("channel_child", rec.get("cwd") or "")):
+            # for a lane session that is gone: its lane, in its own folder (reopened), keeps the work
+            # and its context instead of starting over somewhere else
+            msg.setdefault("lane", c["lane"])
+            msg.setdefault("lane_path", c["path"])
         if not pinned:
             target = self._route(msg, exclude=exclude)
         elif msg.get("kind") != "answer" and target is self.main_for(target.project):
@@ -1884,6 +1971,8 @@ def _fetch_back(child: dict) -> bool:
     """A clone's branch into the project repo (`git fetch`), so it can be reviewed and merged
     there; the project folder's files are not touched. A worktree's branch is already there."""
     path, repo = Path(child["path"]), Path(child.get("repo") or "")
+    if child.get("provider") == "adopted" or path.resolve() == repo.resolve():
+        return False  # the project's own folder: nothing to fetch
     if not (path / ".git").is_dir() or not (repo / ".git").exists():
         return False
     out = subprocess.run(["git", "-C", str(repo), "fetch", "-q", str(path),

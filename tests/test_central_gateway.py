@@ -184,6 +184,132 @@ async def test_the_operator_moves_a_project_between_main_and_central_routing(set
     assert "the gateway routes it" in answers[-1]
     assert orch.channel.registry.resolve(A).routing_mode == "central"
     await gw.on_route(*cmd(""))
-    assert "Gateway Agent: offline" in answers[-1] and "<b>central</b>" in answers[-1]
+    assert "Gateway Agent: offline" in answers[-1] and "<b>central · product</b>" in answers[-1]
     await gw.on_route(*cmd("p1 main"))
     assert orch.channel.registry.resolve(A).routing_mode == "main"
+
+
+def no_router_setup(settings, cfg_dir, tmp_path, monkeypatch, kind):
+    """A central project with no Gateway Agent online: the gateway places everything itself."""
+    from app import channel as ch
+    from app import projects
+
+    game = tmp_path / "game"
+    game.mkdir()
+    (game / "README.md").write_text(f"# {A}\n")
+    monkeypatch.setattr(projects, "projects_root", lambda: tmp_path)
+    monkeypatch.setattr(ch, "CLAUDE_JSON", tmp_path / "claude.json")
+    orch, _ = make(settings, cfg_dir, [])
+    hub, opened = orch.channel, []
+    hub.launch = lambda path, agent, model="": opened.append(path)
+    hub.registry.note_root(A, str(game))
+    hub.registry.set_routing_mode(A, "central")
+    hub.registry.set_kind(A, kind)
+    return orch, hub, game, opened
+
+
+async def settle(opened, n):
+    import asyncio
+
+    for _ in range(100):
+        if len(opened) >= n:
+            return
+        await asyncio.sleep(0.02)
+
+
+async def test_a_tool_project_runs_up_to_three_sessions_in_parallel_then_queues(
+    settings, cfg_dir, tmp_path, monkeypatch
+):
+    orch, hub, game, opened = no_router_setup(settings, cfg_dir, tmp_path, monkeypatch, "tool")
+    kids = []
+    for i in range(3):  # each busy with its request: the next one gets a new session
+        m, _ = hub.send(A, f"review screen {i}")
+        await settle(opened, i + 1)
+        kid, _, _ = hub.pull(A, None, str(opened[i]), 0, "claude_code", "cli")
+        _, got, _ = hub.pull(A, kid.session_id)
+        assert got[0]["message_id"] == m["message_id"]
+        kids.append(kid)
+    assert len(opened) == 3 and all(p.name.startswith("task-") for p in opened)
+    m4, target = hub.send(A, "review screen 4")  # at the limit: queued behind a busy one
+    assert target in kids and len(opened) == 3
+    await hub.reply(
+        kids[1].session_id, "Dạ xong", hub.in_progress(kids[1].session_id)[0]["message_id"]
+    )
+    m5, target = hub.send(A, "review screen 5")
+    assert target is kids[1]  # an idle session first
+
+
+async def test_a_product_works_in_order_in_dev_and_deploys_from_fresh_copies(
+    settings, cfg_dir, tmp_path, monkeypatch
+):
+    orch, hub, game, opened = no_router_setup(settings, cfg_dir, tmp_path, monkeypatch, "product")
+    sent = []
+    hub._notify = lambda name, *a, **k: sent.append(name)
+    m1, _ = hub.send(A, "fix the coin bug")
+    await settle(opened, 1)
+    assert opened[0].name.startswith("dev-") and sent.count("send_main_offline") == 1
+    dev, _, _ = hub.pull(A, None, str(opened[0]), 0, "claude_code", "cli")
+    hub.pull(A, dev.session_id)
+    m2, target = hub.send(A, "then tune the jump")
+    assert target is dev and len(opened) == 1  # one worker on the code, in order
+
+    d1, _ = hub.send(A, "deploy the build to UAT")
+    await settle(opened, 2)
+    d2, _ = hub.send(A, "release again after the fix")
+    await settle(opened, 3)
+    assert [p.name.split("-")[0] for p in opened] == ["dev", "deploy", "deploy"]  # never reused
+    first = orch.store.get("channel_msg", d1["message_id"])
+    assert "fresh copy" in first["text"] and "report the result yourself" in first["text"]
+    m3, target = hub.send(A, "qa: retest level 3")
+    await settle(opened, 4)
+    assert opened[3].name.startswith("qa-")
+    assert sent.count("send_main_offline") == 1  # told once; nothing waited for the router
+
+
+async def test_a_reply_for_a_gone_lane_session_reopens_its_own_folder(
+    settings, cfg_dir, tmp_path, monkeypatch
+):
+    orch, hub, game, opened = no_router_setup(settings, cfg_dir, tmp_path, monkeypatch, "tool")
+    hub.send(A, "design the shop")
+    await settle(opened, 1)
+    first, _, _ = hub.pull(A, None, str(opened[0]), 0, "claude_code", "cli")
+    _, got, _ = hub.pull(A, first.session_id)
+    await hub.reply(first.session_id, "Dạ, bản 1 đây", got[0]["message_id"])
+    hub.close(first)
+    reply, target = hub.send(A, "make it warmer", session_id=first.session_id)  # a Telegram reply
+    await settle(opened, 2)
+    assert target is None and opened[1] == opened[0]  # its own folder reopened, its context kept
+    again, _, _ = hub.pull(A, None, str(opened[0]), 0, "claude_code", "cli")
+    _, got, _ = hub.pull(A, again.session_id)
+    assert got[0]["message_id"] == reply["message_id"]
+
+
+async def test_a_former_main_works_as_an_adopted_dev_worker_and_is_never_closed(
+    settings, cfg_dir, tmp_path, monkeypatch
+):
+    from datetime import timedelta
+
+    from app.models import now
+
+    orch, hub, game, opened = no_router_setup(settings, cfg_dir, tmp_path, monkeypatch, "product")
+    old_main, _ = hub.claim_main(A, "claude_code", str(game), "app", "local_k05")
+    rec = hub.adopt(old_main, "dev")
+    assert rec["provider"] == "adopted" and hub.main_for(A) is not old_main
+    m, target = hub.send(A, "fix the coin bug")
+    assert target is old_main and opened == []  # the project's own conversation does the work
+    _, got, _ = hub.pull(A, old_main.session_id)
+    await hub.reply(old_main.session_id, "Dạ xong", got[0]["message_id"])
+    old_main.last_work = now() - timedelta(hours=2)
+    hub._close_idle_children()
+    assert old_main.session_id in hub.sessions  # a user's conversation is never closed for idling
+    with pytest.raises(ValueError, match="adopted"):
+        hub.prune_child(old_main.cwd)
+
+
+def test_repo_setup_records_the_project_kind(settings, monkeypatch):
+    from app import cli
+
+    monkeypatch.setattr(cli, "_settings", lambda: settings)
+    assert cli._project_kind("New Game", None) == "product"  # new projects are products
+    assert cli._project_kind("UIUXAgent", "tool") == "tool"
+    assert cli._project_kind("UIUXAgent", None) == "tool"  # kept when not given
