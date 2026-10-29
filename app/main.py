@@ -320,6 +320,7 @@ async def lifespan(app: FastAPI):
                 await orch.collab.remind_questions()  # unanswered operator questions: every 30 min
                 orch.channel._expire()  # even when no agent polls (waiters only peek)
                 orch.channel._prune()  # a session whose waiter died is reported within a minute
+                orch.channel.ensure_gate()  # the Gateway Agent's own session: opened again if gone
             except Exception:
                 log.exception("ask watchdog round failed")
 

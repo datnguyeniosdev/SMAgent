@@ -313,3 +313,58 @@ def test_repo_setup_records_the_project_kind(settings, monkeypatch):
     assert cli._project_kind("New Game", None) == "product"  # new projects are products
     assert cli._project_kind("UIUXAgent", "tool") == "tool"
     assert cli._project_kind("UIUXAgent", None) == "tool"  # kept when not given
+
+
+async def test_the_gateway_keeps_its_own_cli_gate_session_alive_as_the_gateway_agent(
+    settings, cfg_dir, tmp_path, monkeypatch
+):
+    import asyncio
+    from datetime import timedelta
+
+    from app import channel as ch
+    from app import projects
+    from app.models import now
+
+    gate_repo = tmp_path / "agent_tool"
+    gate_repo.mkdir()
+    monkeypatch.setattr(projects, "projects_root", lambda: tmp_path)
+    monkeypatch.setattr(ch, "CLAUDE_JSON", tmp_path / "claude.json")
+    orch, _ = make(settings, cfg_dir, [])
+    orch.s.gate_cli = True
+    hub, opened = orch.channel, []
+    hub.launch = lambda path, agent, model="": opened.append((path, model))
+    app_main, _ = hub.claim_main(
+        "Agent Gateway", "claude_code", str(gate_repo / "wt"), "app", "local_g"
+    )
+    hub.registry.note_root("Agent Gateway", str(gate_repo))
+    gate = gate_repo / ".agw-children" / "gate"
+    assert hub.gate_path() == gate
+
+    hub.ensure_gate()
+    for _ in range(50):
+        if opened:
+            break
+        await asyncio.sleep(0.02)
+    assert opened == [(gate, "sonnet")] and (gate / "CLAUDE.md").exists()
+    hub.ensure_gate()  # still opening: not opened twice
+    await asyncio.sleep(0.05)
+    assert len(opened) == 1
+
+    cli, _, _ = hub.pull("Agent Gateway", None, str(gate), 0, "claude_code", "cli")
+    assert hub.gateway_agent() is cli  # the CLI gate is the router now
+    assert hub.child(app_main)["provider"] == "adopted"  # the app conversation works as dev
+
+    hub.disconnect(cli)  # the gate dropped
+    assert hub.gateway_agent() is None
+    hub.ensure_gate()
+    await asyncio.sleep(0.05)
+    assert len(opened) == 1  # opened less than START_WAIT ago: waits for it to connect
+    orch.store.put(
+        "channel_setting", "gate", {"launched_at": (now() - timedelta(hours=1)).isoformat()}
+    )
+    hub.ensure_gate()
+    for _ in range(50):
+        if len(opened) == 2:
+            break
+        await asyncio.sleep(0.02)
+    assert len(opened) == 2  # another gate session

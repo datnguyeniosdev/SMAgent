@@ -207,6 +207,7 @@ class ChannelHub:
         if main.get("pending_new") and not self.child(s):  # the operator asked for a new main
             self.set_main(s)
         elif mode == "push":  # (a pull session is known once its agent is: see pull)
+            self._maybe_gate(s)
             self.main_for(project)
         self._expire()
         self._flush_pending(project)
@@ -697,6 +698,63 @@ class ChannelHub:
         if rec.get("repo") and rec.get("cwd") == main.cwd:
             return Path(rec["repo"])
         return _toplevel(main.cwd)
+
+    # ---- the gate: the Gateway Agent's own CLI session, kept alive by the gateway ----
+
+    def gate_path(self) -> Path | None:
+        """<gateway project folder>/.agw-children/gate (known once a session opened in the project)."""
+        name = getattr(getattr(self.svc, "s", None), "gateway_agent_project", "") or "Agent Gateway"
+        p = self.registry.resolve(name)
+        return Path(p.root) / CHILDREN / "gate" if p and p.root else None
+
+    def ensure_gate(self) -> None:
+        """Watchdog (Settings.gate_cli): the Gateway Agent is a CLI session the gateway opens in the
+        gate folder. Not connected (never opened, closed, crashed): opened again, at most once per
+        START_WAIT; meanwhile requests are placed by default_lane, so nothing waits."""
+        s = getattr(self.svc, "s", None)
+        path = self.gate_path() if getattr(s, "gate_cli", False) else None
+        if path is None:
+            return
+        if any(x.cwd == str(path) and x.deliverable for x in self.sessions.values()):
+            return
+        rec = self.svc.store.get("channel_setting", "gate") or {}
+        if rec.get("launched_at", "") > (now() - START_WAIT).isoformat():
+            return  # opening: give it time to connect
+        self.svc.store.put(
+            "channel_setting", "gate", {"launched_at": now().isoformat(), "path": str(path)}
+        )
+        project = s.gateway_agent_project
+        self._ops("🧭 opening the Gateway Agent's own session (gate)")
+
+        def make() -> None:
+            from app.config import ENV_PORTS, env_name
+            from app.repo_setup import setup_repo
+
+            repo = path.parent.parent
+            (repo / CHILDREN).mkdir(exist_ok=True)
+            (repo / CHILDREN / ".gitignore").write_text("*\n")
+            path.mkdir(exist_ok=True)
+            setup_repo(path, f"http://127.0.0.1:{ENV_PORTS[env_name()]}/mcp", project, False)
+            _trust(path, repo)
+            self.launch(path, "", self.models(project)["router"])
+
+        self._background(make)
+
+    def _maybe_gate(self, s: LiveSession) -> None:
+        """A session that connects in the gate folder becomes the Gateway Agent (pinned main of the
+        gateway project); the conversation that was the main keeps working as a dev worker."""
+        path = (
+            self.gate_path() if getattr(getattr(self.svc, "s", None), "gate_cli", False) else None
+        )
+        if path is None or s.cwd != str(path) or self.main_for(s.project) is s:
+            return
+        old = self.main_for(s.project)
+        if old is not None and old.cwd == s.cwd:
+            return  # the gate's twin (its push stream and its pull loop): already the main
+        if old is not None and old.cwd:
+            self.adopt(old, "dev")
+        self.set_main(s, pin=True)
+        self._ops(f"👑 {self._label(s)} is the Gateway Agent (gate)")
 
     def _open_router(self, project: str, rec: dict, main: LiveSession) -> None:
         """A temporary router for a stuck main, with the main's agent tool, inside the project."""
@@ -1697,6 +1755,7 @@ class ChannelHub:
         s.client = client if client in ("app", "cli") else s.client
         if new:  # announced once the agent and its kind are known
             self._ops(f"🔌 {self._label(s)} connected")
+            self._maybe_gate(s)
             self.main_for(s.project)  # the project's first session becomes its main
             if agent:  # waiting work for this tool (an answer to its question) can go now
                 self._flush_pending(s.project)
