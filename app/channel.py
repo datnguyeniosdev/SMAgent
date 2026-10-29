@@ -144,6 +144,9 @@ class ChannelHub:
     def __init__(self, svc):
         self.svc = svc
         self.sessions: dict[str, LiveSession] = {}
+        from app.project_registry import ProjectRegistry
+
+        self.registry = ProjectRegistry(svc.store)  # stable project ids, aliases, routing mode
         self.connections: dict[str, str] = {}  # MCP connection -> the agent session it speaks for
         self._stopping: set[str] = (
             set()
@@ -208,9 +211,23 @@ class ChannelHub:
             self._ops(f"🔌 {self._label(s)} connected")
         return s
 
+    @staticmethod
+    def health(s: LiveSession) -> str:
+        """Session health, apart from task and delivery state: ok | stalled | blocked | off | closing."""
+        if s.closing:
+            return "closing"
+        if s.stalled:
+            return "stalled"
+        if s.blocked:
+            return "blocked"
+        return "ok" if s.enabled else "off"
+
     def _save(self, s: LiveSession) -> None:
         body = {"project": s.project, "cwd": s.cwd, "task_id": s.task_id, "mode": s.mode,
-                "enabled": s.enabled, "agent": s.agent, "client": s.client}  # fmt: skip
+                "enabled": s.enabled, "agent": s.agent, "client": s.client,
+                "project_id": self.registry.ensure(s.project).project_id,
+                "agent_id": s.agent or ("claude_code" if s.mode == "push" else ""),
+                "health": self.health(s)}  # fmt: skip
         self.svc.store.put("channel_session", s.session_id, body, task_id=s.task_id, state="open")
 
     def disconnect(self, s: LiveSession, why: str = "") -> None:
@@ -381,6 +398,8 @@ class ChannelHub:
         """p<num>, `2048`, `#2048_Shooter_K05` or the full name -> a known project (unique match only)."""
         if m := re.fullmatch(r"[pP](\d+)", ref.strip()):
             return next((name for num, name in self.projects() if num == int(m.group(1))), None)
+        if (p := self.registry.resolve(ref)) and p.name in self.known_projects():
+            return p.name  # by id or an earlier name: the project's current name
         key = _norm(ref)
         projects = self.known_projects()
         exact = [p for p in projects if _norm(p) == key]
@@ -451,7 +470,7 @@ class ChannelHub:
     def _enqueue(self, s: LiveSession, msg: dict) -> None:
         """Into a session's queue; an answer (its current job waits for it) or routing work for the
         main session (a quick dispatch) goes first."""
-        msg["queued_at"] = now().isoformat()
+        msg["queued_at"], msg["queued_for"] = now().isoformat(), s.session_id
         s.queue.put_nowait(msg)
         first = lambda m: m.get("kind") == "answer" or m.get("route")  # noqa: E731
         if first(msg):  # behind earlier answers and routing work, before the rest
@@ -1084,6 +1103,13 @@ class ChannelHub:
     ) -> tuple[dict, LiveSession | None]:
         """Queue a message for a session (that one if it can take it, else the best of the project).
         extra: e.g. {"ask_id": ..., "kind": "request" | "answer"} for agent-to-agent messages."""
+        key = (extra or {}).get("idempotency_key")
+        if key and (same := next((m for m in self.svc.store.list("channel_msg")
+                                  if m.get("idempotency_key") == key
+                                  and m.get("state") not in ("cancelled", "expired")), None)):  # fmt: skip
+            # sent before (a retried call): the same message, not a second job
+            holder = same.get("session_id") or same.get("queued_for") or same.get("for_session")
+            return same, self.sessions.get(holder or "")
         exclude = (extra or {}).get("from_session")
         target = self.sessions.get(session_id or "")
         # an answer belongs to the agent tool that asked: never to another tool's session of the
@@ -1109,6 +1135,10 @@ class ChannelHub:
         if msg.get("kind"):
             msg["meta"]["kind"] = msg["kind"]
         msg["num"] = self._number("channel_mnum", msg["message_id"])  # short id m<num>
+        msg["project_id"] = self.registry.ensure(msg["project"]).project_id
+        msg.setdefault(
+            "correlation_id", new_id("cor")
+        )  # a conversation/workflow's messages share it
         msg["pinned"] = pinned  # for that session: it waits its turn there
         if pinned:
             msg["for_session"] = target.session_id  # kept across a restart (the queue is in memory)
