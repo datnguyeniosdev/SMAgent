@@ -431,8 +431,13 @@ async def _action_error(request, e: ActionError):
 
 
 @app.get("/health")
-async def health():
-    return {"status": "ok"}
+async def health(request: Request):
+    """Liveness; with GATE_CLI also the gate: its Claude process (pid alive) and its session."""
+    out = {"status": "ok"}
+    hub = getattr(getattr(request.app.state, "orch", None), "channel", None)
+    if hub is not None and getattr(hub.svc.s, "gate_cli", False):
+        out["gate"] = hub.gate_status()
+    return out
 
 
 @app.get("/api/v1/agents")
@@ -891,13 +896,14 @@ async def channel_peek(
 @app.get("/api/v1/channel/wait", include_in_schema=False)
 async def channel_wait(
     request: Request, project: str, agent: str, cwd: str = "", client: str = "cli", after: str = "",
-    hold: float = 25, instance: str = "",
+    hold: float = 25, instance: str = "", pid: str = "",
 ):  # fmt: skip
     """`agw wait`: peek held open until a message other than `after` is queued (or the session
     closes), at most `hold` seconds: idle waiters cost one held request per 25 s and wake at once."""
     _local_only(request)
     hub = request.app.state.orch.channel
-    return await hub.wait(project, agent, cwd, client, after, max(0.0, min(hold, 55.0)), instance)
+    return await hub.wait(project, agent, cwd, client, after, max(0.0, min(hold, 55.0)), instance,
+                          int(pid) if pid.isdigit() else 0)  # fmt: skip
 
 
 @app.post("/api/v1/channel/stalled", include_in_schema=False)

@@ -438,3 +438,77 @@ async def test_the_gateway_agent_gives_a_lane_skills_and_imports_other_projects_
         bad = await c.call_tool("dispatch", {"session_id": gw.session_id, "lane": "ui", "text": "x",
                                              "skills": ["nope"]})  # fmt: skip
         assert bad.is_error and len(orch.store.list("channel_msg")) == before  # nothing left behind
+
+
+async def test_the_health_check_follows_the_gate_pid_and_restarts_a_dead_one(
+    settings, cfg_dir, tmp_path, monkeypatch
+):
+    import asyncio
+
+    from app import channel as ch
+    from app import projects
+
+    gate_repo = tmp_path / "agent_tool"
+    gate_repo.mkdir()
+    monkeypatch.setattr(projects, "projects_root", lambda: tmp_path)
+    monkeypatch.setattr(ch, "CLAUDE_JSON", tmp_path / "claude.json")
+    alive = {4242: True}
+    monkeypatch.setattr(ch, "claude_alive", lambda pid: alive.get(pid, False))
+    orch, _ = make(settings, cfg_dir, [])
+    orch.s.gate_cli = True
+    hub, opened = orch.channel, []
+    hub.launch = lambda path, agent, model="": opened.append(path)
+    hub.registry.note_root("Agent Gateway", str(gate_repo))
+    gate = hub.gate_path()
+    gate.mkdir(parents=True)
+
+    s, _, _ = hub.pull("Agent Gateway", None, str(gate), 0, "claude_code", "cli", pid=4242)
+    st = hub.gate_status()
+    assert (st["pid"], st["process_alive"], st["healthy"], st["gateway_agent"]) == (
+        4242,
+        True,
+        True,
+        True,
+    )
+    assert orch.store.get("channel_session", s.session_id)["claude_pid"] == 4242
+    hub.ensure_gate()
+    await asyncio.sleep(0.05)
+    assert opened == []  # alive and connected: nothing to do
+
+    alive[4242] = False  # the gate's Claude process died (its session still looks listed)
+    hub.ensure_gate()
+    for _ in range(50):
+        if opened:
+            break
+        await asyncio.sleep(0.02)
+    assert opened == [gate] and s.session_id not in hub.sessions
+    rec = orch.store.get("channel_setting", "gate")
+    assert rec["launched_at"] and rec["pid"] is None
+
+
+async def test_health_reports_the_gate_and_the_waiter_sends_its_claude_pid(
+    settings, cfg_dir, tmp_path, monkeypatch
+):
+    from fastapi.testclient import TestClient
+
+    from app import main as main_mod
+    from app import waiter as w
+    from tests.test_waiter import Resp
+
+    seen = []
+    monkeypatch.setenv("CLAUDE_PID", "777")
+    monkeypatch.setattr(w, "WAITERS", tmp_path / "waiters")
+
+    def urlopen(url, timeout=None):
+        seen.append(url)
+        return Resp({"session_id": "x", "queued": True, "next": "chm_1"})
+
+    monkeypatch.setattr(w.urllib.request, "urlopen", urlopen)
+    w.wait("P", "/w/p", "app", 8000)
+    assert "pid=777" in seen[0]
+
+    orch, _ = make(settings, cfg_dir, [])
+    orch.s.gate_cli = True
+    main_mod.app.state.orch = orch
+    body = TestClient(main_mod.app).get("/health").json()
+    assert body["status"] == "ok" and body["gate"]["healthy"] is False

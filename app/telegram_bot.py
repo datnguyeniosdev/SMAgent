@@ -970,6 +970,12 @@ class TelegramGateway:
             for num, name in hub.projects()
         ]
         head = f"🧭 Gateway Agent: {escape(hub._label(gw)) if gw else 'offline'}"
+        if getattr(self.s, "gate_cli", False):
+            st = hub.gate_status()
+            alive = {True: "running", False: "ended", None: "not reported"}[st["process_alive"]]
+            head += (f"\n🩺 gate: pid {st['pid'] or '–'} ({alive}), session "
+                     f"{'connected' if st['session'] else 'not connected'}"
+                     f"{'' if st['gateway_agent'] else ', not the router yet'}")  # fmt: skip
         await say(
             m, "\n".join([head, *rows, "", "/route p# central|main · /route p# tool|product"])
         )

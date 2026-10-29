@@ -54,6 +54,19 @@ MAX_DELIVERIES = 2  # an unanswered message is handed out again once after its l
 OPEN_STATES = ("pending", "queued", "delivered", "stalled")
 
 
+def claude_alive(pid: int) -> bool:
+    """That pid is a running `claude` process (not gone, not reused by something else)."""
+    if pid <= 1:
+        return False
+    try:
+        os.kill(pid, 0)
+        cmd = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True,
+                             timeout=5).stdout  # fmt: skip
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "claude" in cmd
+
+
 def stop_claude(pid: int) -> bool:
     """SIGTERM the session's Claude Code process, only if that pid still is a `claude` process."""
     if pid <= 1:
@@ -115,6 +128,9 @@ class LiveSession:
     queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     num: int = 0  # short id shown as s<num> (/list, /send s1 ..., /off s1)
     pid: int = 0  # push: the Claude Code process (the shim's parent), for /close
+    claude_pid: int = (
+        0  # the Claude process it runs in, as its waiter or shim reports it (health only)
+    )
     agent: str = ""  # which agent tool runs the session (claude_code, opencode, codex, ...)
     closing: bool = False  # pull: /close asked its loop to stop at the next round
     client: str = ""  # "app" (desktop app / IDE) or "cli", as the session reports it
@@ -200,6 +216,7 @@ class ChannelHub:
         s = LiveSession(session_id, project, cwd, task.task_id, mode=mode, blocked=blocked,
                         enabled=rec.get("enabled", True))  # fmt: skip
         s.num, s.pid = self._number("channel_snum", session_id), pid
+        s.claude_pid = pid
         self.project_num(project)
         self._save(s)
         self.sessions[session_id] = s
@@ -239,6 +256,7 @@ class ChannelHub:
                 "enabled": s.enabled, "agent": s.agent, "client": s.client,
                 "project_id": self._project_id(s),
                 "agent_id": s.agent or ("claude_code" if s.mode == "push" else ""),
+                "claude_pid": s.claude_pid,
                 "health": self.health(s)}  # fmt: skip
         self.svc.store.put("channel_session", s.session_id, body, task_id=s.task_id, state="open")
 
@@ -715,14 +733,21 @@ class ChannelHub:
         path = self.gate_path() if getattr(s, "gate_cli", False) else None
         if path is None:
             return
-        if any(x.cwd == str(path) and x.deliverable for x in self.sessions.values()):
-            return
+        st = self.gate_status()
         rec = self.svc.store.get("channel_setting", "gate") or {}
-        if rec.get("launched_at", "") > (now() - START_WAIT).isoformat():
+        self.svc.store.put("channel_setting", "gate", {**rec, "pid": st["pid"], "checked_at": now().isoformat(),
+                           "healthy": st["healthy"], "session": st["session"]})  # fmt: skip
+        if st["healthy"]:
+            return
+        dead = st["process_alive"] is False
+        if dead:  # its Claude process ended: its sessions went with it, open another at once
+            for x in [x for x in self.sessions.values() if x.cwd == str(path)]:
+                self.disconnect(x, f"its Claude process {st['pid']} ended")
+            self._ops(f"🧭 the gate's Claude process {st['pid']} ended")
+        elif (rec.get("launched_at") or "") > (now() - START_WAIT).isoformat():
             return  # opening: give it time to connect
-        self.svc.store.put(
-            "channel_setting", "gate", {"launched_at": now().isoformat(), "path": str(path)}
-        )
+        self.svc.store.put("channel_setting", "gate", {**(self.svc.store.get("channel_setting", "gate") or {}),
+                           "launched_at": now().isoformat(), "path": str(path), "pid": None})  # fmt: skip
         project = s.gateway_agent_project
         self._ops("🧭 opening the Gateway Agent's own session (gate)")
 
@@ -739,6 +764,21 @@ class ChannelHub:
             self.launch(path, "", self.models(project)["router"])
 
         self._background(make)
+
+    def gate_status(self) -> dict:
+        """The gate as the health check sees it: its Claude process (pid, alive) and its session."""
+        path = self.gate_path()
+        sess = [x for x in self.sessions.values() if path is not None and x.cwd == str(path)]
+        live = [x for x in sess if x.deliverable]
+        pid = next((x.claude_pid for x in sess if x.claude_pid), 0)
+        alive = claude_alive(pid) if pid else None  # None: no pid reported yet
+        gw = self.gateway_agent()
+        rec = self.svc.store.get("channel_setting", "gate") or {}
+        return {"path": str(path) if path else None, "pid": pid or None, "process_alive": alive,
+                "session": live[0].session_id if live else None,
+                "gateway_agent": bool(gw is not None and path is not None and gw.cwd == str(path)),
+                "launched_at": rec.get("launched_at"),
+                "healthy": bool(live) and alive is not False}  # fmt: skip
 
     def _maybe_gate(self, s: LiveSession) -> None:
         """A session that connects in the gate folder becomes the Gateway Agent (pinned main of the
@@ -1765,7 +1805,7 @@ class ChannelHub:
 
     def pull(
         self, project: str, session_id: str | None, cwd: str = "", limit: int = 1, agent: str = "",
-        client: str = "", instance: str = "",
+        client: str = "", instance: str = "", pid: int = 0,
     ):  # fmt: skip
         """get_messages: register/refresh a pull session and hand over what is queued for it.
         Nothing new while it still has an unanswered message (no duplicate or parallel jobs), except
@@ -1802,6 +1842,7 @@ class ChannelHub:
         if new:
             s = self.connect(sid, project, cwd, mode="pull", notify=False)
         s.last_seen = now()
+        s.claude_pid = pid or s.claude_pid
         s.agent = agent or s.agent
         s.client = client if client in ("app", "cli") else s.client
         if new:  # announced once the agent and its kind are known
@@ -1836,11 +1877,12 @@ class ChannelHub:
         return s.queue._queue[0]["message_id"]  # ponytail: asyncio.Queue internals
 
     def peek(
-        self, project: str, agent: str, cwd: str = "", client: str = "", instance: str = ""
-    ) -> dict:
+        self, project: str, agent: str, cwd: str = "", client: str = "", instance: str = "",
+        pid: int = 0,
+    ) -> dict:  # fmt: skip
         """Keep a pull session listed and say whether it has work, handing nothing out (no model run):
         queued = a new message waits, work = new or unfinished."""
-        s, _, busy = self.pull(project, None, cwd, 0, agent, client, instance)
+        s, _, busy = self.pull(project, None, cwd, 0, agent, client, instance, pid)
         nxt = self._next(s)
         return {"session_id": s.session_id, "closing": s.closing, "enabled": s.enabled,
                 "queued": nxt is not None, "next": nxt,
@@ -1848,16 +1890,16 @@ class ChannelHub:
 
     async def wait(
         self, project: str, agent: str, cwd: str = "", client: str = "", after: str = "",
-        hold: float = 25, instance: str = "",
+        hold: float = 25, instance: str = "", pid: int = 0,
     ) -> dict:  # fmt: skip
         """Long-poll peek (`agw wait`): returns as soon as a message other than `after` is queued or
         the session closes, else after `hold` seconds (under PULL_TTL, so the session stays listed)."""
-        state, end = self.peek(project, agent, cwd, client, instance), time.monotonic() + hold
+        state, end = self.peek(project, agent, cwd, client, instance, pid), time.monotonic() + hold
         while not state["closing"] and state["next"] in (None, after) and time.monotonic() < end:
             await asyncio.sleep(1)  # ponytail: in-process check each second, no event per queue
             s = self.sessions.get(state["session_id"])
             if s is None or self._next(s) not in (None, after):
-                state = self.peek(project, agent, cwd, client, instance)  # closed, or new work
+                state = self.peek(project, agent, cwd, client, instance, pid)  # closed, or new work
         return state
 
     async def reply(

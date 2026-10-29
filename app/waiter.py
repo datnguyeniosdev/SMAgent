@@ -146,6 +146,7 @@ def wait(project: str, cwd: str, client: str, port: int, interval: float = 30,
         "cwd": cwd,
         "client": client or "app",
         "instance": inst,
+        "pid": os.environ.get("CLAUDE_PID", ""),  # the Claude process this waiter runs under
     }
     WAITERS.mkdir(parents=True, exist_ok=True)
     path = WAITERS / f"{sid}.json"
