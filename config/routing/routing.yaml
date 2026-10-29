@@ -5,6 +5,15 @@ routing:
   # lane's child itself. No match: the shared Gateway Agent reads it and calls dispatch.
   #   - {project: "*", match: "(?i)^\\s*\\[qa\\]", lane: qa}   # "[qa] retest level 3"
   channel_rules: []
+  # Mandatory rules by request text, any project: added to the request; require_command makes the
+  # PreToolUse hook block edits and other commands until the session has run it for that request.
+  task_rules:
+    - match: '(?i)dịch ngược|reverse[- ]?engineer|decompil|disassembl|\bapk\b|\bipa\b|\.dex\b|smali|jadx|ghidra|frida'
+      rule: >-
+        Reverse engineering: always use rea first (https://github.com/morluto/rea, installed on this
+        Mac as `rea`): start with `rea capabilities` and `rea analyze <target>`, and use other tools
+        only for what rea cannot do, saying why in your answer.
+      require_command: rea
   default_workflow: general.answer
   plugin_fallback: true          # Phase 3-5 plugin classifier when no route matches
   dynamic_planning: {enabled: false}

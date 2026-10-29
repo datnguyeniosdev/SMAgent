@@ -512,3 +512,62 @@ async def test_health_reports_the_gate_and_the_waiter_sends_its_claude_pid(
     main_mod.app.state.orch = orch
     body = TestClient(main_mod.app).get("/health").json()
     assert body["status"] == "ok" and body["gate"]["healthy"] is False
+
+
+async def test_a_lanes_current_work_names_the_skills_it_must_use(
+    settings, cfg_dir, tmp_path, monkeypatch
+):
+    from pathlib import Path
+
+    from app import skills as sk
+
+    monkeypatch.setattr(sk, "GLOBAL", tmp_path / "none")
+    orch, hub, gw, own, game, opened = central_setup(settings, cfg_dir, tmp_path, monkeypatch)
+    make_skill(game, "unity-build")
+    orch.s.core_skills = {A: ["unity-build"]}
+    m, _ = hub.send(A, "fix the level")
+    assert "MANDATORY core skills" in m["text"] and m["required_skills"] == ["unity-build"]
+    r = await hub.dispatch(gw.session_id, m["message_id"], "dev", skills=["unity-build"])
+    kid, _, _ = hub.pull(A, None, str(Path(r["path"])), 0, "claude_code", "cli")
+    hub.pull(A, kid.session_id)
+    assert hub.required_skills(kid.session_id) == [
+        {"message_id": m["message_id"], "skills": ["unity-build"], "commands": []}
+    ]
+    assert "MANDATORY skills" in orch.store.get("channel_msg", m["message_id"])["text"]
+
+
+async def test_a_former_main_conversation_folds_back_so_answers_reach_it(
+    settings, cfg_dir, tmp_path, monkeypatch
+):
+    """Seen in prod (hin_14e92eca79): the unpinned UIUX Main asked with the folder's shared session
+    while its waiter still listened on its old #Main session, so the operator's answer sat queued."""
+    orch, hub, game, opened = no_router_setup(settings, cfg_dir, tmp_path, monkeypatch, "tool")
+    main, _ = hub.claim_main(A, "claude_code", str(game), "app", "local_ui")
+    base = hub.pull_id(A, "claude_code", str(game), "app")
+    assert hub.conversation_sid(A, "claude_code", str(game), "app", "local_ui") == main.session_id
+    hub.adopt(main, "task")  # unpinned by the migration
+    assert hub.conversation_sid(A, "claude_code", str(game), "app", "local_ui") == base
+    state = hub.peek(A, "claude_code", str(game), "app", instance="local_ui")
+    assert state["session_id"] == base  # its waiter switches to the shared session
+    hi = await orch.collab.request_human_input("Dịch ngược APK?", project=A, session_id=base)
+    orch.collab.answer_human_input(hi.request_id, "Đồng ý", "1", free=True)
+    _, got, _ = hub.pull(A, base)
+    assert any("Đồng ý" in m["text"] for m in got)
+
+
+def test_a_task_rule_binds_matching_requests_in_any_project(settings, cfg_dir):
+    from app.gateway_config import TaskRule
+
+    orch, _ = make(settings, cfg_dir, [])
+    orch.gateway_cfg.routing.task_rules = [
+        TaskRule(match=r"(?i)dịch ngược|\bapk\b", rule="use rea first", require_command="rea")
+    ]
+    hub = orch.channel
+    s, _, _ = hub.pull(A, None, "/w/a")
+    m, _ = hub.send(A, "dịch ngược APK Colorever")
+    assert "MANDATORY rule: use rea first" in m["text"] and m["required_commands"] == ["rea"]
+    plain, _ = hub.send(A, "đổi màu nút")
+    assert "MANDATORY rule" not in plain["text"]
+    _, got, _ = hub.pull(A, s.session_id)
+    assert hub.required_skills(s.session_id) == [{"message_id": got[0]["message_id"], "skills": [],
+                                                  "commands": ["rea"]}]  # fmt: skip

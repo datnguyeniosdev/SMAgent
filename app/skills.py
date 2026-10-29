@@ -106,6 +106,8 @@ def note(skills: list[Skill]) -> str:
     if not skills:
         return ""
     names = ", ".join(f"`{s.name}` ({s.source}@{s.version})" for s in skills)
-    return (f"\n\nSkills for this request (chosen by the Gateway Agent): load {names} before anything "
-            "else (Claude Code: the Skill tool; other agent tools: read .claude/skills/<name>/SKILL.md "
-            "in this folder) and follow them.")  # fmt: skip
+    return (f"\n\nMANDATORY skills for this request (chosen by the Gateway Agent): load {names} with the "
+            "Skill tool before anything else (not listed there: read .claude/skills/<name>/SKILL.md in "
+            "this folder) and do the work by their workflows and rules. Edits and commands are blocked "
+            "until each is loaded. In your answer, say which skills you used and which of their steps "
+            "you followed.")  # fmt: skip

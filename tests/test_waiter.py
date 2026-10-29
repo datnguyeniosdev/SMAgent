@@ -424,3 +424,97 @@ def test_the_prompt_hook_tells_a_hash_main_its_own_session_id(tmp_path, monkeypa
     assert (
         main(["hook-prompt"]) == 0 and "session_id is" not in capsys.readouterr().out
     )  # shared: silent
+
+
+def test_the_tool_hook_blocks_work_until_the_requests_skills_are_used(
+    tmp_path, monkeypatch, capsys
+):
+    import io
+
+    from app import projects
+    from app.cli import main
+
+    (tmp_path / "uiux").mkdir()
+    (tmp_path / "uiux/README.md").write_text("# UIUXAgent\n")
+    (tmp_path / "uiux/AGENTS.md").write_text("x")
+    monkeypatch.setattr(projects, "projects_root", lambda: tmp_path)
+    req = [{"message_id": "chm_new", "skills": ["uiux-art-director", "game-ui-quality-gate"]}]
+    monkeypatch.setattr(w.urllib.request, "urlopen",
+                        lambda url, timeout=None: Resp({"main": False, "required": req}))  # fmt: skip
+    transcript = tmp_path / "t.jsonl"
+
+    def line(content):
+        return json.dumps({"type": "assistant", "message": {"content": content}})
+
+    def use(name, **inp):
+        return line([{"type": "tool_use", "name": name, "input": inp}])
+
+    def run():
+        ev = {"tool_name": "Edit", "tool_input": {"file_path": "x"}, "cwd": str(tmp_path / "uiux"),
+              "transcript_path": str(transcript)}  # fmt: skip
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(ev)))
+        assert main(["hook-tool"]) == 0
+        out = capsys.readouterr().out
+        return json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"] if out else None
+
+    transcript.write_text("\n".join([
+        use("Skill", skill="uiux-art-director"),  # used for an earlier request: does not count
+        line([{"type": "tool_result", "content": "message_id chm_new: redo the shop"}]),
+    ]) + "\n")  # fmt: skip
+    why = run()
+    assert "uiux-art-director" in why and "game-ui-quality-gate" in why
+    with transcript.open("a") as f:
+        f.write(use("Skill", skill="uiux-art-director") + "\n")
+    why = run()
+    assert "game-ui-quality-gate" in why and "uiux-art-director" not in why
+    with transcript.open("a") as f:
+        f.write(
+            use(
+                "Read",
+                file_path=str(tmp_path / "uiux/.claude/skills/game-ui-quality-gate/SKILL.md"),
+            )
+            + "\n"
+        )
+    assert run() is None  # every skill used: the work goes ahead
+
+    from app.cli import skills_not_used
+
+    assert skills_not_used("", req) == []  # no transcript (another runtime): nothing to check
+
+
+def test_a_reverse_engineering_request_must_run_rea_first(tmp_path, monkeypatch, capsys):
+    import io
+
+    from app import projects
+    from app.cli import main
+
+    (tmp_path / "re").mkdir()
+    (tmp_path / "re/README.md").write_text("# app-research\n")
+    (tmp_path / "re/AGENTS.md").write_text("x")
+    monkeypatch.setattr(projects, "projects_root", lambda: tmp_path)
+    req = [{"message_id": "chm_re", "skills": [], "commands": ["rea"]}]
+    monkeypatch.setattr(w.urllib.request, "urlopen",
+                        lambda url, timeout=None: Resp({"main": False, "required": req}))  # fmt: skip
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(
+        json.dumps({"message": {"content": [{"type": "tool_result", "content": "chm_re"}]}}) + "\n"
+    )
+
+    def run(tool, **inp):
+        ev = {
+            "tool_name": tool,
+            "tool_input": inp,
+            "cwd": str(tmp_path / "re"),
+            "transcript_path": str(transcript),
+        }
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(ev)))
+        assert main(["hook-tool"]) == 0
+        out = capsys.readouterr().out
+        return json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"] if out else None
+
+    assert "the `rea` command" in run("Bash", command="jadx app.apk")  # another tool first: blocked
+    assert run("Bash", command="rea analyze app.apk") is None  # rea itself always runs
+    with transcript.open("a") as f:
+        f.write(json.dumps({"message": {"content": [{"type": "tool_use", "name": "Bash",
+                                                     "input": {"command": "/x/bin/rea analyze app.apk"}}]}}) + "\n")  # fmt: skip
+    assert run("Bash", command="jadx app.apk") is None  # rea ran for this request: free now

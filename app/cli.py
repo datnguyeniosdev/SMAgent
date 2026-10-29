@@ -677,9 +677,12 @@ def cmd_hook_tool(args) -> int:
         event = json.loads(sys.stdin.read() or "{}")
     except ValueError:
         return 0
-    if event.get("tool_name") == "Bash" and re.search(
-        r"(^|/|\s)agw\s", (event.get("tool_input") or {}).get("command", "")
-    ):
+    command = (
+        (event.get("tool_input") or {}).get("command", "")
+        if event.get("tool_name") == "Bash"
+        else ""
+    )
+    if re.search(r"(^|/|\s)agw\s", command):
         return 0
     cwd = event.get("cwd") or str(Path.cwd())
     project = project_for(Path(cwd))
@@ -690,13 +693,65 @@ def cmd_hook_tool(args) -> int:
     try:
         url = f"http://127.0.0.1:{ENV_PORTS['prod']}/api/v1/channel/role?{query}"
         with urllib.request.urlopen(url, timeout=3) as r:  # noqa: S310 - fixed local URL
-            main = json.loads(r.read()).get("main")
+            role = json.loads(r.read())
     except (OSError, ValueError):
         return 0
-    if main:
+    why = ROUTER_ONLY if role.get("main") else None
+    if why is None and role.get("required"):
+        required = role["required"]
+        if command and any(re.match(rf"\s*(\S*/)?{re.escape(c)}(\s|$)", command)
+                           for r in required for c in r.get("commands") or []):  # fmt: skip
+            return 0  # the required command itself
+        missing = skills_not_used(event.get("transcript_path") or "", required)
+        if missing:
+            why = (f"Blocked: this request requires {', '.join(missing)}, not used yet. Skills: load each "
+                   "with the Skill tool (not listed there: Read .claude/skills/<name>/SKILL.md); commands: "
+                   "run them first (e.g. `rea capabilities`, `rea analyze <target>`). Then do the work by "
+                   "their workflows. Mandatory: the gateway checks it.")  # fmt: skip
+    if why:
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse",
-                          "permissionDecision": "deny", "permissionDecisionReason": ROUTER_ONLY}}))  # fmt: skip
+                          "permissionDecision": "deny", "permissionDecisionReason": why}}))  # fmt: skip
     return 0
+
+
+def skills_not_used(transcript: str, required: list[dict]) -> list[str]:
+    """Required skills not used since their request reached this conversation: used = a Skill tool
+    call for it, or a Read of its SKILL.md, after the last mention of the request's message id in the
+    transcript. No transcript (another runtime, unreadable): nothing can be checked, nothing blocked."""
+    try:
+        lines = Path(transcript).read_text(errors="ignore").splitlines() if transcript else []
+    except OSError:
+        return []
+    if not lines:
+        return []
+    missing = []
+    for req in required:
+        start = max((i for i, ln in enumerate(lines) if req["message_id"] in ln), default=-1)
+        used, ran = set(), set()
+        for ln in lines[start + 1 :]:
+            if '"tool_use"' not in ln:
+                continue
+            try:
+                content = (json.loads(ln).get("message") or {}).get("content") or []
+            except ValueError:
+                continue
+            for c in content if isinstance(content, list) else []:
+                if not isinstance(c, dict) or c.get("type") != "tool_use":
+                    continue
+                inp = c.get("input") or {}
+                if c.get("name") == "Skill":
+                    used.add(str(inp.get("skill", "")).rsplit(":", 1)[-1])
+                elif c.get("name") == "Read" and str(inp.get("file_path", "")).endswith(
+                    "/SKILL.md"
+                ):
+                    used.add(Path(str(inp["file_path"])).parent.name)
+                elif c.get("name") == "Bash":
+                    first = (str(inp.get("command", "")).split() or [""])[0]
+                    ran.add(Path(first).name)
+        missing += [s for s in req.get("skills") or [] if s not in used and s not in missing]
+        missing += [f"the `{c}` command" for c in req.get("commands") or []
+                    if c not in ran and f"the `{c}` command" not in missing]  # fmt: skip
+    return missing
 
 
 def cmd_hook_failure(args) -> int:

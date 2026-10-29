@@ -1237,6 +1237,9 @@ class ChannelHub:
             if import_into(s, folder):
                 self._ops(f"📚 skill {s.name} ({s.source}) imported into {Path(folder).name}")
         msg["skill_refs"] = [s.ref() for s in skills]
+        msg["required_skills"] = list(
+            dict.fromkeys([*msg.get("required_skills", []), *(s.name for s in skills)])
+        )
         msg["text"] += note(skills)
 
     async def _to_lane(self, msg: dict, lane: str, *, by: str, brief: str = "", to: str = "",
@@ -1483,8 +1486,11 @@ class ChannelHub:
         }
         msg["meta"]["message_id"] = msg["message_id"]
         msg.update(extra or {})
-        if msg.get("kind") != "answer":  # work: the project's core skills lead it
-            msg["text"] += self.skills_note(msg["project"])
+        if (
+            msg.get("kind") != "answer"
+        ):  # work: the project's core skills lead it, task rules bind it
+            msg["text"] += self.skills_note(msg["project"]) + self._task_rules(msg)
+            msg["required_skills"] = self.core_names(msg["project"])
         if for_agent:
             msg["for_agent"] = for_agent
         if msg.get("kind"):
@@ -1526,6 +1532,7 @@ class ChannelHub:
             raise ValueError("text: the request the user typed")
         msg = {"message_id": new_id("chm"), "project": s.project,
                "text": text.strip() + self.skills_note(s.project),
+               "required_skills": self.core_names(s.project),
                "meta": {"source": "session", "sender": "the user (in the main session)",
                         "project": s.project}, "created_at": now().isoformat()}  # fmt: skip
         msg["meta"]["message_id"] = msg["message_id"]
@@ -1533,18 +1540,40 @@ class ChannelHub:
         self.delivered(msg, s.session_id)
         return msg
 
-    def skills_note(self, project: str) -> str:
-        """The project's core skills (Settings.core_skills): every request through the gateway tells
-        its agent to load them first, instead of hoping they trigger by themselves."""
+    def _task_rules(self, msg: dict) -> str:
+        """routing.task_rules matching the request: their text on it, their commands required."""
+        cfg = getattr(self.svc, "gateway_cfg", None)
+        rules = [
+            r for r in (cfg.routing.task_rules if cfg else []) if re.search(r.match, msg["text"])
+        ]
+        if not rules:
+            return ""
+        msg["required_commands"] = [r.require_command for r in rules if r.require_command]
+        return "".join(f"\n\nMANDATORY rule: {r.rule}" for r in rules)
+
+    def core_names(self, project: str) -> list[str]:
         s = getattr(self.svc, "s", None)
-        core = next((v for k, v in (getattr(s, "core_skills", None) or {}).items()
-                     if _norm(k) == _norm(project)), [])  # fmt: skip
+        return list(next((v for k, v in (getattr(s, "core_skills", None) or {}).items()
+                          if _norm(k) == _norm(project)), []))  # fmt: skip
+
+    def skills_note(self, project: str) -> str:
+        """The project's core skills (Settings.core_skills): every request through the gateway must
+        use them; the PreToolUse hook blocks edits and commands until they are loaded."""
+        core = self.core_names(project)
         if not core:
             return ""
         names = ", ".join(f"`{n}`" for n in core)
-        return (f"\n\nCore skills of {project}: before anything else, load {names} (Claude Code: the "
-                f"Skill tool; other agent tools: read .claude/skills/<name>/SKILL.md in the project) and "
-                f"follow `{core[0]}`'s workflow for this request; it brings in the others it needs.")  # fmt: skip
+        return (f"\n\nMANDATORY core skills of {project}: load {names} with the Skill tool before anything "
+                f"else (not listed there: read .claude/skills/<name>/SKILL.md) and do this request by "
+                f"`{core[0]}`'s workflow. Edits and commands are blocked until they are loaded. In your "
+                "answer, say which of its steps you followed.")  # fmt: skip
+
+    def required_skills(self, session_id: str) -> list[dict]:
+        """The skills the session's current work must use: [{message_id, skills}] (PreToolUse hook)."""
+        return [{"message_id": m["message_id"], "skills": m.get("required_skills") or [],
+                 "commands": m.get("required_commands") or []}
+                for m in self.in_progress(session_id)
+                if m.get("required_skills") or m.get("required_commands")]  # fmt: skip
 
     def as_main(self, session_id: str) -> str:
         """A #Main conversation that names its folder's shared session (an id from before it was
@@ -1562,7 +1591,11 @@ class ChannelHub:
         project's #Main (claim_main), until it disconnects."""
         own = self.pull_id(project, agent, cwd, client)
         mine = self.pull_id(project, agent, cwd, client, instance) if instance else own
-        return mine if mine in self.sessions or mine == self._pinned_sid(project) else own
+        # own session only while pinned: once not the main any more, the conversation folds back
+        # into the folder's shared session (its waiter follows), so what it asks with and what it
+        # listens on are one session again (seen in prod: an answer queued on the shared session
+        # while the waiter listened on the old #Main one)
+        return mine if mine == self._pinned_sid(project) else own
 
     def is_main(
         self, project: str, agent: str, cwd: str, client: str = "", instance: str = ""

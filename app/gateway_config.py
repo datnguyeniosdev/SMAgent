@@ -150,7 +150,24 @@ class ChannelRule(BaseModel):
         return v
 
 
+class TaskRule(BaseModel):
+    """A mandatory rule for every request whose text matches (any project, however it is routed):
+    the rule is added to the request, and with require_command the PreToolUse hook blocks edits and
+    other commands until the session has run that command for the request."""
+
+    match: str  # regex over the request text
+    rule: str
+    require_command: str = ""  # e.g. "rea": a Bash command starting with it
+
+    @field_validator("match")
+    @classmethod
+    def _regex(cls, v):
+        re.compile(v)
+        return v
+
+
 class RoutingConfig(BaseModel):
+    task_rules: list[TaskRule] = []
     channel_rules: list[ChannelRule] = []  # first match wins; no match: the Gateway Agent decides
     default_workflow: str | None = None
     plugin_fallback: bool = True  # Phase 3-5 plugin classifier when no route matches

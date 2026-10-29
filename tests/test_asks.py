@@ -271,8 +271,8 @@ async def test_a_request_to_a_project_with_core_skills_tells_its_agent_to_load_t
     ask = orch.asks.create(B, "Review the shop screen", from_session=a.session_id)
     text = orch.store.get("channel_msg", ask["message_id"])["text"]
     assert (
-        "load `uiux-art-director`, `game-ui-quality-gate`" in text
-        and "follow `uiux-art-director`" in text
+        "load `uiux-art-director`, `game-ui-quality-gate` with the Skill tool" in text
+        and "by `uiux-art-director`'s workflow" in text
     )
     other, _ = hub.send(A, "plain work")  # a project without core skills: unchanged
     assert "Core skills" not in other["text"]
