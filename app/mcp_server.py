@@ -724,6 +724,7 @@ def build_mcp_server(svc) -> MCPServer:
         to: str = "",
         model: str = "",
         text: str = "",
+        skills: list[str] | None = None,
     ) -> dict[str, Any]:
         """Main session only: route a project request (one whose text says you are the main session)
         instead of doing it. lane: the task type, short (ui, build, art, bugfix-login). The open child
@@ -735,16 +736,31 @@ def build_mcp_server(svc) -> MCPServer:
         /model set another), e.g. "sonnet" for light work. The child answers the sender itself; you
         need not reply to the message.
         text (no message_id): work the user typed straight into this main session: it becomes a
-        message and is routed the same way (the main never does it itself)."""
+        message and is routed the same way (the main never does it itself).
+        skills: the skills the lane's session must load for this request: the project's own, shared
+        ones, or another project's as "<project>/<skill>" (see list_skills); one from another
+        project is imported into the lane's folder. Unknown names are refused."""
         try:
             if not message_id:
+                me = svc.channel.sessions.get(svc.channel.as_main(session_id))
+                if me is not None:  # refused before the request becomes a message
+                    svc.channel.resolve_skills(me.project, list(skills or []))
                 message_id = svc.channel.own_request(session_id, text or brief)["message_id"]
-            out = await svc.channel.dispatch(session_id, message_id, lane, brief, to, model)
+            out = await svc.channel.dispatch(session_id, message_id, lane, brief, to, model,
+                                             list(skills or []))  # fmt: skip
             if hint := waiter_hint(svc.channel.sessions.get(session_id)):
                 out["next"] = hint
             return out
         except (ValueError, PermissionError) as e:
             raise GatewayToolError(str(e)) from e
+
+    @tool
+    async def list_skills(project: str) -> dict[str, Any]:
+        """The skills a request of `project` can be given with dispatch(skills=...): the project's
+        own (its .claude/skills), the shared ones (~/.claude/skills), and other projects' skills
+        (name them "<project>/<skill>": they are imported into the lane)."""
+        name = svc.channel.resolve_project(project) or project
+        return svc.channel.skills_catalog(name)
 
     @tool
     async def still_working(session_id: str, note: str = "") -> dict[str, Any]:
@@ -864,6 +880,7 @@ def ask_view(a: dict) -> dict[str, Any]:
 
 
 TOOL_NAMES = [
+    "list_skills",
     "report_deployment",
     "delegate_task",
     "get_task_status",

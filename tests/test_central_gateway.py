@@ -368,3 +368,73 @@ async def test_the_gateway_keeps_its_own_cli_gate_session_alive_as_the_gateway_a
             break
         await asyncio.sleep(0.02)
     assert len(opened) == 2  # another gate session
+
+
+def make_skill(root, name, body="# skill\n"):
+    d = root / ".claude" / "skills" / name
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text(f"---\nname: {name}\n---\n{body}")
+    return d
+
+
+async def test_the_gateway_agent_gives_a_lane_skills_and_imports_other_projects_ones(
+    settings, cfg_dir, tmp_path, monkeypatch
+):
+    from pathlib import Path
+
+    from mcp.client import Client
+
+    from app import skills as sk
+    from app.mcp_server import build_mcp_server
+
+    monkeypatch.setattr(sk, "GLOBAL", tmp_path / "home_skills")
+    (tmp_path / "home_skills").mkdir()
+    gdir = tmp_path / "home_skills" / "game-review"
+    gdir.mkdir()
+    (gdir / "SKILL.md").write_text("shared")
+    orch, hub, gw, own, game, opened = central_setup(settings, cfg_dir, tmp_path, monkeypatch)
+    make_skill(game, "unity-build")
+    uiux = tmp_path / "uiux"
+    make_skill(uiux, "uiux-art-director")
+    hub.registry.note_root("UIUXAgent", str(uiux))
+    hub.registry.note_root(A, str(game))
+
+    cat = hub.skills_catalog(A)
+    assert cat["project"] == ["unity-build"] and cat["global"] == ["game-review"]
+    assert cat["other"] == {"UIUXAgent": ["uiux-art-director"]}
+    with pytest.raises(ValueError, match="unknown skill"):
+        hub.resolve_skills(A, ["invented-skill"])
+
+    m, _ = hub.send(A, "redo the shop screen")
+    _, got, _ = hub.pull("Agent Gateway", gw.session_id)
+    assert (
+        "unity-build" in got[0]["text"] and "list_skills" in got[0]["text"]
+    )  # Gate sees the skills
+    with pytest.raises(ValueError, match="unknown skill"):  # refused before anything moves
+        await hub.dispatch(gw.session_id, m["message_id"], "ui", skills=["nope"])
+    assert orch.store.get("channel_msg", m["message_id"])["session_id"] == gw.session_id
+
+    r = await hub.dispatch(gw.session_id, m["message_id"], "ui",
+                           skills=["unity-build", "uiux-art-director", "game-review", "unity-build"])  # fmt: skip
+    path = Path(r["path"])
+    imported = path / ".claude" / "skills" / "uiux-art-director" / "SKILL.md"
+    assert imported.read_text().endswith("# skill\n")  # another project's skill, imported
+    msg = orch.store.get("channel_msg", m["message_id"])
+    assert [x["name"] for x in msg["skill_refs"]] == [
+        "unity-build",
+        "uiux-art-director",
+        "game-review",
+    ]
+    assert {x["source"] for x in msg["skill_refs"]} == {A, "UIUXAgent", "global"}
+    assert (
+        all(len(x["version"]) == 12 for x in msg["skill_refs"])
+        and "load `unity-build`" in msg["text"]
+    )
+
+    async with Client(build_mcp_server(orch)) as c:
+        listed = (await c.call_tool("list_skills", {"project": A})).structured_content
+        assert listed["other"] == {"UIUXAgent": ["uiux-art-director"]}
+        before = len(orch.store.list("channel_msg"))
+        bad = await c.call_tool("dispatch", {"session_id": gw.session_id, "lane": "ui", "text": "x",
+                                             "skills": ["nope"]})  # fmt: skip
+        assert bad.is_error and len(orch.store.list("channel_msg")) == before  # nothing left behind

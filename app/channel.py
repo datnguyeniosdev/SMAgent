@@ -1047,7 +1047,17 @@ class ChannelHub:
             f"\n\n(You are the Gateway Agent; this request is for the project {project}. Do not do it "
             f"yourself: call dispatch(message_id='{msg['message_id']}', lane=<lane>, brief=<what to do "
             f"and what to report>, session_id=<yours>). {policy} The lane's session works in that "
-            f"project's own folder and answers the sender itself. {self.lanes_note(project)})"
+            f"project's own folder and answers the sender itself. {self.lanes_note(project)} "
+            f"{self._skills_line(project)})"
+        )
+
+    def _skills_line(self, project: str) -> str:
+        cat = self.skills_catalog(project)
+        own = ", ".join(cat["project"]) or "none"
+        return (
+            f"Give the lane the skills this request needs with dispatch(skills=[...]): {project}'s "
+            f"own skills: {own}; shared: {', '.join(cat['global']) or 'none'}; other projects' "
+            "skills as <project>/<skill> (list_skills shows them; they are imported into the lane)."
         )
 
     def _pick_child(self, project: str, lane: str, exclude: str | None = None,
@@ -1114,8 +1124,9 @@ class ChannelHub:
             )
 
     async def dispatch(
-        self, session_id: str, ref: str, lane: str, brief: str = "", to: str = "", model: str = ""
-    ) -> dict:
+        self, session_id: str, ref: str, lane: str, brief: str = "", to: str = "", model: str = "",
+        skills: list[str] = (),
+    ) -> dict:  # fmt: skip
         """The main session hands a message to a child: `to` (s#), else the open child of that
         lane, else a new child opened in a new git worktree with the main's agent tool."""
         session_id = self.as_main(session_id)
@@ -1149,11 +1160,48 @@ class ChannelHub:
             self.svc.store.put("channel_main", _norm(msg["project"]), {**rec, "routed":
                                [*rec.get("routed", []), f"m{msg.get('num')} → {lane}"]})  # fmt: skip
         repo = None if central else main
+        chosen = self.resolve_skills(msg["project"], list(skills))  # refused before anything moves
         return await self._to_lane(msg, lane, by=session_id, brief=brief, to=to, model=model,
-                                   agent=main.agent, main=repo)  # fmt: skip
+                                   agent=main.agent, main=repo, skills=chosen)  # fmt: skip
+
+    def _known_projects(self) -> list[tuple[str, str]]:
+        return [(p.name, p.root) for p in self.registry.all() if p.root]
+
+    def resolve_skills(self, project: str, names: list[str]) -> list:
+        from app.skills import resolve
+
+        return resolve(names, project, self._known_projects()) if names else []
+
+    def skills_catalog(self, project: str) -> dict:
+        """What the Gateway Agent may name for a request of `project`: its own skills, the shared ones,
+        and other projects' skills (named <project>/<skill>; imported into the lane when used)."""
+        from app.skills import global_skills, project_skills
+
+        out = {"project": [], "global": [s.name for s in global_skills()], "other": {}}
+        for name, root in self._known_projects():
+            names = [s.name for s in project_skills(name, root)]
+            if _norm(name) == _norm(project):
+                out["project"] = names
+            elif names:
+                out["other"][name] = names
+        return out
+
+    def _with_skills(self, msg: dict, skills: list, folder: str) -> None:
+        """The chosen skills on the message (recorded with versions), external ones imported into the
+        lane's folder first: a lane always accepts a skill from another project."""
+        if not skills:
+            return
+        from app.skills import import_into, note
+
+        for s in skills:
+            if import_into(s, folder):
+                self._ops(f"📚 skill {s.name} ({s.source}) imported into {Path(folder).name}")
+        msg["skill_refs"] = [s.ref() for s in skills]
+        msg["text"] += note(skills)
 
     async def _to_lane(self, msg: dict, lane: str, *, by: str, brief: str = "", to: str = "",
-                       model: str = "", agent: str = "", main: LiveSession | None = None) -> dict:  # fmt: skip
+                       model: str = "", agent: str = "", main: LiveSession | None = None,
+                       skills: list = ()) -> dict:  # fmt: skip
         """Hand `msg` to a lane: `to` (s#), else the open child of that lane, else a closed child of
         it reopened, else a new child in its own copy of the project. by: who routes it (a main
         session, the Gateway Agent, or "gateway" for a rule). main: the project's own main (its
@@ -1180,6 +1228,7 @@ class ChannelHub:
                    dispatched_by=by)  # fmt: skip
         if target is not None:
             self._tag(target.cwd, msg)
+            await asyncio.to_thread(self._with_skills, msg, list(skills), target.cwd)
             self._enqueue(target, msg)
             self._assigned(msg, target)
             self._ops(f"🧭 m{msg.get('num')} → {self._label(target)} ({lane})")
@@ -1196,6 +1245,7 @@ class ChannelHub:
             self._stopping -= {sid for sid, r in self.svc.store.items("channel_session")
                                if r.get("cwd") == old["path"]}  # fmt: skip
             self._tag(old["path"], msg)
+            await asyncio.to_thread(self._with_skills, msg, list(skills), old["path"])
             if model:  # reopened with another model: it keeps that one
                 self.svc.store.put("channel_child", old["path"], {**old, "model": model})
             msg["wait_cwd"], msg["waiting_since"] = old["path"], now().isoformat()
@@ -1241,6 +1291,7 @@ class ChannelHub:
                            "agent": agent or "claude_code", "created_at": now().isoformat(),
                            "base": base, "target": target, "provider": provider})  # fmt: skip
         self._tag(str(path), msg)
+        await asyncio.to_thread(self._with_skills, msg, list(skills), str(path))
         if fresh:
             msg["text"] += (
                 f"\n\n(Deploy session: this folder is a fresh copy of {msg['project']} at commit "
