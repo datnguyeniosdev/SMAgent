@@ -631,3 +631,24 @@ async def test_gate_dispatches_by_role_and_the_lane_reads_its_task_brief(
         )
         assert other.is_error  # only the session that holds it
     assert hub.skills_catalog("PO Game Agent")["project"] == ["po-agent"]
+
+
+async def test_system_notices_go_to_the_notice_channel_and_work_stays_in_the_group(
+    settings, cfg_dir
+):
+    import asyncio
+
+    from tests.test_config_gateway import CONTROL, gateway
+
+    orch, _ = make(settings, cfg_dir, [])
+    gw = gateway(orch)
+    hub = orch.channel
+    hub._ops("🔌 s1 connected")
+    await asyncio.sleep(0.01)
+    assert gw.bot.sent[-1][1]["chat_id"] == CONTROL  # no notice channel set: the group as before
+    orch.s.telegram_notice_chat_id = -100999
+    hub._ops("🧭 m1 → lane ui")
+    await asyncio.sleep(0.01)
+    assert gw.bot.sent[-1][1]["chat_id"] == -100999 and gw.bot.sent[-1][1]["disable_notification"]
+    await orch.collab.request_human_input("Duyệt commit?", project=A, options=["Có", "Không"])
+    assert gw.bot.sent[-1][1]["chat_id"] == CONTROL  # a question stays with the operator's work

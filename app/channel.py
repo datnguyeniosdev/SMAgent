@@ -184,8 +184,9 @@ class ChannelHub:
     # ---- sessions ----
 
     def _ops(self, html: str) -> None:
-        """A short notice to the operator's group (sessions coming and going, late deliveries)."""
-        self._notify("send_control", html)
+        """A system notice (sessions coming and going, routing, lanes): the notice channel when one is
+        set (TELEGRAM_NOTICE_CHAT_ID), else the operator's group."""
+        self._notify("send_notice", html)
 
     def _label(self, s: LiveSession) -> str:
         from html import escape

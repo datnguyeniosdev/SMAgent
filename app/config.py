@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     telegram_bot_token: SecretStr | None = None
     telegram_control_chat_id: int | None = None
     telegram_report_channel_id: int | None = None
+    # system notices (sessions coming and going, routing, gate, skills, lanes closed): this channel;
+    # unset, they go to the control group with the work (questions, asks, reports, alerts)
+    telegram_notice_chat_id: int | None = None
     telegram_allowed_user_ids: Annotated[frozenset[int], NoDecode] = frozenset()
     telegram_progress_updates: bool = False
     telegram_discussion_chat_id: int | None = (

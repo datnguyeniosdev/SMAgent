@@ -361,6 +361,11 @@ class TelegramGateway:
     async def send_control(self, html: str) -> None:
         await self._send(self.bot.send_message, chat_id=self.s.telegram_control_chat_id, text=html)
 
+    async def send_notice(self, html: str) -> None:
+        """System notices go to their channel (TELEGRAM_NOTICE_CHAT_ID), the group keeps the work."""
+        chat = self.s.telegram_notice_chat_id or self.s.telegram_control_chat_id
+        await self._send(self.bot.send_message, chat_id=chat, text=html, disable_notification=True)
+
     async def send_stalled(self, msgs: list[dict], back: bool) -> None:
         """Work its agent dropped (rate limit, API error, no answer): the operator moves it to another
         session, waits, or cancels. back: that session works again, so going on there is offered."""
@@ -470,6 +475,11 @@ class TelegramGateway:
         for label, chat_id in (
             ("control", self.s.telegram_control_chat_id),
             ("report", self.s.telegram_report_channel_id),
+            *(
+                [("notice", self.s.telegram_notice_chat_id)]
+                if self.s.telegram_notice_chat_id
+                else []
+            ),
         ):
             try:
                 chat = await self.bot.get_chat(chat_id)
