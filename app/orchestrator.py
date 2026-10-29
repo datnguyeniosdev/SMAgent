@@ -1832,6 +1832,12 @@ class Orchestrator:
             raise Rejected()
         return approved, actor
 
+    def _research(self, task: Task) -> bool:
+        """Research runs (and their sub-tasks) are evidence: kept out of retention and cleanup."""
+        keep = set(self.s.retention_exempt_domains)
+        parent = self.tasks.get(task.parent_id) if task.parent_id else None
+        return task.domain in keep or (parent is not None and parent.domain in keep)
+
     def cleanup_artifacts(self, retention_days: int | None = None) -> dict:
         """Delete artifacts of finished tasks older than the retention period.
 
@@ -1859,6 +1865,7 @@ class Orchestrator:
                 or art.task_id in active
                 or art.artifact_id in referenced
                 or owner is None
+                or self._research(owner)
             ):
                 kept += 1
                 continue
@@ -1893,6 +1900,7 @@ class Orchestrator:
             t
             for t in self.tasks.values()
             if t.done and t.updated_at < cutoff and t.task_id not in active
+            and not self._research(t)
             and t.parent_id not in active
             and not any(c.parent_id == t.task_id and c.task_id in active for c in self.tasks.values())
         ]  # fmt: skip

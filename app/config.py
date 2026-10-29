@@ -81,6 +81,7 @@ class Settings(BaseSettings):
     # project -> skills its agents must load first for every request through the gateway (the first
     # one leads), e.g. CORE_SKILLS='{"UIUXAgent": ["uiux-art-director"]}'
     core_skills: dict[str, list[str]] = {}
+    retention_exempt_domains: list[str] = ["game_research"]  # their tasks/artifacts are evidence
     data_retention_days: int = (
         30  # finished tasks/messages/logs older than this are deleted daily; 0 = keep
     )
