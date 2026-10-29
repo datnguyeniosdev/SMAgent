@@ -68,3 +68,122 @@ def test_a_renamed_project_is_still_found_by_its_old_name(settings, cfg_dir):
     hub.registry.rename("Old Name", "New Name")
     hub.pull("New Name", None, "/w/x2")
     assert hub.resolve_project("Old Name") == "New Name"
+
+
+def central_setup(settings, cfg_dir, tmp_path, monkeypatch, rules=""):
+    from app import channel as ch
+    from app import projects
+
+    game = tmp_path / "game"
+    game.mkdir()
+    (game / "README.md").write_text(f"# {A}\n")
+    (game / "plan.md").write_text("v1\n")
+    gate = tmp_path / "gate"
+    gate.mkdir()
+    monkeypatch.setattr(projects, "projects_root", lambda: tmp_path)
+    monkeypatch.setattr(ch, "CLAUDE_JSON", tmp_path / "claude.json")
+    from app.gateway_config import ChannelRule
+
+    orch, _ = make(settings, cfg_dir, [])
+    orch.gateway_cfg.routing.channel_rules = [ChannelRule(**r) for r in rules or []]
+    hub, opened = orch.channel, []
+    hub.launch = lambda path, agent, model="": opened.append(path)
+    gw, _ = hub.claim_main("Agent Gateway", "claude_code", str(gate), "app", "local_gate")
+    own, _, _ = hub.pull(A, None, str(game), 0, "claude_code", "app")  # the project's own main
+    hub.registry.set_routing_mode(A, "central")
+    return orch, hub, gw, own, game, opened
+
+
+async def test_a_central_project_request_goes_to_the_gateway_agent_not_its_own_main(
+    settings, cfg_dir, tmp_path, monkeypatch
+):
+    from pathlib import Path
+
+    orch, hub, gw, own, game, opened = central_setup(settings, cfg_dir, tmp_path, monkeypatch)
+    m, target = hub.send(A, "make the shop screen calmer")
+    assert target is gw and own is not gw
+    _, got, _ = hub.pull("Agent Gateway", gw.session_id)
+    assert "You are the Gateway Agent" in got[0]["text"] and A in got[0]["text"]
+    assert hub.in_progress(own.session_id) == []  # the project's own main is not involved
+
+    with pytest.raises(PermissionError, match="only the Gateway Agent"):
+        await hub.dispatch(own.session_id, m["message_id"], "ui")
+    r = await hub.dispatch(
+        gw.session_id, m["message_id"], "UI", brief="calmer palette, report a shot"
+    )
+    path = Path(r["path"])
+    assert (
+        r["new_session"] and path.parent == game / ".agw-children"
+    )  # the project's copy, not the gateway's
+    assert (path / "plan.md").read_text() == "v1\n" and opened == [path]
+    kid, _, _ = hub.pull(A, None, str(path), 0, "claude_code", "cli")
+    _, got, _ = hub.pull(A, kid.session_id)
+    assert got[0]["message_id"] == m["message_id"] and "calmer palette" in got[0]["text"]
+    assert hub.in_progress(gw.session_id) == []  # the Gateway Agent is free again
+
+
+async def test_a_routing_rule_places_work_without_any_llm_and_reuses_the_lane(
+    settings, cfg_dir, tmp_path, monkeypatch
+):
+    import asyncio
+    from pathlib import Path
+
+    rules = [{"project": "*", "match": r"(?i)^\[qa\]", "lane": "qa"}]
+    orch, hub, gw, own, game, opened = central_setup(
+        settings, cfg_dir, tmp_path, monkeypatch, rules
+    )
+    m, target = hub.send(A, "[qa] retest level 3")
+    assert target is None  # the gateway opens the qa lane itself
+    for _ in range(50):
+        if opened:
+            break
+        await asyncio.sleep(0.02)
+    path = opened[0]
+    assert Path(path).name.startswith("qa-")
+    hub._flush_pending(A)  # flushed again while opening: not opened twice
+    await asyncio.sleep(0.05)
+    assert len(opened) == 1
+    kid, _, _ = hub.pull(A, None, str(path), 0, "claude_code", "cli")
+    _, got, _ = hub.pull(A, kid.session_id)
+    assert got[0]["message_id"] == m["message_id"]
+    assert hub.in_progress(gw.session_id) == [] and hub.in_progress(own.session_id) == []
+    await hub.reply(kid.session_id, "Dạ xong", m["message_id"])
+
+    m2, target = hub.send(A, "[qa] and level 4")  # the open qa child takes the next one
+    assert target is kid and len(opened) == 1
+
+
+async def test_main_mode_projects_still_route_through_their_own_main(
+    settings, cfg_dir, tmp_path, monkeypatch
+):
+    orch, hub, gw, own, game, opened = central_setup(settings, cfg_dir, tmp_path, monkeypatch)
+    hub.registry.set_routing_mode(A, "main")
+    m, target = hub.send(A, "anything")
+    assert target is own and "main session of" in m["text"]
+
+
+async def test_the_operator_moves_a_project_between_main_and_central_routing(settings, cfg_dir):
+    from types import SimpleNamespace
+
+    from tests.test_config_gateway import CONTROL, USER, gateway
+
+    orch, _ = make(settings, cfg_dir, [])
+    gw = gateway(orch)
+    orch.channel.pull(A, None, "/w/a")
+    answers = []
+
+    async def answer(t, **k):
+        answers.append(t)
+
+    def cmd(args):
+        m = SimpleNamespace(chat=SimpleNamespace(id=CONTROL), from_user=SimpleNamespace(id=USER),
+                            answer=answer)  # fmt: skip
+        return m, SimpleNamespace(args=args, command="route")
+
+    await gw.on_route(*cmd("p1 central"))
+    assert "the gateway routes it" in answers[-1]
+    assert orch.channel.registry.resolve(A).routing_mode == "central"
+    await gw.on_route(*cmd(""))
+    assert "Gateway Agent: offline" in answers[-1] and "<b>central</b>" in answers[-1]
+    await gw.on_route(*cmd("p1 main"))
+    assert orch.channel.registry.resolve(A).routing_mode == "main"

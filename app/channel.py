@@ -20,6 +20,7 @@ routed back into the same session (see CollaborationService.submit_feedback).
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import hashlib
 import json
 import logging
@@ -71,6 +72,10 @@ def stop_claude(pid: int) -> bool:
 
 def _norm(text: str) -> str:
     return re.sub(r"[^0-9a-z]+", "", text.lower())
+
+
+def _lane_name(lane: str) -> str:
+    return re.sub(r"[^a-z0-9-]+", "-", lane.lower()).strip("-")[:30] or "task"
 
 
 # agent tools that run as a desktop app or inside an IDE (the rest are terminal CLIs)
@@ -144,6 +149,7 @@ class ChannelHub:
     def __init__(self, svc):
         self.svc = svc
         self.sessions: dict[str, LiveSession] = {}
+        self._bg: set[asyncio.Task] = set()  # central lane openings in flight (kept referenced)
         from app.project_registry import ProjectRegistry
 
         self.registry = ProjectRegistry(svc.store)  # stable project ids, aliases, routing mode
@@ -211,6 +217,11 @@ class ChannelHub:
             self._ops(f"🔌 {self._label(s)} connected")
         return s
 
+    def _project_id(self, s: LiveSession) -> str:
+        if s.mode == "pull" or s.mode == "push":
+            self.registry.note_root(s.project, s.cwd)
+        return self.registry.ensure(s.project).project_id
+
     @staticmethod
     def health(s: LiveSession) -> str:
         """Session health, apart from task and delivery state: ok | stalled | blocked | off | closing."""
@@ -225,7 +236,7 @@ class ChannelHub:
     def _save(self, s: LiveSession) -> None:
         body = {"project": s.project, "cwd": s.cwd, "task_id": s.task_id, "mode": s.mode,
                 "enabled": s.enabled, "agent": s.agent, "client": s.client,
-                "project_id": self.registry.ensure(s.project).project_id,
+                "project_id": self._project_id(s),
                 "agent_id": s.agent or ("claude_code" if s.mode == "push" else ""),
                 "health": self.health(s)}  # fmt: skip
         self.svc.store.put("channel_session", s.session_id, body, task_id=s.task_id, state="open")
@@ -865,6 +876,9 @@ class ChannelHub:
             own is not None and own.deliverable and msg.get("pinned")
         ):  # back to the session it was for
             return own
+        p = self.registry.resolve(project)
+        if p is not None and p.routing_mode == "central":
+            return self._route_central(msg, exclude)
         main = self.main_for(project)
         if main is not None and main.session_id == exclude:  # the main asked its own project
             return self.session_for(project, exclude=exclude)
@@ -878,6 +892,80 @@ class ChannelHub:
             return None
         self._mark_route(msg, main)
         return main
+
+    # ---- central routing (projects with routing_mode "central") ----
+
+    def gateway_agent(self) -> LiveSession | None:
+        """The shared Gateway Agent: the main session of Settings.gateway_agent_project."""
+        s = getattr(self.svc, "s", None)
+        return self.main_for(getattr(s, "gateway_agent_project", "") or "Agent Gateway")
+
+    def rule_lane(self, msg: dict) -> str | None:
+        """Deterministic placement: a lane named on the message, else the first matching
+        routing.channel_rules entry of config/routing/routing.yaml; None: no rule."""
+        if msg.get("lane"):
+            return msg["lane"]
+        text = msg.get("orig_text") or msg.get("text", "")
+        cfg = getattr(self.svc, "gateway_cfg", None)
+        for r in cfg.routing.channel_rules if cfg else []:
+            if fnmatch.fnmatch(_norm(msg["project"]), r.project.lower()) and re.search(
+                r.match, text
+            ):
+                return _lane_name(r.lane)
+        return None
+
+    def _route_central(self, msg: dict, exclude: str | None) -> LiveSession | None:
+        """The gateway places the work itself: a rule's lane (its open child, or a child opened or
+        reopened for it), else the Gateway Agent, which reads it and calls dispatch."""
+        if msg.get("routing") == "opening":
+            return None  # its child is being opened: it is handed over when it connects
+        lane = self.rule_lane(msg)
+        if lane:
+            msg["lane"] = lane
+            kids = [x for x in self.sessions.values() if x.deliverable and x.session_id != exclude
+                    and _norm(x.project) == _norm(msg["project"])
+                    and (self.child(x) or {}).get("lane") == lane]  # fmt: skip
+            if kids:
+                kid = max(kids, key=lambda x: x.mode == "push")
+                self._tag(kid.cwd, msg)
+                return kid
+            msg["routing"] = "opening"
+            self._set(msg, "pending")
+            self._spawn(self._open_for(msg, lane))
+            return None
+        gw = self.gateway_agent()
+        if gw is None or gw.session_id == exclude:
+            if "gateway" not in self._main_asked:
+                self._main_asked.add("gateway")
+                self._notify("send_main_offline", getattr(self.svc.s, "gateway_agent_project", ""))
+            return None
+        if not msg.get("orig_text"):
+            msg["orig_text"], msg["route"] = msg["text"], True
+            msg["text"] += (
+                f"\n\n(You are the Gateway Agent; this request is for the project {msg['project']}, "
+                "which the gateway routes centrally. Do not do it yourself: call dispatch(message_id="
+                f"'{msg['message_id']}', lane=<task type, e.g. ui, build, art, qa>, brief=<what to do "
+                "and what to report>, session_id=<yours>). The lane's child session works in that "
+                f"project's own copy and answers the sender itself. {self.lanes_note(msg['project'])})"
+            )
+        return gw
+
+    def _spawn(self, coro) -> None:
+        try:
+            task = asyncio.get_running_loop().create_task(coro)
+        except RuntimeError:  # no loop (a sync caller): the watchdog's next flush tries again
+            coro.close()
+            return
+        self._bg.add(task)
+        task.add_done_callback(self._bg.discard)
+
+    async def _open_for(self, msg: dict, lane: str) -> None:
+        try:
+            await self._to_lane(msg, lane, by="gateway")
+        except Exception as e:  # noqa: BLE001 - the operator decides what happens to it
+            log.warning("central routing of m%s to %s failed: %s", msg.get("num"), lane, e)
+            msg.pop("routing", None)
+            self._stall([msg], "", f"the gateway could not open the {lane} lane: {e}")
 
     def _mark_route(self, msg: dict, main: LiveSession) -> None:
         """The main session only routes: work reaching it through the gateway (for the project, or
@@ -917,13 +1005,38 @@ class ChannelHub:
         router = (
             bool(rec.get("router_cwd")) and main.cwd == rec["router_cwd"]
         )  # finishing its routing
-        if self.main_for(msg["project"]) is not main and not router:
+        central = (
+            p := self.registry.resolve(msg["project"])
+        ) is not None and p.routing_mode == "central"
+        if central:
+            if main is not self.gateway_agent():
+                raise PermissionError(
+                    f"{msg['project']} is routed by the gateway: only the Gateway Agent dispatches its work"
+                )
+        elif self.main_for(msg["project"]) is not main and not router:
             raise PermissionError(f"only the main session of {msg['project']} routes its work")
         if msg.get("session_id") not in (None, session_id):
             raise PermissionError(f"m{msg.get('num')} is not yours to route")
-        lane = re.sub(r"[^a-z0-9-]+", "-", lane.lower()).strip("-")[:30] or "task"
-        kids = [x for x in self.sessions.values() if x is not main and x.deliverable
-                and _norm(x.project) == _norm(msg["project"])]  # fmt: skip
+        rec = self.svc.store.get("channel_main", _norm(msg["project"])) or {}
+        if (
+            rec.get("router_cwd") and rec["router_cwd"] == main.cwd
+        ):  # told to the main when it is back
+            self.svc.store.put("channel_main", _norm(msg["project"]), {**rec, "routed":
+                               [*rec.get("routed", []), f"m{msg.get('num')} → {lane}"]})  # fmt: skip
+        repo = None if central else main
+        return await self._to_lane(msg, lane, by=session_id, brief=brief, to=to, model=model,
+                                   agent=main.agent, main=repo)  # fmt: skip
+
+    async def _to_lane(self, msg: dict, lane: str, *, by: str, brief: str = "", to: str = "",
+                       model: str = "", agent: str = "", main: LiveSession | None = None) -> dict:  # fmt: skip
+        """Hand `msg` to a lane: `to` (s#), else the open child of that lane, else a closed child of
+        it reopened, else a new child in its own copy of the project. by: who routes it (a main
+        session, the Gateway Agent, or "gateway" for a rule). main: the project's own main (its
+        folder gives the repo); without it, the project folder from the registry."""
+        lane = _lane_name(lane)
+        kids = [x for x in self.sessions.values() if x.session_id != by and x.deliverable
+                and _norm(x.project) == _norm(msg["project"])
+                and x is not self.main_for(msg["project"])]  # fmt: skip
         if to:
             target = next((x for x in kids if f"s{x.num}" == to.lower()), None)
             if target is None:
@@ -931,21 +1044,16 @@ class ChannelHub:
         else:
             same = [x for x in kids if (self.child(x) or {}).get("lane") == lane]
             target = max(same, key=lambda x: x.mode == "push", default=None)
-        for x in self.sessions.values():  # still queued in the main: taken out first
+        for x in self.sessions.values():  # still queued somewhere (a main): taken out first
             for m in [m for m in x.queue._queue if m["message_id"] == msg["message_id"]]:
                 self._take(x, m)
-        for k in ("session_id", "delivered_at", "wait_cwd"):
+        for k in ("session_id", "delivered_at", "wait_cwd", "routing"):
             msg.pop(k, None)
-        note = f"\n\nBrief from the main session (lane {lane}): {brief}" if brief else ""
+        who = "the gateway (a routing rule)" if by == "gateway" else "the routing session"
+        note = f"\n\nBrief from {who} (lane {lane}): {brief}" if brief else ""
         msg.pop("route", None)
         msg.update(text=msg.pop("orig_text", msg["text"]) + note, lane=lane, pinned=True,
-                   dispatched_by=session_id)  # fmt: skip
-        rec = self.svc.store.get("channel_main", _norm(msg["project"])) or {}
-        if (
-            rec.get("router_cwd") and rec["router_cwd"] == main.cwd
-        ):  # told to the main when it is back
-            self.svc.store.put("channel_main", _norm(msg["project"]), {**rec, "routed":
-                               [*rec.get("routed", []), f"m{msg.get('num')} → {lane}"]})  # fmt: skip
+                   dispatched_by=by)  # fmt: skip
         if target is not None:
             self._tag(target.cwd, msg)
             self._enqueue(target, msg)
@@ -970,9 +1078,9 @@ class ChannelHub:
 
                 url = f"http://127.0.0.1:{ENV_PORTS[env_name()]}/mcp"
                 await asyncio.to_thread(setup_repo, Path(old["path"]), url, msg["project"], False)
-            agent = old.get("agent", "") if old.get("agent") not in ("", "claude_code") else ""
+            tool = old.get("agent", "") if old.get("agent") not in ("", "claude_code") else ""
             model = model or old.get("model") or self.models(msg["project"])["child"]
-            wid = await asyncio.to_thread(self.launch, Path(old["path"]), agent, model)
+            wid = await asyncio.to_thread(self.launch, Path(old["path"]), tool, model)
             self._remember_window(old["path"], wid)
             self._ops(
                 f"🧭 m{msg.get('num')} → reopened child ({lane}) on <code>{old['branch']}</code>"
@@ -980,17 +1088,13 @@ class ChannelHub:
             return {"to": "reopened", "lane": lane, "new_session": False, "branch": old["branch"],
                     "path": old["path"]}  # fmt: skip
         try:
-            try:
-                repo = await asyncio.to_thread(self._repo, main)
-            except ValueError:  # not a git repo: its children get a plain copy of the folder
-                from app.projects import repo_for
-
-                repo = repo_for(Path(main.cwd)) or Path(main.cwd)
+            repo = await asyncio.to_thread(self._lane_repo, msg["project"], main)
             free, started = shutil.disk_usage(repo).free, time.monotonic()
             path, branch, base, target, provider = await asyncio.to_thread(_worktree, repo, lane)
-        except ValueError:  # no git repo, worktree failed: it stays with the main
-            msg.update(session_id=session_id, delivered_at=now().isoformat())
-            self._set(msg, "delivered")
+        except ValueError:  # no git repo, worktree failed: it stays with whoever routed it
+            if by in self.sessions:
+                msg.update(session_id=by, delivered_at=now().isoformat())
+                self._set(msg, "delivered")
             raise
         self.svc.store.event("channel.child_created", path=str(path), branch=branch, provider=provider,
                              seconds=round(time.monotonic() - started, 2), free_before=free,
@@ -1002,21 +1106,41 @@ class ChannelHub:
         await asyncio.to_thread(_carry, Path(repo), path)  # (then the gateway section on top)
         await asyncio.to_thread(setup_repo, path, url, msg["project"], False)
         self.svc.store.put("channel_child", str(path), {"project": msg["project"], "lane": lane,
-                           "branch": branch, "repo": str(repo), "parent": session_id, "path": str(path),
-                           "agent": main.agent or "claude_code", "created_at": now().isoformat(),
+                           "branch": branch, "repo": str(repo), "parent": by, "path": str(path),
+                           "agent": agent or "claude_code", "created_at": now().isoformat(),
                            "base": base, "target": target, "provider": provider})  # fmt: skip
         self._tag(str(path), msg)
         msg["wait_cwd"], msg["waiting_since"] = str(path), now().isoformat()
         self._set(msg, "pending")
         await asyncio.to_thread(_trust, path, repo)
-        agent = main.agent if main.agent not in ("", "claude_code") else ""
+        tool = agent if agent not in ("", "claude_code") else ""
         model = model or self.models(msg["project"])["child"]
         c = self.svc.store.get("channel_child", str(path)) or {}
         self.svc.store.put("channel_child", str(path), {**c, "model": model})
-        self._remember_window(str(path), await asyncio.to_thread(self.launch, path, agent, model))
+        self._remember_window(str(path), await asyncio.to_thread(self.launch, path, tool, model))
         where = f"on branch <code>{branch}</code>" if branch else "in a copy of the folder (no git)"
         self._ops(f"🧭 m{msg.get('num')} → new child ({lane}) {where}")
         return {"to": "new", "lane": lane, "new_session": True, "branch": branch, "path": str(path)}
+
+    def _lane_repo(self, project: str, main: LiveSession | None) -> Path:
+        """The folder a new lane is copied from: the main's repo (main mode), else the project folder
+        the registry remembers from its sessions; a folder that is not a git repo is copied as is."""
+        from app.projects import repo_for
+
+        if main is not None:
+            try:
+                return self._repo(main)
+            except ValueError:
+                return repo_for(Path(main.cwd)) or Path(main.cwd)
+        p = self.registry.resolve(project)
+        if p is None or not p.root:
+            raise ValueError(
+                f"the folder of {project} is not known yet (no session has opened there)"
+            )
+        try:
+            return _toplevel(p.root)
+        except ValueError:
+            return repo_for(Path(p.root)) or Path(p.root)
 
     def models(self, project: str) -> dict:
         """Claude models for the project's child sessions and temporary router: /model, else the

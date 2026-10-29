@@ -69,6 +69,7 @@ HELP = (
 /close &lt;s#&gt; · /off &lt;s#&gt; · /on &lt;s#&gt; — close a session, or stop/resume giving it work
 /children prune &lt;lane&gt; — delete a closed 🧭 child's folder (its branch stays), confirmed
 /list all — also idle projects' details and closed lanes · /forget &lt;p#&gt; — drop an old project name
+/route [p# central|main] — who routes a project's work: the gateway (central) or its own main
 /auto — 🌙 auto-accept on/off: while you are away every question is answered (secure ones approved,
   else the first option); switching on takes the passcode
 /main [p#] &lt;s#&gt; — pin it as its project's 👑 main session (routes project requests to 🧭 child
@@ -572,6 +573,7 @@ class TelegramGateway:
         r.message(Command("model"))(self.on_model)
         r.message(Command("cancel"))(self.on_cancel)
         r.message(Command("forget"))(self.on_forget)
+        r.message(Command("route"))(self.on_route)
         r.message(Command("auto"))(self.on_auto)
         r.message(Command("tools"))(self.on_tools)
         r.message(Command("tool"))(self.on_tool)
@@ -932,6 +934,32 @@ class TelegramGateway:
         why = self.orch.channel.forget_project(name)
         await say(m, f"🧹 <b>{escape(name)}</b> forgotten" if why is None
                   else f"Not forgotten: {escape(why)}")  # fmt: skip
+
+    async def on_route(self, m: TgMessage, command: CommandObject):
+        """/route: each project's routing mode. /route p# central|main: the gateway routes the project
+        itself (rules, then the Gateway Agent), or its own pinned main session does (the old way)."""
+        if not self._authorized_msg(m):
+            return
+        hub = self.orch.channel
+        args = (command.args or "").split()
+        if len(args) == 2 and args[1] in ("central", "main"):
+            name = hub.resolve_project(args[0])
+            if name is None:
+                await say(m, "Unknown project (projects: /list)")
+                return
+            p = hub.registry.set_routing_mode(hub.registry.ensure(name).project_id, args[1])
+            how = ("the gateway routes it (rules, then the Gateway Agent)" if p.routing_mode == "central"
+                   else "its own main session routes it")  # fmt: skip
+            await say(m, f"🧭 <b>{escape(p.name)}</b>: {how}")
+            return
+        gw = hub.gateway_agent()
+        modes = {p.name: p.routing_mode for p in hub.registry.all()}
+        rows = [
+            f"p{num} {escape(name)} · <b>{modes.get(name, 'main')}</b>"
+            for num, name in hub.projects()
+        ]
+        head = f"🧭 Gateway Agent: {escape(hub._label(gw)) if gw else 'offline'}"
+        await say(m, "\n".join([head, *rows, "", "/route p# central|main"]))
 
     async def on_open(self, m: TgMessage, command: CommandObject):
         """/open <folder|p#> [new]: start a Claude Code session for a project folder on this Mac.

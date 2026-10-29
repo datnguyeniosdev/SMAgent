@@ -135,7 +135,23 @@ class FeedbackRouteDef(BaseModel):
     requires_report_images: bool = False
 
 
+class ChannelRule(BaseModel):
+    """Central routing of live-session work: a request of a project in routing_mode "central" whose
+    text matches goes to `lane` (its child session), with no LLM involved."""
+
+    project: str = "*"  # glob over the project's normalized name
+    match: str  # regex over the request text
+    lane: str
+
+    @field_validator("match")
+    @classmethod
+    def _regex(cls, v):
+        re.compile(v)
+        return v
+
+
 class RoutingConfig(BaseModel):
+    channel_rules: list[ChannelRule] = []  # first match wins; no match: the Gateway Agent decides
     default_workflow: str | None = None
     plugin_fallback: bool = True  # Phase 3-5 plugin classifier when no route matches
     dynamic_planning: dict = {"enabled": False}  # model-generated plans: not implemented

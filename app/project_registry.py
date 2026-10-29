@@ -27,6 +27,7 @@ class Project(BaseModel):
     name: str
     aliases: list[str] = []  # earlier names
     routing_mode: RoutingMode = "main"
+    root: str = ""  # the project folder (from its sessions): lanes are copied from here
     created_at: datetime = Field(default_factory=now)
 
     def names(self) -> list[str]:
@@ -70,6 +71,17 @@ class ProjectRegistry:
             p.aliases = [a for a in [*p.aliases, p.name] if norm(a) != norm(new_name)]
             p.name = new_name.strip()
         return self._save(p)
+
+    def note_root(self, name: str, cwd: str) -> None:
+        """A session of the project opened in `cwd`: its project folder is remembered (a lane copy or
+        an app worktree points back to the project, not to itself)."""
+        if not cwd or "/.agw-children/" in cwd + "/":
+            return
+        root = cwd.split("/.claude/worktrees/")[0]
+        p = self.ensure(name)
+        if not p.root or (len(root) < len(p.root) and p.root.startswith(root + "/")):
+            p.root = root
+            self._save(p)
 
     def set_routing_mode(self, ref: str, mode: RoutingMode) -> Project:
         p = self.resolve(ref)

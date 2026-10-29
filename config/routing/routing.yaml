@@ -1,5 +1,10 @@
 schema_version: 1
 routing:
+  # Live-session work of projects in routing_mode central (/route p# central): the first rule
+  # whose project glob and regex match the request names its lane; the gateway hands it to that
+  # lane's child itself. No match: the shared Gateway Agent reads it and calls dispatch.
+  #   - {project: "*", match: "(?i)^\\s*\\[qa\\]", lane: qa}   # "[qa] retest level 3"
+  channel_rules: []
   default_workflow: general.answer
   plugin_fallback: true          # Phase 3-5 plugin classifier when no route matches
   dynamic_planning: {enabled: false}
