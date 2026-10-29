@@ -96,3 +96,44 @@ async def test_an_answered_question_loses_its_telegram_buttons(settings, cfg_dir
     await collab.close_human_input(in_app.request_id, "yes, in the session")  # answered in the app
     await asyncio.sleep(0)
     assert dropped() == [mid, mid2]
+
+
+async def test_a_question_answered_in_the_session_is_not_resent_once_the_session_moves_on(
+    settings, cfg_dir
+):
+    """Seen in prod: approvals answered in the app, no close_question, so the Telegram copy was
+    reminded 30 minutes later and looked like a duplicate."""
+    import asyncio
+
+    from mcp.client import Client
+
+    from app.mcp_server import build_mcp_server
+
+    orch, _ = make(settings, cfg_dir, [])
+    gw = gateway(orch)
+    s, _, _ = orch.channel.pull(A, None, "/w/a")
+    collab = orch.collab
+    first = await collab.request_human_input(
+        "Commit theme A?", project=A, session_id=s.session_id, secure=True
+    )
+    second = await collab.request_human_input(
+        "Commit theme B?", project=A, session_id=s.session_id, secure=True
+    )
+    await asyncio.sleep(0)
+    old = collab.get_human_input(first.request_id)
+    assert old.status == "answered" and old.responder == "session"  # settled before the new one
+    assert collab.get_human_input(second.request_id).status == "pending"
+    assert any(kind == "markup" for kind, _, _ in gw.bot.sent)  # its buttons are gone
+
+    async with Client(build_mcp_server(orch)) as c:
+        await c.call_tool("submit_report", {"text": "Dạ, đang làm", "project": A,
+                                            "session_id": s.session_id, "agent_status": "in_progress"})  # fmt: skip
+        assert (
+            collab.get_human_input(second.request_id).status == "pending"
+        )  # progress: still waiting
+        await c.call_tool("submit_report", {"text": "Dạ, đã commit theme B", "project": A,
+                                            "session_id": s.session_id})  # fmt: skip
+    assert collab.get_human_input(second.request_id).status == "answered"
+    assert (
+        await collab.remind_questions(after=__import__("datetime").timedelta(0)) == 0
+    )  # nothing to resend

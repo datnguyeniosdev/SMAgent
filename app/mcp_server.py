@@ -383,6 +383,8 @@ def build_mcp_server(svc) -> MCPServer:
             title = text.strip().splitlines()[0] if text.strip() else "report"
             task_id = svc.register_external(title, "mcp", project, session_id).task_id
         task_or_error(task_id)
+        if session_id and agent_status != "in_progress":  # its result: its questions were settled
+            await svc.collab.supersede(session_id, "the session reported its result")
         if agent_status not in (None, "completed", "partial", "blocked", "failed", "in_progress"):
             raise GatewayToolError(
                 "agent_status must be completed|partial|blocked|failed|in_progress"
@@ -617,6 +619,7 @@ def build_mcp_server(svc) -> MCPServer:
         image_paths: absolute paths of local PNG/JPEG/WebP/GIF files to attach (e.g. screenshots).
         Their Telegram reply comes back through get_messages."""
         images = paths_or_error(image_paths)
+        await svc.collab.supersede(session_id, "the session answered")
         try:
             rep = await svc.channel.reply(session_id, text, message_id, images)
         except KeyError as e:

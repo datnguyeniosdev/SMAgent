@@ -795,6 +795,8 @@ class CollaborationService:
     ) -> HumanInput:
         if task_id and task_id not in self.svc.tasks:
             raise CollaborationError("unknown_task", f"unknown task {task_id}")
+        if session_id:  # it asks something new: what it asked before was settled in its session
+            await self.supersede(session_id, "a newer question from the same session")
         hi = HumanInput(
             task_id=task_id,
             question=question.strip(),
@@ -956,6 +958,23 @@ class CollaborationService:
             hi.status = "expired"
             self.store.put("human_input", hi.request_id, hi, task_id=hi.task_id, state=hi.status)
         return hi
+
+    async def supersede(self, session_id: str, why: str) -> int:
+        """The session moved on (a new question, its answer or report): its questions still pending
+        on Telegram were settled in the session (the agent did not call close_question), so they are
+        closed, lose their buttons and are not reminded again. Returns how many."""
+        n = 0
+        for body in self.store.list("human_input", states=["pending"]):
+            hi = HumanInput.model_validate(body)
+            if hi.session_id != session_id:
+                continue
+            hi.status, hi.responder, hi.answered_at = "answered", "session", now()
+            hi.response = f"(đã xử lý trong session: {why})"
+            self.store.put("human_input", hi.request_id, hi, task_id=hi.task_id, state=hi.status)
+            self.store.event("human_input.superseded", task_id=hi.task_id, request_id=hi.request_id)
+            self._drop_buttons(hi)
+            n += 1
+        return n
 
     async def close_human_input(self, request_id: str, answer: str) -> HumanInput:
         """Answered in the agent's session, not on Telegram: closed (no reminder, no double answer,
