@@ -1053,6 +1053,12 @@ class TelegramGateway:
                 "answer", body, project=a.get("from_project"), title=f"Answer ({k})", ref=k
             )
             await self.send_control(html)
+            for aid in a.get("images") or []:  # the answer's screenshots, after its text
+                art = self.orch.artifacts.get(aid)
+                if art is not None:
+                    data = await asyncio.to_thread(self.orch.artifacts.read, art)
+                    await self._send(self.bot.send_photo, chat_id=self.s.telegram_control_chat_id,
+                                     photo=BufferedInputFile(data, art.filename))  # fmt: skip
             return
         target = self.orch.channel.sessions.get(a.get("to_session") or "")
         where = f"<b>{escape(a['to_project'])}</b>" + (f" (s{target.num})" if target else "")

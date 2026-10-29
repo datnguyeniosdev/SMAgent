@@ -571,3 +571,63 @@ def test_a_task_rule_binds_matching_requests_in_any_project(settings, cfg_dir):
     _, got, _ = hub.pull(A, s.session_id)
     assert hub.required_skills(s.session_id) == [{"message_id": got[0]["message_id"], "skills": [],
                                                   "commands": ["rea"]}]  # fmt: skip
+
+
+async def test_gate_dispatches_by_role_and_the_lane_reads_its_task_brief(
+    settings, cfg_dir, tmp_path, monkeypatch
+):
+    from pathlib import Path
+
+    from mcp.client import Client
+
+    from app import skills as sk
+    from app.gateway_config import RoleDef
+    from app.mcp_server import build_mcp_server
+
+    monkeypatch.setattr(sk, "GLOBAL", tmp_path / "none")
+    orch, hub, gw, own, game, opened = central_setup(settings, cfg_dir, tmp_path, monkeypatch)
+    qa = tmp_path / "qa"
+    make_skill(qa, "qa-agent")
+    po = tmp_path / "po"
+    (po / "skills" / "po-agent").mkdir(parents=True)  # PO keeps its skills in skills/, not .claude/
+    (po / "skills" / "po-agent" / "SKILL.md").write_text("po")
+    hub.registry.note_root("QAIPAgent", str(qa))
+    hub.registry.note_root("PO Game Agent", str(po))
+    orch.gateway_cfg.routing.roles = {
+        "qa": RoleDef(description="testing", skills=["QAIPAgent/qa-agent"], prompt="You are QA."),
+        "po": RoleDef(
+            description="product", skills=["PO Game Agent/po-agent"], prompt="You are PO."
+        ),
+    }
+    m, _ = hub.send(A, "retest the shop flow")
+    _, got, _ = hub.pull("Agent Gateway", gw.session_id)
+    assert "dispatch(role=...)" in got[0]["text"] and "qa: testing" in got[0]["text"]
+    with pytest.raises(ValueError, match="unknown role"):
+        await hub.dispatch(gw.session_id, m["message_id"], "qa", role="tester")
+
+    r = await hub.dispatch(
+        gw.session_id, m["message_id"], "qa", role="qa", brief="focus on payments"
+    )
+    path = Path(r["path"])
+    assert (path / ".claude/skills/qa-agent/SKILL.md").exists()  # the role's skill, imported
+    kid, _, _ = hub.pull(A, None, str(path), 0, "claude_code", "cli")
+    _, got, _ = hub.pull(A, kid.session_id)
+    assert (
+        "MANDATORY role: qa. You are QA." in got[0]["text"] and "get_task_brief" in got[0]["text"]
+    )
+    async with Client(build_mcp_server(orch)) as c:
+        brief = (await c.call_tool("get_task_brief", {"message_id": m["message_id"],
+                                                      "session_id": kid.session_id})).structured_content  # fmt: skip
+        assert (brief["role"], brief["role_prompt"], brief["brief"]) == (
+            "qa",
+            "You are QA.",
+            "focus on payments",
+        )
+        assert (
+            brief["required_skills"] == ["qa-agent"] and brief["request"] == "retest the shop flow"
+        )
+        other = await c.call_tool(
+            "get_task_brief", {"message_id": m["message_id"], "session_id": gw.session_id}
+        )
+        assert other.is_error  # only the session that holds it
+    assert hub.skills_catalog("PO Game Agent")["project"] == ["po-agent"]

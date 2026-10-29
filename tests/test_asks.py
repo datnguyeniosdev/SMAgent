@@ -279,3 +279,27 @@ async def test_a_request_to_a_project_with_core_skills_tells_its_agent_to_load_t
     orch.asks.answer(ask["ask_id"], "done", by="B")  # an answer is not work: no note
     answer = [m for m in orch.store.list("channel_msg") if m.get("kind") == "answer"][-1]
     assert "Core skills" not in answer["text"]
+
+
+async def test_an_answer_with_screenshots_keeps_them_for_the_asker_and_the_operator(
+    settings, cfg_dir
+):
+    from tests.conftest import make_png
+    from tests.test_config_gateway import gateway
+
+    orch, _ = make(settings, cfg_dir, [])
+    gw = gateway(orch)
+    hub = orch.channel
+    a, _, _ = hub.pull(A, None, "/w/a")
+    b, _, _ = hub.pull(B, None, "/w/b")
+    orch.asks.create(B, "Review the shop screen", from_session=a.session_id)
+    _, got, _ = hub.pull(B, b.session_id)
+    out = await hub.reply(b.session_id, "Dạ, đây là bản review", got[0]["message_id"],
+                          images=[("shop.png", make_png(8, 8))])  # fmt: skip
+    done = out["ask"]
+    assert len(done["images"]) == 1 and "Screenshots:" in done["answer"]
+    _, back, _ = hub.pull(A, a.session_id)
+    path = back[-1]["text"].split("Screenshots:\n")[1].split("\n")[0]
+    assert open(path, "rb").read() == make_png(8, 8)  # the asker can open it
+    await gw.notify_ask(done, "answered")
+    assert any(kind == "photo" for kind, _, _ in gw.bot.sent)  # the operator sees the picture

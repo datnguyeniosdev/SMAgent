@@ -5,6 +5,29 @@ routing:
   # lane's child itself. No match: the shared Gateway Agent reads it and calls dispatch.
   #   - {project: "*", match: "(?i)^\\s*\\[qa\\]", lane: qa}   # "[qa] retest level 3"
   channel_rules: []
+  # Worker roles the Gateway Agent assigns with dispatch(role=...): the prompt and the skills go with
+  # the request and the skills are enforced (own skill, shared, or <project>/<skill>).
+  roles:
+    uiux:
+      description: UI/UX design, review and redesign of screens and flows
+      skills: [UIUXAgent/uiux-art-director]
+      prompt: You are the UI/UX art director for this request; follow uiux-art-director's workflow.
+    art:
+      description: game art, icons, sprites, backgrounds, effects and sounds
+      skills: [game-asset-forge, UIUXAgent/game-art-direction]
+      prompt: You make original game assets for this request; follow the art direction and the forge pipeline.
+    qa:
+      description: testing a build, feature, release candidate, regression, IP or asset check
+      skills: [QAIPAgent/qa-agent]
+      prompt: You are the QA worker for this request; follow qa-agent.
+    po:
+      description: product decisions, idea validation, market or competitor research, roadmap, backlog
+      skills: [PO Game Agent/po-agent]
+      prompt: You are the game product owner for this request; follow po-agent.
+    gamedev:
+      description: code work on a product (features, fixes, refactors, tuning, integration)
+      skills: [game-dev]
+      prompt: You are the developer on this product's dev lane; follow game-dev.
   # Mandatory rules by request text, any project: added to the request; require_command makes the
   # PreToolUse hook block edits and other commands until the session has run it for that request.
   task_rules:

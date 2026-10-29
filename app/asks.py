@@ -170,7 +170,7 @@ class AskService:
                  state="delivered" if a["state"] == "queued" else a["state"])  # fmt: skip
         self._save(a)
 
-    def answer(self, ask_id: str, text: str, by: str) -> dict:
+    def answer(self, ask_id: str, text: str, by: str, images: list[str] = ()) -> dict:
         """B's reply (or the operator's): back to A, as information that needs no reply."""
         a = self.get(ask_id)
         if a is None:
@@ -182,6 +182,7 @@ class AskService:
             answer=text.strip()[:8000],
             answered_by=by,
             answered_at=now().isoformat(),
+            images=list(images),  # artifact ids of the answer's screenshots
         )
         self._save(a)
         msg = self.svc.store.get("channel_msg", a.get("message_id") or "")

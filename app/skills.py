@@ -38,7 +38,16 @@ def _read(folder: Path, source: str) -> list[Skill]:
 
 
 def project_skills(name: str, root: str | Path) -> list[Skill]:
-    return _read(Path(root) / ".claude" / "skills", name) if root else []
+    """A project's own skills: `.claude/skills/` (Claude Code's place) and a top-level `skills/`
+    (agent projects such as POAgent keep theirs there); the first one wins on a name."""
+    if not root:
+        return []
+    seen, out = set(), []
+    for s in [*_read(Path(root) / ".claude" / "skills", name), *_read(Path(root) / "skills", name)]:
+        if s.name not in seen:
+            seen.add(s.name)
+            out.append(s)
+    return out
 
 
 def global_skills(home: Path | None = None) -> list[Skill]:

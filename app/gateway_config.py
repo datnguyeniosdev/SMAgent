@@ -166,7 +166,17 @@ class TaskRule(BaseModel):
         return v
 
 
+class RoleDef(BaseModel):
+    """A worker role the Gateway Agent assigns with dispatch(role=...): its prompt and its skills
+    (own project skill, shared, or <project>/<skill>) are put on the request, the skills enforced."""
+
+    description: str
+    skills: list[str] = []
+    prompt: str = ""
+
+
 class RoutingConfig(BaseModel):
+    roles: dict[str, RoleDef] = {}
     task_rules: list[TaskRule] = []
     channel_rules: list[ChannelRule] = []  # first match wins; no match: the Gateway Agent decides
     default_workflow: str | None = None

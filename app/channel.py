@@ -1092,10 +1092,19 @@ class ChannelHub:
         )
 
     def _skills_line(self, project: str) -> str:
+        roles = "; ".join(f"{k}: {v.description}" for k, v in self.roles().items())
+        head = (
+            (
+                f"Assign the worker a role with dispatch(role=...) when one fits ({roles}): its prompt and "
+                "skills go with the request. "
+            )
+            if roles
+            else ""
+        )
         cat = self.skills_catalog(project)
         own = ", ".join(cat["project"]) or "none"
-        return (
-            f"Give the lane the skills this request needs with dispatch(skills=[...]): {project}'s "
+        return head + (
+            f"Add skills with dispatch(skills=[...]) when needed: {project}'s "
             f"own skills: {own}; shared: {', '.join(cat['global']) or 'none'}; other projects' "
             "skills as <project>/<skill> (list_skills shows them; they are imported into the lane)."
         )
@@ -1165,7 +1174,7 @@ class ChannelHub:
 
     async def dispatch(
         self, session_id: str, ref: str, lane: str, brief: str = "", to: str = "", model: str = "",
-        skills: list[str] = (),
+        skills: list[str] = (), role: str = "",
     ) -> dict:  # fmt: skip
         """The main session hands a message to a child: `to` (s#), else the open child of that
         lane, else a new child opened in a new git worktree with the main's agent tool."""
@@ -1200,9 +1209,43 @@ class ChannelHub:
             self.svc.store.put("channel_main", _norm(msg["project"]), {**rec, "routed":
                                [*rec.get("routed", []), f"m{msg.get('num')} → {lane}"]})  # fmt: skip
         repo = None if central else main
-        chosen = self.resolve_skills(msg["project"], list(skills))  # refused before anything moves
+        rd = self.role(role)  # refused before anything moves, like unknown skills
+        chosen = self.resolve_skills(msg["project"], [*(rd.skills if rd else []), *skills])
+        if rd is not None:
+            msg["role"], msg["role_prompt"] = role, rd.prompt
         return await self._to_lane(msg, lane, by=session_id, brief=brief, to=to, model=model,
                                    agent=main.agent, main=repo, skills=chosen)  # fmt: skip
+
+    def roles(self) -> dict:
+        cfg = getattr(self.svc, "gateway_cfg", None)
+        return dict(cfg.routing.roles) if cfg else {}
+
+    def role(self, name: str):
+        if not name:
+            return None
+        rd = self.roles().get(name)
+        if rd is None:
+            raise ValueError(
+                f"unknown role {name!r}: one of {', '.join(self.roles()) or 'none configured'}"
+            )
+        return rd
+
+    def task_brief(self, message_id: str, session_id: str) -> dict:
+        """What a lane session must know when it starts a request (get_task_brief): its role and the
+        role's prompt, the skills it must use (with versions), the mandatory rules and commands, the
+        routing brief, and the request itself. Only for the session that holds it."""
+        msg = self.svc.store.get("channel_msg", message_id)
+        if msg is None:
+            raise ValueError(f"no message {message_id}")
+        holders = {msg.get("session_id"), msg.get("queued_for"), msg.get("for_session")}
+        if session_id not in holders and self.as_main(session_id) not in holders:
+            raise PermissionError(f"m{msg.get('num')} is not yours")
+        return {"message_id": message_id, "project": msg["project"], "lane": msg.get("lane"),
+                "role": msg.get("role"), "role_prompt": msg.get("role_prompt"),
+                "skills": msg.get("skill_refs") or [], "required_skills": msg.get("required_skills") or [],
+                "required_commands": msg.get("required_commands") or [], "rules": msg.get("rules") or [],
+                "brief": msg.get("brief"),
+                "request": msg.get("request") or msg.get("orig_text") or msg["text"]}  # fmt: skip
 
     def _known_projects(self) -> list[tuple[str, str]]:
         return [(p.name, p.root) for p in self.registry.all() if p.root]
@@ -1229,6 +1272,10 @@ class ChannelHub:
     def _with_skills(self, msg: dict, skills: list, folder: str) -> None:
         """The chosen skills on the message (recorded with versions), external ones imported into the
         lane's folder first: a lane always accepts a skill from another project."""
+        if msg.get("role") and "MANDATORY role" not in msg["text"]:
+            msg["text"] += (f"\n\nMANDATORY role: {msg['role']}. {msg.get('role_prompt') or ''} Call "
+                            f"get_task_brief(message_id='{msg['message_id']}', session_id=<yours>) first: "
+                            "it gives your role, skills, rules and brief.")  # fmt: skip
         if not skills:
             return
         from app.skills import import_into, note
@@ -1266,7 +1313,9 @@ class ChannelHub:
             msg.pop(k, None)
         who = "the gateway (a routing rule)" if by == "gateway" else "the routing session"
         note = f"\n\nBrief from {who} (lane {lane}): {brief}" if brief else ""
+        msg["brief"] = brief or None
         msg.pop("route", None)
+        msg.setdefault("request", msg.get("orig_text") or msg["text"])  # as asked, before any notes
         msg.update(text=msg.pop("orig_text", msg["text"]) + note, lane=lane, pinned=True,
                    dispatched_by=by)  # fmt: skip
         if target is not None:
@@ -1549,6 +1598,7 @@ class ChannelHub:
         if not rules:
             return ""
         msg["required_commands"] = [r.require_command for r in rules if r.require_command]
+        msg["rules"] = [r.rule for r in rules]
         return "".join(f"\n\nMANDATORY rule: {r.rule}" for r in rules)
 
     def core_names(self, project: str) -> list[str]:
@@ -1977,7 +2027,12 @@ class ChannelHub:
             )  # an agent's request: the answer goes back to that agent, not to Telegram
             by = f"s{s.num} ({s.project})" if s else rec["project"]
             self._flush_pending(rec["project"])
-            return {"ask": self.svc.asks.answer(msg["ask_id"], text, by=by)}
+            shots = [self.svc.artifacts.add(rec["task_id"], "screenshot", name, data, producer=by)
+                     for name, data in images]  # fmt: skip
+            if shots:  # the asker reads them by path; the operator's copy shows them as photos
+                text += "\n\nScreenshots:\n" + "\n".join(str(a.path) for a in shots)
+            return {"ask": self.svc.asks.answer(msg["ask_id"], text, by=by,
+                                                images=[a.artifact_id for a in shots])}  # fmt: skip
         if msg is not None:
             if msg.get("state") == "cancelled":
                 note = f"\n\n(answer to {message_id}, which was cancelled on Telegram)"

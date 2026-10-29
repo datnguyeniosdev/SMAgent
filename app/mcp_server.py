@@ -725,6 +725,7 @@ def build_mcp_server(svc) -> MCPServer:
         model: str = "",
         text: str = "",
         skills: list[str] | None = None,
+        role: str = "",
     ) -> dict[str, Any]:
         """Main session only: route a project request (one whose text says you are the main session)
         instead of doing it. lane: the task type, short (ui, build, art, bugfix-login). The open child
@@ -739,18 +740,33 @@ def build_mcp_server(svc) -> MCPServer:
         message and is routed the same way (the main never does it itself).
         skills: the skills the lane's session must load for this request: the project's own, shared
         ones, or another project's as "<project>/<skill>" (see list_skills); one from another
-        project is imported into the lane's folder. Unknown names are refused."""
+        project is imported into the lane's folder. Unknown names are refused.
+        role: a configured worker role (qa, po, uiux, art, gamedev, ...): its prompt and skills go with
+        the request and the skills are enforced; an unknown role is refused."""
         try:
             if not message_id:
                 me = svc.channel.sessions.get(svc.channel.as_main(session_id))
                 if me is not None:  # refused before the request becomes a message
-                    svc.channel.resolve_skills(me.project, list(skills or []))
+                    rd = svc.channel.role(role)
+                    svc.channel.resolve_skills(
+                        me.project, [*(rd.skills if rd else []), *(skills or [])]
+                    )
                 message_id = svc.channel.own_request(session_id, text or brief)["message_id"]
             out = await svc.channel.dispatch(session_id, message_id, lane, brief, to, model,
-                                             list(skills or []))  # fmt: skip
+                                             list(skills or []), role)  # fmt: skip
             if hint := waiter_hint(svc.channel.sessions.get(session_id)):
                 out["next"] = hint
             return out
+        except (ValueError, PermissionError) as e:
+            raise GatewayToolError(str(e)) from e
+
+    @tool
+    async def get_task_brief(message_id: str, session_id: str) -> dict[str, Any]:
+        """Call this first when you start a request the gateway routed to you: your role and its
+        prompt, the skills you must use (load them with the Skill tool), the mandatory rules and
+        commands, the routing brief and the request itself."""
+        try:
+            return svc.channel.task_brief(message_id, session_id)
         except (ValueError, PermissionError) as e:
             raise GatewayToolError(str(e)) from e
 
@@ -880,6 +896,7 @@ def ask_view(a: dict) -> dict[str, Any]:
 
 
 TOOL_NAMES = [
+    "get_task_brief",
     "list_skills",
     "report_deployment",
     "delegate_task",
