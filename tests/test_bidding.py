@@ -162,3 +162,12 @@ async def test_a_product_is_never_auctioned(settings, cfg_dir, tmp_path, monkeyp
     orch.s.bid_projects = [A]
     m, r = await offer_round(hub, gw, "make the shop calmer", "ui")
     assert r["to"] == f"s{dev.num}" and r["lane"] == "dev"  # its one worker
+
+
+async def test_the_projects_own_folder_is_not_asked(settings, cfg_dir, tmp_path, monkeypatch):
+    orch, hub, gw, shop, level, opened = await pilot(settings, cfg_dir, tmp_path, monkeypatch)
+    root, _, _ = hub.pull(A, None, str(tmp_path / "game"), 0, "claude_code", "app")
+    hub.adopt(root, "task")  # a former main working in the project folder
+    m, r = await offer_round(hub, gw, "add a daily reward popup", "rewards")
+    assert r["to"] == "offered" and f"s{root.num}" not in r["offers"]
+    assert hub.pull(A, root.session_id)[1] == []

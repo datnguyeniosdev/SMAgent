@@ -1320,10 +1320,12 @@ class ChannelHub:
         """The sessions to offer `msg` to, best context first, at most Settings.offer_max, one per
         folder (a Terminal child's push and pull twins are one conversation). Not asked: a folder
         with any work (it counts as a no), one reserved by a placement, one that left an offer
-        unanswered within CHILD_IDLE (it may have no bid tool)."""
+        unanswered within CHILD_IDLE (it may have no bid tool), and the project's own folder (an
+        adopted former main: it says no to every offer, seen in prod), which keeps its own lane."""
         quiet, folders = now() - CHILD_IDLE, {}
         for x in self.sessions.values():
-            if (_norm(x.project) == _norm(msg["project"]) and x.session_id != by and self.child(x)
+            if (_norm(x.project) == _norm(msg["project"]) and x.session_id != by
+                    and (self.child(x) or {}).get("provider") not in (None, "adopted")
                     and x is not self.main_for(msg["project"])):  # fmt: skip
                 folders.setdefault(x.cwd, []).append(x)
         free = [max(twins, key=lambda x: x.mode == "push") for twins in folders.values()
