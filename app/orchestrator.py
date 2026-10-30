@@ -1896,6 +1896,8 @@ class Orchestrator:
         cutoff = now() - timedelta(days=days)
         arts = self.cleanup_artifacts(days)  # before the tasks: it keeps artifacts of unknown tasks
         active = {t.task_id for t in self.tasks.values() if not t.done}
+        if self.channel:  # a live session's task carries its replies: purging it loses them
+            active |= {s.task_id for s in self.channel.sessions.values()}
         old = [
             t
             for t in self.tasks.values()

@@ -32,6 +32,8 @@ def test_retention_deletes_old_finished_work_and_keeps_open_or_recent_work(setti
     old_child_of_running = task(orch, TaskState.succeeded, parent=running_parent.task_id)
     hub = orch.channel
     live, _, _ = hub.pull("Glazed Gems (GMA)", None, "/w/gems")
+    live_task = orch.tasks[live.task_id]
+    live_task.state, live_task.updated_at = TaskState.succeeded, now() - timedelta(days=40)
     for rid, state in [("m_done", "done"), ("m_pending", "pending"), ("m_recent", "done")]:
         orch.store.put("channel_msg", rid, {"message_id": rid, "state": state}, state=state)
     orch.store.put("channel_session", "pull_gone", {"project": "Old"}, state="open")
@@ -53,6 +55,7 @@ def test_retention_deletes_old_finished_work_and_keeps_open_or_recent_work(setti
     assert orch.store.get("channel_msg", "m_pending") and orch.store.get("channel_msg", "m_recent")
     assert orch.store.get("channel_session", "pull_gone") is None
     assert orch.store.get("channel_session", live.session_id)  # a live session keeps its record
+    assert orch.store.get("task", live.task_id)  # ...and the task its replies go to
     assert any(e["type"] == "retention.purge" for e in orch.store.events())
 
 
