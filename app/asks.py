@@ -117,12 +117,16 @@ class AskService:
 
         return f"{from_session or '-'}|{_norm(project)}"
 
-    def _pair(self, a: dict, msg: dict) -> None:
-        """The session that answered (a child the main routed it to) stays the asker's partner in
-        that project: its next asks go straight there, so the conversation keeps its context."""
-        holder = msg.get("session_id")
+    def _pair(self, a: dict, holder: str | None) -> None:
+        """The session that took the ask (a child the router gave it to) is the asker's partner in
+        that project from then on: its next asks, follow-ups included while the first is still being
+        worked on, go straight there, so the conversation keeps its context."""
+        from app.channel import _norm
+
         main = self.hub.main_for(a["to_project"])
-        if a.get("from_session") and holder and (main is None or holder != main.session_id):
+        s = self.hub.sessions.get(holder or "")
+        if (a.get("from_session") and s is not None and _norm(s.project) == _norm(a["to_project"])
+                and (main is None or holder != main.session_id)):  # fmt: skip
             self.svc.store.put("ask_pair", self._pair_key(a["from_session"], a["to_project"]),
                                {"session_id": holder, "from_session": a["from_session"],
                                 "to_project": a["to_project"], "since": now().isoformat()})  # fmt: skip
@@ -160,6 +164,7 @@ class AskService:
         a.update(message_id=msg["message_id"], state="delivered" if target else "queued",
                  delivered_to=target.session_id if target else None, sent_at=now().isoformat())  # fmt: skip
         self._save(a)
+        self._pair(a, target and target.session_id)
 
     def note_delivery(self, ask_id: str, session_id: str) -> None:
         """Its message was (re)assigned to a session: the watchdog and the answer follow it."""
@@ -169,6 +174,7 @@ class AskService:
         a.update(delivered_to=session_id, sent_at=now().isoformat(),
                  state="delivered" if a["state"] == "queued" else a["state"])  # fmt: skip
         self._save(a)
+        self._pair(a, session_id)
 
     def answer(self, ask_id: str, text: str, by: str, images: list[str] = ()) -> dict:
         """B's reply (or the operator's): back to A, as information that needs no reply."""
@@ -187,7 +193,7 @@ class AskService:
         self._save(a)
         msg = self.svc.store.get("channel_msg", a.get("message_id") or "")
         if msg:
-            self._pair(a, msg)
+            self._pair(a, msg.get("session_id"))
         if msg and msg.get("state") in ("pending", "queued", "delivered", "stalled"):
             # answered some other way (the operator, another session): the holder is free again
             self.hub._set(msg, "done")

@@ -567,7 +567,8 @@ def build_mcp_server(svc) -> MCPServer:
     ) -> dict[str, Any]:
         """Pull mode: fetch requests for this project: from the operator (Telegram /send, replies) and
         from other agents (ask_agent; meta.kind "request" -> answer with reply_message) plus answers to
-        your own asks (meta.kind "answer" -> use them, no reply). agent: your tool, e.g. "claude_code";
+        your own asks (meta.kind "answer" -> use them, no reply) and gateway offers (meta.kind "offer"
+        -> answer with bid, do not start them). agent: your tool, e.g. "claude_code";
         client: "app" when you run as a desktop app or in an IDE, "cli" in a terminal.
         Call it when the `agw wait` waiter wakes you (or from its 30-minute safety cron).
         Each message: message_id, text (the request), meta.
@@ -585,9 +586,10 @@ def build_mcp_server(svc) -> MCPServer:
         elif not sess.enabled:
             note = "this session is switched off by the operator (/on to resume); do nothing"
         elif busy:
-            note = ("busy: finish the in-progress request(s) and answer them with reply_message first; "
-                    "no new work is handed out until then, so do nothing this round. If you no longer "
-                    "have that request in mind (a fresh run), in_progress_messages has it: finish it now")  # fmt: skip
+            note = ("busy: this folder's session is on the request(s) in in_progress_messages; no new "
+                    "work is handed out until they are answered with reply_message. If this conversation "
+                    "took one (also before a restart or a summary of it), finish and answer it. If you never "
+                    "saw it, another conversation of this folder is doing it: leave it and do nothing.")  # fmt: skip
         else:
             note = "" if msgs else "no new requests; do nothing"
         # Polled every minute: only non-default fields, so an idle poll costs a few tokens.
@@ -774,6 +776,19 @@ def build_mcp_server(svc) -> MCPServer:
             raise GatewayToolError(str(e)) from e
 
     @tool
+    async def bid(
+        offer_id: str, accept: bool, session_id: str, context: str = "none", reason: str = ""
+    ) -> dict[str, Any]:
+        """Answer a gateway offer (a message with meta.kind "offer"): accept=true only if you are free to
+        do the request now; context = how much of your work in this session it needs (high, medium,
+        low, none); reason: one line. Do not start the work: if you win, it arrives through
+        get_messages."""
+        try:
+            return svc.channel.bid(session_id, offer_id, accept, context, reason)
+        except (ValueError, PermissionError) as e:
+            raise GatewayToolError(str(e)) from e
+
+    @tool
     async def list_skills(project: str) -> dict[str, Any]:
         """The skills a request of `project` can be given with dispatch(skills=...): the project's
         own (its .claude/skills), the shared ones (~/.claude/skills), and other projects' skills
@@ -900,6 +915,7 @@ def ask_view(a: dict) -> dict[str, Any]:
 
 TOOL_NAMES = [
     "get_task_brief",
+    "bid",
     "list_skills",
     "report_deployment",
     "delegate_task",

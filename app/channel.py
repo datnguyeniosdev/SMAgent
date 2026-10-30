@@ -20,6 +20,7 @@ routed back into the same session (see CollaborationService.submit_feedback).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import fnmatch
 import hashlib
 import json
@@ -35,6 +36,7 @@ from datetime import datetime, timedelta
 from html import escape as escape_html
 from pathlib import Path
 
+from app.formatting import truncate
 from app.models import new_id, now
 
 log = logging.getLogger(__name__)
@@ -136,6 +138,9 @@ class LiveSession:
     client: str = ""  # "app" (desktop app / IDE) or "cli", as the session reports it
     stalled: str = ""  # why its agent stopped (rate limit, API error, no answer): no new work
     last_work: datetime = field(default_factory=now)  # last message handed to it or answered
+    silent_at: datetime | None = (
+        None  # it left a gateway offer unanswered then (not asked for a while)
+    )
     busy_until: datetime | None = (
         None  # still_working: on long work, never idle or stuck before this
     )
@@ -166,6 +171,14 @@ class ChannelHub:
         self.svc = svc
         self.sessions: dict[str, LiveSession] = {}
         self._bg: set[asyncio.Task] = set()  # central lane openings in flight (kept referenced)
+        self._bids: dict[str, dict] = {}  # message_id -> {session_id: bid} while its offers are out
+        self._bid_ev: dict[str, asyncio.Event] = {}
+        # messages whose lane session is being opened right now (in memory: a restart forgets them, so
+        # they are routed again): nobody routes them meanwhile (seen in prod: a slow worktree let every
+        # flush open another session, nine for one request)
+        self._opening: set[str] = set()
+        self._reserved: set[str] = set()  # sessions an offer placement is giving work to right now
+        self._lane_locks: dict[str, asyncio.Lock] = {}  # one opening at a time per project lane
         from app.project_registry import ProjectRegistry
 
         self.registry = ProjectRegistry(svc.store)  # stable project ids, aliases, routing mode
@@ -179,7 +192,7 @@ class ChannelHub:
         self.launch = open_in_terminal  # (folder, agent, model): opens a child; tests replace it
         # session queues live in memory: what they held when the last process stopped waits again
         for msg in svc.store.list("channel_msg", states=["queued"]):
-            self._set(msg, "pending")
+            self._set(msg, "cancelled" if msg.get("kind") == "offer" else "pending")  # offers lapse
 
     # ---- sessions ----
 
@@ -219,6 +232,8 @@ class ChannelHub:
         s.num, s.pid = self._number("channel_snum", session_id), pid
         s.claude_pid = pid
         self.project_num(project)
+        if (c := self.child(s)) and c.get("launched_at"):  # it came: no longer "starting"
+            self.svc.store.put("channel_child", s.cwd, {**c, "launched_at": None})
         self._save(s)
         self.sessions[session_id] = s
         main = self.svc.store.get("channel_main", _norm(project)) or {}
@@ -282,7 +297,7 @@ class ChannelHub:
         """Messages a session took but never handed to Claude go back to the inbox."""
         while not s.queue.empty():
             msg = s.queue.get_nowait()
-            self._set(msg, "pending")
+            self._set(msg, "cancelled" if msg.get("kind") == "offer" else "pending")  # offers lapse
         self._flush_pending(s.project)
 
     def _prune(self) -> None:
@@ -496,14 +511,17 @@ class ChannelHub:
                     self._ops(f"📬 m{msg.get('num')} delivered to {self._label(target)}")
 
     def _idle(self, s: LiveSession) -> bool:
-        return s.queue.empty() and not self.in_progress(s.session_id)
+        """No work queued (an unread offer is not work) and none in progress."""
+        return all(m.get("kind") == "offer" for m in s.queue._queue) and not self.in_progress(
+            s.session_id
+        )
 
     def _enqueue(self, s: LiveSession, msg: dict) -> None:
         """Into a session's queue; an answer (its current job waits for it) or routing work for the
         main session (a quick dispatch) goes first."""
         msg["queued_at"], msg["queued_for"] = now().isoformat(), s.session_id
         s.queue.put_nowait(msg)
-        first = lambda m: m.get("kind") == "answer" or m.get("route")  # noqa: E731
+        first = lambda m: m.get("kind") in ("answer", "offer") or m.get("route")  # noqa: E731
         if first(msg):  # behind earlier answers and routing work, before the rest
             q = s.queue._queue  # ponytail: asyncio.Queue internals, like _next
             q.pop()
@@ -559,7 +577,7 @@ class ChannelHub:
                 waiting_since = max(msg.get("queued_at", ""), free_since)
                 if (
                     not busy
-                    and msg.get("kind") != "answer"
+                    and msg.get("kind") not in ("answer", "offer")
                     and not msg.get("route")
                     and waiting_since < late
                 ):
@@ -980,8 +998,15 @@ class ChannelHub:
         child being opened to that child, project work to the main session (with a routing note).
         The main offline: the operator is asked once whether to wait or open a new one."""
         project = msg["project"]
+        if msg.get("kind") == "offer":  # an offer is never routed as work: it lapses
+            self._set(msg, "cancelled")
+            return None
         if msg.get("kind") == "answer":
             return self.session_for(project, exclude=exclude, agent=msg.get("for_agent"))
+        if msg["message_id"] in self._opening or msg["message_id"] in self._bids:
+            return (
+                None  # its lane session is being opened, or its offers are out: placed when settled
+            )
         if msg.get("wait_cwd"):
             kids = [x for x in self.sessions.values() if x.cwd == msg["wait_cwd"] and x.deliverable]
             return max(kids, key=lambda x: x.mode == "push", default=None)
@@ -990,6 +1015,11 @@ class ChannelHub:
             own is not None and own.deliverable and msg.get("pinned")
         ):  # back to the session it was for
             return own
+        if msg.get("pinned") and msg.get("for_session"):  # that session is gone: its lane folder
+            rec = self.svc.store.get("channel_session", msg["for_session"]) or {}
+            if c := self.svc.store.get("channel_child", rec.get("cwd") or ""):
+                msg.setdefault("lane", c["lane"])
+                msg.setdefault("lane_path", c["path"])
         p = self.registry.resolve(project)
         if p is not None and p.routing_mode == "central":
             return self._route_central(msg, exclude)
@@ -1032,8 +1062,6 @@ class ChannelHub:
         """The gateway places the work: a lane named on it or by a rule; else the Gateway Agent reads
         it and calls dispatch; with the Gateway Agent offline, the gateway picks the lane itself
         (default_lane), so no request waits for a router."""
-        if msg.get("routing") == "opening":
-            return None  # its child is being opened: it is handed over when it connects
         lane = self.rule_lane(msg)
         gw = None if lane else self.gateway_agent()
         if gw is not None and gw.session_id != exclude:
@@ -1046,12 +1074,16 @@ class ChannelHub:
             if "gateway" not in self._main_asked:  # said once; the work does not wait for it
                 self._main_asked.add("gateway")
                 self._notify("send_main_offline", getattr(self.svc.s, "gateway_agent_project", ""))
-        msg["lane"] = lane
+        msg["lane"] = lane = self.lane_for(msg["project"], lane)
+        if gw is None and self._offers_for(msg, lane) and (offers := self._ranked(msg, lane, "")):
+            kw = dict(by="gateway", brief="", model="", agent="", main=None, skills=[])
+            self._open_bidding(msg, lane, offers, kw)  # the gateway asks, no router needed
+            return None
         kid = self._pick_child(msg["project"], lane, exclude, prefer=msg.get("lane_path"))
         if kid is not None:
             self._tag(kid.cwd, msg)
             return kid
-        msg["routing"] = "opening"
+        self._opening.add(msg["message_id"])
         self._set(msg, "pending")
         self._spawn(self._open_for(msg, lane))
         return None
@@ -1071,18 +1103,26 @@ class ChannelHub:
             text,
         ):
             return "deploy"
-        if re.search(r"(?i)\b(qa|test|retest|uat)\b|kiểm thử", text):
-            return "qa"
         return "dev"
+
+    def lane_for(self, project: str, lane: str) -> str:
+        """A product has two sessions: its worker (dev: all its work, in order) and its deploy
+        session; any other lane is the worker's. A tool project keeps the lanes it is given."""
+        lane = _lane_name(lane)
+        if self.kind(project) == "tool":
+            return lane
+        return "deploy" if lane == "deploy" else "dev"
 
     def _gateway_note(self, msg: dict) -> str:
         project = msg["project"]
         policy = (
-            "It is a tool agent: its requests run in parallel, so pick a lane by topic (a new topic "
-            "can get a new lane)."
+            "It is a tool agent: its requests run in parallel, one session per topic, so pick a lane "
+            "by topic: a follow-up or question about work in progress keeps that work's lane (it reaches "
+            "the session doing it); a new topic gets a new lane."
             if self.kind(project) == "tool"
-            else "It is a product: code work goes to lane dev (one worker, in order), building, "
-            "release and deploy to lane deploy, QA testing to lane qa, so they never block dev."
+            else "It is a product: it has two sessions, its worker (lane dev: every kind of work, "
+            "in order) and its deploy session (lane deploy: build, release, deploy); any other lane goes "
+            "to dev. QA, UI/UX, PO and research are tool projects of their own (the worker asks them)."
         )
         return (
             f"\n\n(You are the Gateway Agent; this request is for the project {project}. Do not do it "
@@ -1111,27 +1151,28 @@ class ChannelHub:
         )
 
     def _pick_child(self, project: str, lane: str, exclude: str | None = None,
-                    prefer: str | None = None) -> LiveSession | None:  # fmt: skip
-        """The open session to give a lane's work to, or None to open (or reopen) one. A product's
-        lane has one worker, which takes its work in order. A tool project's lane prefers an idle
-        session, opens another while the project has fewer than Settings.tool_parallel open, and
-        beyond that queues behind the least loaded one."""
+                    prefer: str | None = None, skip=frozenset()) -> LiveSession | None:  # fmt: skip
+        """The open session to give a lane's work to, or None to open (or reopen) one. A lane with a
+        session keeps it (its context): a product's dev and deploy, and a tool project's topic lanes,
+        each have one session that takes its work in order (the one that worked last, when an older
+        version left several). Only a tool project's untyped lane "task" spreads out: an idle session,
+        else another one while the project has fewer than Settings.tool_parallel open, else the least
+        loaded one."""
         main = self.main_for(project)
-        kids = [x for x in self.sessions.values() if x.deliverable and x.session_id != exclude
-                and x is not main and _norm(x.project) == _norm(project) and self.child(x)]  # fmt: skip
-        same = [x for x in kids if self.child(x).get("lane") == lane]
+        everyone = [x for x in self.sessions.values() if x.deliverable and x.session_id != exclude
+                    and x is not main and _norm(x.project) == _norm(project) and self.child(x)]  # fmt: skip
+        kids = [x for x in everyone if x.session_id not in skip]  # skip: they said no to an offer
+        same = [x for x in kids if self._in_lane(self.child(x), lane)]
         if prefer and (mine := [x for x in same if x.cwd == prefer]):
             same = mine
-        if self.kind(project) != "tool":
-            if lane == "deploy":
-                return None  # a product deploy builds in a fresh copy of the code as it is now
-            return max(same, key=lambda x: x.mode == "push", default=None)
+        if self.kind(project) != "tool" or (same and lane != "task"):
+            return max(same, key=lambda x: x.last_work, default=None)
         if idle := [x for x in same if self._idle(x)]:
             return max(idle, key=lambda x: x.mode == "push")
         cap = int(getattr(getattr(self.svc, "s", None), "tool_parallel", 3) or 3)
-        if len({x.cwd for x in kids}) < cap:
+        if len({x.cwd for x in everyone}) < cap:
             return None  # room for one more session
-        pool = same or kids
+        pool = same or kids or everyone
         load = lambda x: x.queue.qsize() + len(self.in_progress(x.session_id))  # noqa: E731
         return min(pool, key=load, default=None)
 
@@ -1149,8 +1190,9 @@ class ChannelHub:
             await self._to_lane(msg, lane, by="gateway")
         except Exception as e:  # noqa: BLE001 - the operator decides what happens to it
             log.warning("central routing of m%s to %s failed: %s", msg.get("num"), lane, e)
-            msg.pop("routing", None)
             self._stall([msg], "", f"the gateway could not open the {lane} lane: {e}")
+        finally:
+            self._opening.discard(msg["message_id"])
 
     def _mark_route(self, msg: dict, main: LiveSession) -> None:
         """The main session only routes: work reaching it through the gateway (for the project, or
@@ -1214,8 +1256,202 @@ class ChannelHub:
         chosen = self.resolve_skills(msg["project"], [*(rd.skills if rd else []), *skills])
         if rd is not None:
             msg["role"], msg["role_prompt"] = role, rd.prompt
-        return await self._to_lane(msg, lane, by=session_id, brief=brief, to=to, model=model,
-                                   agent=main.agent, main=repo, skills=chosen)  # fmt: skip
+        kw = dict(
+            by=session_id, brief=brief, model=model, agent=main.agent, main=repo, skills=chosen
+        )
+        lane = self.lane_for(msg["project"], lane)
+        if (
+            not to
+            and self._offers_for(msg, lane)
+            and (offers := self._ranked(msg, lane, session_id))
+        ):
+            return self._open_bidding(msg, lane, offers, kw)
+        return await self._to_lane(msg, lane, to=to, **kw)
+
+    # ---- offer/bid: a new topic of a tool project in bid_projects is offered to its idle sessions ----
+
+    def bids_on(self, project: str) -> bool:
+        sw = getattr(self.svc, "switches", None)
+        if sw is not None and not sw.on("bid"):
+            return False  # bid switched off in Telegram /mcp: placed directly
+        names = getattr(getattr(self.svc, "s", None), "bid_projects", None) or []
+        return _norm(project) in {_norm(n) for n in names}
+
+    def _offers_for(self, msg: dict, lane: str) -> bool:
+        """Offers are made for a new topic of a tool project in bid_projects only: a lane that has a
+        session keeps it (its context), and a product's two sessions are never auctioned."""
+        project = msg["project"]
+        if self.kind(project) != "tool" or not self.bids_on(project):
+            return False
+        if lane != "task" and any(x.deliverable and _norm(x.project) == _norm(project)
+                                  and self._in_lane(self.child(x), lane) for x in self.sessions.values()):  # fmt: skip
+            return False
+        msg.setdefault("request", msg.get("orig_text") or msg["text"])
+        return True
+
+    @staticmethod
+    def _in_lane(c: dict | None, lane: str) -> bool:
+        """A child record of `lane`: its own lane, or a topic it took through an offer."""
+        return bool(c) and (c.get("lane") == lane or lane in (c.get("aliases") or []))
+
+    def _history(self, session_id: str) -> list[dict]:
+        """The requests a session took (most recent last), offers and answers left out."""
+        mine = [m for m in self.svc.store.list("channel_msg")
+                if session_id in (m.get("session_id"), m.get("queued_for"))
+                and m.get("kind") not in ("answer", "offer")]  # fmt: skip
+        return sorted(mine, key=lambda m: m.get("created_at", ""))[-8:]
+
+    @staticmethod
+    def _words(text: str | None) -> set[str]:
+        body = (text or "").split("\n\n", 1)[0]  # the request itself, before the gateway's notes
+        body = re.sub(r"^[^:\n]{0,120}:\s*", "", body)  # its "Request from ... (Telegram):" header
+        return set(re.findall(r"\w{3,}", body.lower()))
+
+    def context_score(self, s: LiveSession, msg: dict, lane: str) -> float:
+        """How much of what `s` already did fits `msg`: 2 for its lane, plus up to 4 for the share of
+        the request's words found in the requests it took lately."""
+        want = self._words(msg.get("request") or msg.get("orig_text") or msg["text"])
+        seen = set().union(*(self._words(m.get("request") or m.get("text"))
+                             for m in self._history(s.session_id)))  # fmt: skip
+        overlap = len(want & seen) / len(want) if want else 0.0
+        return round(2 * self._in_lane(self.child(s), lane) + 4 * overlap, 2)
+
+    def _ranked(self, msg: dict, lane: str, by: str) -> list[LiveSession]:
+        """The sessions to offer `msg` to, best context first, at most Settings.offer_max, one per
+        folder (a Terminal child's push and pull twins are one conversation). Not asked: a folder
+        with any work (it counts as a no), one reserved by a placement, one that left an offer
+        unanswered within CHILD_IDLE (it may have no bid tool)."""
+        quiet, folders = now() - CHILD_IDLE, {}
+        for x in self.sessions.values():
+            if (_norm(x.project) == _norm(msg["project"]) and x.session_id != by and self.child(x)
+                    and x is not self.main_for(msg["project"])):  # fmt: skip
+                folders.setdefault(x.cwd, []).append(x)
+        free = [max(twins, key=lambda x: x.mode == "push") for twins in folders.values()
+                if all(x.deliverable and self._idle(x) and not self._busy(x)
+                       and x.session_id not in self._reserved
+                       and not (x.silent_at and x.silent_at > quiet) for x in twins)]  # fmt: skip
+        free.sort(key=lambda x: self.context_score(x, msg, lane), reverse=True)
+        return free[: int(getattr(self.svc.s, "offer_max", 3) or 3)]
+
+    def _open_bidding(self, msg: dict, lane: str, offers: list[LiveSession], kw: dict) -> dict:
+        mid = msg["message_id"]
+        self._bids[mid], self._bid_ev[mid] = {}, asyncio.Event()
+        for k in ("session_id", "delivered_at", "route"):  # the router is done with it
+            msg.pop(k, None)
+        # stored as asked, in its lane: after a restart (offers forgotten) it is placed there directly
+        msg["text"], msg["lane"] = msg.pop("orig_text", msg["text"]), lane
+        self._set(msg, "pending")
+        for s in offers:
+            self._offer(s, msg, lane)
+        self._spawn(self._settle(msg, lane, offers, kw))
+        wait = int(getattr(self.svc.s, "offer_wait_s", 90) or 90)
+        self._ops(f"🙋 m{msg.get('num')} offered to " + ", ".join(self._label(s) for s in offers))
+        return {"to": "offered", "lane": lane, "offers": [f"s{s.num}" for s in offers],
+                "note": f"offered to the idle sessions; placed within {wait} s (a yes with the most "
+                        "context wins, else a new session). Its follow-ups keep this lane name. "
+                        "Nothing more to do."}  # fmt: skip
+
+    def _offer(self, s: LiveSession, msg: dict, lane: str) -> dict:
+        oid = new_id("chm")
+        o = {"message_id": oid, "project": s.project, "kind": "offer", "offer_for": msg["message_id"],
+             "offer_to": s.session_id, "created_at": now().isoformat(),
+             "meta": {"source": "gateway", "sender": "the gateway", "project": s.project, "kind": "offer",
+                      "message_id": oid},
+             "text": (f"🙋 Offer from the gateway (not a task yet), lane {lane}:\n"
+                      f"{truncate(msg.get('request') or msg['text'], 600)}\n\nDo not start it. Answer at "
+                      f"once with bid(offer_id='{oid}', accept=true|false, context='high'|'medium'|'low'|"
+                      f"'none', reason=<one line>, session_id='{s.session_id}'); without the bid tool, "
+                      f"reply_message(message_id='{oid}', text='YES <context>' or 'NO <why>'). Accept only "
+                      "if you are free to do it now; context = how much of what you already did in this "
+                      "session it needs. If you win, the request arrives through get_messages.")}  # fmt: skip
+        o["num"] = self._number("channel_mnum", oid)
+        self._enqueue(s, o)
+        return o
+
+    BID_BONUS = {"high": 3, "medium": 2, "low": 1}
+
+    def bid(self, session_id: str, offer_id: str, accept: bool, context: str = "none",
+            reason: str = "") -> dict:  # fmt: skip
+        o = self.svc.store.get("channel_msg", offer_id)
+        if o is None or o.get("kind") != "offer":
+            raise ValueError(f"no offer {offer_id}")
+        folder = (self.svc.store.get("channel_session", o["offer_to"]) or {}).get("cwd")
+        me = self.sessions.get(session_id) or self.sessions.get(self.as_main(session_id))
+        if (o["offer_to"] not in (session_id, self.as_main(session_id))
+                and not (me is not None and folder and me.cwd == folder)):  # fmt: skip
+            raise PermissionError("that offer was made to another session")
+        if me is not None:
+            me.silent_at = None
+        bids = self._bids.get(o["offer_for"])
+        if bids is None or o.get("state") == "cancelled":
+            return {"note": "too late: the request was already placed. Nothing to do."}
+        bids[o["offer_to"]] = {"accept": bool(accept), "context": (context or "none").lower(),
+                               "reason": (reason or "")[:200]}  # fmt: skip
+        self._set(o, "done")
+        self._bid_ev[o["offer_for"]].set()
+        return {
+            "note": "noted. If it is yours, it arrives through get_messages; otherwise nothing to do."
+        }
+
+    def _bid_by_reply(self, session_id: str, offer_id: str, text: str) -> dict:
+        """An offer answered with reply_message (a session without the bid tool): YES/NO and context."""
+        head = text.strip().lower()[:80]
+        accept = not re.search(r"\b(no|decline|declined|busy)\b|không|từ chối|bận", head)
+        context = next((c for c in ("high", "medium", "low") if c in head), "none")
+        return self.bid(session_id, offer_id, accept, context, text)
+
+    async def _settle(self, msg: dict, lane: str, offers: list[LiveSession], kw: dict) -> None:
+        """Wait for the bids (all in, or Settings.offer_wait_s), then place `msg`: the yes from a
+        session still free with the most context (gateway score plus the session's own estimate),
+        else as dispatch would (a new session while the project is under tool_parallel); the sessions
+        that said no or kept silent are not given it."""
+        mid = msg["message_id"]
+        bids, ev = self._bids[mid], self._bid_ev[mid]
+        end = time.monotonic() + float(getattr(self.svc.s, "offer_wait_s", 90) or 90)
+        win = None
+        try:
+            while len(bids) < len(offers) and (left := end - time.monotonic()) > 0:
+                ev.clear()
+                try:
+                    await asyncio.wait_for(ev.wait(), left)
+                except TimeoutError:
+                    break
+        finally:
+            self._opening.add(mid)  # still guarded until it is queued: a flush would route it again
+            self._bids.pop(mid, None)
+            self._bid_ev.pop(mid, None)
+        try:
+            for s in offers:  # offers nobody took off the queue: withdrawn
+                for o in [o for o in s.queue._queue if o.get("offer_for") == mid]:
+                    self._take(s, o)
+                    self._set(o, "cancelled")
+                if s.session_id not in bids:
+                    s.silent_at = now()  # not asked again for a while
+            if (self.svc.store.get("channel_msg", mid) or {}).get("state") == "cancelled":
+                return  # cancelled on Telegram meanwhile
+            yes = [s for s in offers if bids.get(s.session_id, {}).get("accept") and s.deliverable
+                   and self.sessions.get(s.session_id) is s and self._idle(s)
+                   and s.session_id not in self._reserved]  # fmt: skip
+            win = max(yes, default=None, key=lambda s: self.context_score(s, msg, lane)
+                      + self.BID_BONUS.get(bids[s.session_id]["context"], 0))  # fmt: skip
+            if win is not None:
+                self._reserved.add(win.session_id)
+                c = self.child(win) or {}
+                if c.get("lane") not in (None, lane) and lane != "task":  # its follow-ups find it
+                    aliases = sorted({*(c.get("aliases") or []), lane})
+                    self.svc.store.put("channel_child", win.cwd, {**c, "aliases": aliases})
+                lane = c.get("lane") or lane
+            self.svc.store.event("channel.bids", message_id=mid, bids=bids,
+                                 winner=win and win.session_id)  # fmt: skip
+            await self._to_lane(msg, lane, to=f"s{win.num}" if win else "",
+                                skip={s.session_id for s in offers}, **kw)  # fmt: skip
+        except Exception as e:  # noqa: BLE001 - the operator decides what happens to it
+            log.warning("placing m%s after its offers failed: %s", msg.get("num"), e)
+            self._stall([msg], "", f"the gateway could not place it after the offers: {e}")
+        finally:
+            self._opening.discard(mid)
+            if win is not None:
+                self._reserved.discard(win.session_id)
 
     def roles(self) -> dict:
         cfg = getattr(self.svc, "gateway_cfg", None)
@@ -1292,12 +1528,12 @@ class ChannelHub:
 
     async def _to_lane(self, msg: dict, lane: str, *, by: str, brief: str = "", to: str = "",
                        model: str = "", agent: str = "", main: LiveSession | None = None,
-                       skills: list = ()) -> dict:  # fmt: skip
+                       skills: list = (), skip=frozenset()) -> dict:  # fmt: skip
         """Hand `msg` to a lane: `to` (s#), else the open child of that lane, else a closed child of
         it reopened, else a new child in its own copy of the project. by: who routes it (a main
         session, the Gateway Agent, or "gateway" for a rule). main: the project's own main (its
         folder gives the repo); without it, the project folder from the registry."""
-        lane = _lane_name(lane)
+        lane = self.lane_for(msg["project"], lane)
         kids = [x for x in self.sessions.values() if x.session_id != by and x.deliverable
                 and _norm(x.project) == _norm(msg["project"])
                 and x is not self.main_for(msg["project"])]  # fmt: skip
@@ -1306,7 +1542,8 @@ class ChannelHub:
             if target is None:
                 raise ValueError(f"{to} is not an open session of {msg['project']}")
         else:
-            target = self._pick_child(msg["project"], lane, by, prefer=msg.get("lane_path"))
+            target = self._pick_child(msg["project"], lane, by, prefer=msg.get("lane_path"),
+                                      skip=skip)  # fmt: skip
         for x in self.sessions.values():  # still queued somewhere (a main): taken out first
             for m in [m for m in x.queue._queue if m["message_id"] == msg["message_id"]]:
                 self._take(x, m)
@@ -1319,17 +1556,65 @@ class ChannelHub:
         msg.setdefault("request", msg.get("orig_text") or msg["text"])  # as asked, before any notes
         msg.update(text=msg.pop("orig_text", msg["text"]) + note, lane=lane, pinned=True,
                    dispatched_by=by)  # fmt: skip
-        if target is not None:
-            self._tag(target.cwd, msg)
-            await asyncio.to_thread(self._with_skills, msg, list(skills), target.cwd)
-            self._enqueue(target, msg)
-            self._assigned(msg, target)
-            self._ops(f"🧭 m{msg.get('num')} → {self._label(target)} ({lane})")
-            return {"to": f"s{target.num}", "lane": lane, "new_session": False}
-        self._set(msg, "pending")  # held for the new child (wait_cwd below)
         fresh = lane == "deploy" and self.kind(msg["project"]) != "tool"  # never an old copy
+
+        async def give(t: LiveSession) -> dict:
+            self._tag(t.cwd, msg)
+            await asyncio.to_thread(self._with_skills, msg, list(skills), t.cwd)
+            if fresh:
+                msg["text"] += self._redeploy_note(msg["project"], t.cwd)
+            self._enqueue(t, msg)
+            self._assigned(msg, t)
+            self._ops(f"🧭 m{msg.get('num')} → {self._label(t)} ({lane})")
+            return {"to": f"s{t.num}", "lane": lane, "new_session": False}
+
+        if target is not None:
+            return await give(target)
+        # one opening per lane (a tool project's "task" lane excepted): a request that waited for it
+        # joins the session just opened (or still starting) instead of opening another
+        sticky = self.kind(msg["project"]) != "tool" or lane != "task"
+        lock = self._lane_locks.setdefault(f"{_norm(msg['project'])}/{lane}", asyncio.Lock())
+        self._opening.add(msg["message_id"])
+        try:
+            async with lock if sticky else contextlib.nullcontext():
+                if sticky and (t := self._pick_child(msg["project"], lane, by, skip=skip)):
+                    return await give(t)
+                if sticky and (path := self._starting(msg["project"], lane)):
+                    self._tag(path, msg)
+                    await asyncio.to_thread(self._with_skills, msg, list(skills), path)
+                    if fresh:
+                        msg["text"] += self._redeploy_note(msg["project"], path)
+                    msg["wait_cwd"], msg["waiting_since"] = path, now().isoformat()
+                    self._set(msg, "pending")
+                    self._ops(f"🧭 m{msg.get('num')} → the {lane} session being opened")
+                    return {"to": "starting", "lane": lane, "new_session": False, "path": path}
+                self._set(msg, "pending")  # held for the new child (wait_cwd below)
+                return await self._open_lane(msg, lane, by=by, model=model, agent=agent, main=main,
+                                             skills=skills, fresh=fresh)  # fmt: skip
+        finally:
+            self._opening.discard(msg["message_id"])
+
+    def _starting(self, project: str, lane: str) -> str | None:
+        """The folder of `lane` launched less than START_WAIT ago whose session has not connected yet."""
+        cutoff = (now() - START_WAIT).isoformat()
+        return next((c["path"] for c in self.children(project) if self._in_lane(c, lane)
+                     and c["status"] == "closed" and (c.get("launched_at") or "") > cutoff), None)  # fmt: skip
+
+    def _redeploy_note(self, project: str, path: str) -> str:
+        c = self.svc.store.get("channel_child", path) or {}
+        how = (f"git checkout --detach {c['target']}: this folder is a git worktree of the project"
+               if c.get("provider") == "worktree" and c.get("target")
+               else "copy it again from the project folder")  # fmt: skip
+        return (
+            f"\n\n(Deploy session of {project}, used again: first bring this folder to the project's "
+            f"current code ({how}), then build, test and deploy, and report the result yourself.)"
+        )
+
+    async def _open_lane(self, msg: dict, lane: str, *, by: str, model: str, agent: str,
+                         main: LiveSession | None, skills: list, fresh: bool) -> dict:  # fmt: skip
+        """Reopen the lane's closed folder, else a new child in its own copy of the project."""
         closed = [c for c in self.children(msg["project"])
-                  if c["lane"] == lane and c["status"] == "closed" and not fresh]  # fmt: skip
+                  if self._in_lane(c, lane) and c["status"] == "closed" and not fresh]  # fmt: skip
         old = next((c for c in closed if c["path"] == msg.get("lane_path")), None) or next(
             iter(closed), None
         )
@@ -1356,6 +1641,14 @@ class ChannelHub:
             model = model or old.get("model") or self.models(msg["project"])["child"]
             wid = await asyncio.to_thread(self.launch, Path(old["path"]), tool, model)
             self._remember_window(old["path"], wid)
+            self.svc.store.put(
+                "channel_child",
+                old["path"],
+                {
+                    **(self.svc.store.get("channel_child", old["path"]) or old),
+                    "launched_at": now().isoformat(),
+                },
+            )
             self._ops(
                 f"🧭 m{msg.get('num')} → reopened child ({lane}) on <code>{old['branch']}</code>"
             )
@@ -1398,7 +1691,9 @@ class ChannelHub:
         tool = agent if agent not in ("", "claude_code") else ""
         model = model or self.models(msg["project"])["child"]
         c = self.svc.store.get("channel_child", str(path)) or {}
-        self.svc.store.put("channel_child", str(path), {**c, "model": model})
+        self.svc.store.put(
+            "channel_child", str(path), {**c, "model": model, "launched_at": now().isoformat()}
+        )
         self._remember_window(str(path), await asyncio.to_thread(self.launch, path, tool, model))
         where = f"on branch <code>{branch}</code>" if branch else "in a copy of the folder (no git)"
         self._ops(f"🧭 m{msg.get('num')} → new child ({lane}) {where}")
@@ -1666,10 +1961,12 @@ class ChannelHub:
     def delivered(self, msg: dict, session_id: str) -> None:
         """Handed to a session: in progress (the session is busy) until reply_message answers it."""
         msg["session_id"], msg["delivered_at"] = session_id, now().isoformat()
-        if s := self.sessions.get(session_id):
+        if (s := self.sessions.get(session_id)) and msg.get(
+            "kind"
+        ) != "offer":  # an offer is no work
             s.last_work = now()
         # an answer to the session's own ask is information, not a job: it never keeps it busy
-        self._set(msg, "done" if msg.get("kind") == "answer" else "delivered")
+        self._set(msg, "done" if msg.get("kind") in ("answer", "offer") else "delivered")
 
     def in_progress(self, session_id: str) -> list[dict]:
         cutoff = now() - LEASE
@@ -1743,7 +2040,7 @@ class ChannelHub:
             keep = []
             while not s.queue.empty():
                 m = s.queue.get_nowait()
-                (keep if m.get("kind") == "answer" else msgs).append(m)
+                (keep if m.get("kind") in ("answer", "offer") else msgs).append(m)
             for m in keep:
                 s.queue.put_nowait(m)
         routes = [
@@ -1839,7 +2136,8 @@ class ChannelHub:
 
     def open_messages(self) -> list[dict]:
         """/queue: everything not answered or cancelled yet, oldest first."""
-        msgs = [m for st in OPEN_STATES for m in self.svc.store.list("channel_msg", states=[st])]
+        msgs = [m for st in OPEN_STATES for m in self.svc.store.list("channel_msg", states=[st])
+                if m.get("kind") != "offer"]  # fmt: skip
         for m in msgs:
             m.setdefault("state", "pending")
         return sorted(msgs, key=lambda m: m.get("created_at", ""))
@@ -2011,6 +2309,8 @@ class ChannelHub:
             )
         if msg is not None and _norm(msg.get("project", "")) != _norm(rec["project"]):
             raise PermissionError(f"m{msg.get('num')} belongs to another project")
+        if msg is not None and msg.get("kind") == "offer":  # an offer answered: a bid, no report
+            return self._bid_by_reply(session_id, message_id, text)
         # a child's answer (to the operator or another agent) brings its branch into the project repo
         child = self.svc.store.get("channel_child", rec.get("cwd") or "")
         fetched = bool(child) and await asyncio.to_thread(_fetch_back, child)

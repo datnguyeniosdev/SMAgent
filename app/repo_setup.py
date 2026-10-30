@@ -228,10 +228,12 @@ def loop_prompt(project: str, client: str = "", agent: str = "claude_code") -> s
     return (
         f"Call the agent-gateway tool get_messages with project '{project}', agent '{agent}'{kind} and "
         "cwd set to this folder, reusing "
-        "the session_id it returned before. If it reports busy, follow its note (a request you no longer "
-        "have in mind is in in_progress_messages: finish and answer it). If it is switched off or has no "
+        "the session_id it returned before. If it reports busy, follow its note (finish a request in "
+        "in_progress_messages only if this conversation took it; one you never saw belongs to another "
+        "conversation of this folder). If it is switched off or has no "
         "messages, do nothing this round. A message with meta.kind 'answer' answers your own ask_agent: "
-        "use it to continue that work, no reply. Otherwise do the request in this repo, then call "
+        "use it to continue that work, no reply. A message with meta.kind 'offer' asks whether you take "
+        "a request: answer it with bid as it says, do not start it. Otherwise do the request in this repo, then call "
         "reply_message with that session_id, the message_id and a short result (at most 500 characters): "
         "what changed, what you validated and what you did not, in polite Vietnamese (start with 'Dạ,')."
     )

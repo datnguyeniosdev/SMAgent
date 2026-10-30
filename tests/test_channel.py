@@ -697,6 +697,7 @@ async def test_main_session_routes_lanes_to_children_in_worktrees(
     closed_windows = []
     monkeypatch.setattr(launcher, "close_terminal_window", closed_windows.append)
     monkeypatch.setattr(hub, "_ops", notes.append)
+    hub.registry.set_kind(hub.registry.ensure(PROJECT).project_id, "tool")  # lanes by topic
     main, _, _ = hub.pull(PROJECT, None, str(repo), 0, "claude_code", "app")
     other, _, _ = hub.pull(PROJECT, None, "/w/other", 0, "codex", "cli")
     assert hub.main_for(PROJECT) is main  # the first session (app before CLI) becomes the main
@@ -880,6 +881,7 @@ async def _lanes(settings, cfg_dir, tmp_path, monkeypatch):
     hub = orch.channel
     hub.launch = lambda path, agent, model="": None
     monkeypatch.setattr(hub, "_ops", lambda html: None)
+    hub.registry.set_kind(hub.registry.ensure(PROJECT).project_id, "tool")  # lanes by topic
     main, _, _ = hub.pull(PROJECT, None, str(repo), 0, "claude_code", "app")
 
     async def dispatch(lane: str, text: str = "work") -> dict:
@@ -912,8 +914,8 @@ async def test_child_records_its_base_and_target_and_how_it_was_made(
 
     (repo / "A.txt").write_text("moved on\n")  # the repo advances: the child's base does not
     sh(repo, "commit", "-qam", "later")
-    r2 = await dispatch("ui")  # the lane's child is closed (never connected): reopened
-    assert r2["to"] == "reopened" and r2["path"] == r["path"]
+    r2 = await dispatch("ui")  # its session is still starting: it waits there, nothing relaunched
+    assert r2["to"] == "starting" and r2["path"] == r["path"]
     kid = next(c for c in hub.children(PROJECT) if c["lane"] == "ui")
     assert kid["base"] == head and kid["target"] == branch
     assert f"from {branch}@{head[:7]}" in gateway(orch)._list_text(full=True)  # a closed lane

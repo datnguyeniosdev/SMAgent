@@ -91,6 +91,11 @@ class Settings(BaseSettings):
         False  # the gateway opens and keeps alive its own CLI session as the Gateway Agent
     )
     tool_parallel: int = 3  # a tool project's requests run in at most this many sessions at once
+    # offer/bid routing (pilot): a new request of these projects is first offered to their idle
+    # sessions; a yes with the most context takes it, else a new session. BID_PROJECTS='["UIUXAgent"]'
+    bid_projects: Annotated[list[str], NoDecode] = []
+    offer_wait_s: float = 90  # seconds the offers stay open
+    offer_max: int = 3  # sessions asked at most, best context first
     retention_exempt_domains: list[str] = ["game_research"]  # their tasks/artifacts are evidence
     data_retention_days: int = (
         30  # finished tasks/messages/logs older than this are deleted daily; 0 = keep
@@ -161,6 +166,7 @@ class Settings(BaseSettings):
         "tool_permissions",
         "qa_env_passthrough",
         "opencode_shell_allowlist",
+        "bid_projects",
         mode="before",
     )
     @classmethod

@@ -132,6 +132,7 @@ async def test_a_routing_rule_places_work_without_any_llm_and_reuses_the_lane(
     orch, hub, gw, own, game, opened = central_setup(
         settings, cfg_dir, tmp_path, monkeypatch, rules
     )
+    hub.registry.set_kind(A, "tool")  # a product has no qa lane: its worker takes everything
     m, target = hub.send(A, "[qa] retest level 3")
     assert target is None  # the gateway opens the qa lane itself
     for _ in range(50):
@@ -239,7 +240,7 @@ async def test_a_tool_project_runs_up_to_three_sessions_in_parallel_then_queues(
     assert target is kids[1]  # an idle session first
 
 
-async def test_a_product_works_in_order_in_dev_and_deploys_from_fresh_copies(
+async def test_a_product_has_one_worker_and_one_deploy_session(
     settings, cfg_dir, tmp_path, monkeypatch
 ):
     orch, hub, game, opened = no_router_setup(settings, cfg_dir, tmp_path, monkeypatch, "product")
@@ -255,14 +256,18 @@ async def test_a_product_works_in_order_in_dev_and_deploys_from_fresh_copies(
 
     d1, _ = hub.send(A, "deploy the build to UAT")
     await settle(opened, 2)
-    d2, _ = hub.send(A, "release again after the fix")
-    await settle(opened, 3)
-    assert [p.name.split("-")[0] for p in opened] == ["dev", "deploy", "deploy"]  # never reused
     first = orch.store.get("channel_msg", d1["message_id"])
     assert "fresh copy" in first["text"] and "report the result yourself" in first["text"]
+    d2, _ = hub.send(A, "release again after the fix")  # the deploy session is still starting
+    await settle(opened, 3)
+    assert [p.name.split("-")[0] for p in opened] == ["dev", "deploy"]  # one deploy session
+    second = orch.store.get("channel_msg", d2["message_id"])
+    assert second["wait_cwd"] == str(opened[1]) and "used again" in second["text"]
+    dep, _, _ = hub.pull(A, None, str(opened[1]), 0, "claude_code", "cli")
+    _, got, _ = hub.pull(A, dep.session_id)
+    assert got[0]["message_id"] == d1["message_id"]  # in order, d2 next
     m3, target = hub.send(A, "qa: retest level 3")
-    await settle(opened, 4)
-    assert opened[3].name.startswith("qa-")
+    assert target is dev and len(opened) == 2  # QA, UI, art...: the worker's, in order
     assert sent.count("send_main_offline") == 1  # told once; nothing waited for the router
 
 
