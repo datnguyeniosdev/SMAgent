@@ -4,7 +4,7 @@ push  `agw session` in a terminal: a stdio shim (app/channel_shim.py) holds an S
       each message into a `notifications/claude/channel` event (Claude Code channels, research
       preview, >= 2.1.80); the session starts working at once. Answers go through the shim's `reply`.
 pull  any session (desktop app, VS Code, terminal): the `agw wait` waiter (app/waiter.py) wakes it to
-      call the MCP tool `get_messages`, answered with `reply_message`; a 30-minute cron is the safety net.
+      call the MCP tool `get_messages`, answered with `reply_message`; a 3-hourly cron is the safety net.
 
 Each session has an operator switch (/on, /off, persisted per session id). Messages go to an open,
 enabled, non-blocked session of the project (push preferred, newest first) and otherwise wait.

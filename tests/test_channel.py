@@ -431,8 +431,8 @@ def test_session_start_hook_and_loop_prompt(tmp_path):
         "CronDelete" in hint
         and "run_in_background" in hint
         and "wait --project '2048 Shooter (K05)' --cwd /w/r" in hint
-        and "CronCreate" in hint  # one 30-minute safety net, not a per-minute poll
-        and "'*/30 * * * *'" in hint
+        and "CronCreate" in hint  # one 3-hourly safety net, not a per-minute poll
+        and "'7 */3 * * *'" in hint
         and "get_messages" in hint
     )
     assert main(["hook-session-start", "--project", PROJECT]) == 0

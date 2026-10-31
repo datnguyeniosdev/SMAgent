@@ -83,7 +83,7 @@ desktop app mở phiên mới trong thư mục đó.
 Hook SessionStart yêu cầu Claude, trước mọi việc khác:
 
 1. `CronList`, xoá (`CronDelete`) mọi job có prompt nhắc tới `get_messages` hoặc `/health`.
-2. Tạo đúng một cron an toàn `*/30 * * * *` (recurring) với prompt vòng nhận việc. Cron này chỉ để
+2. Tạo đúng một cron an toàn `7 */3 * * *` (3 giờ một lần, recurring) với prompt vòng nhận việc. Cron này chỉ để
    bắt trường hợp waiter chết mà không ai biết.
 3. Chạy waiter một lần bằng Bash `run_in_background: true`:
    `"<venv>/bin/agw" wait --project '<project>' --cwd '<folder>' [--client app|cli]`.

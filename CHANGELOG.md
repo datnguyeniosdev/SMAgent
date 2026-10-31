@@ -27,6 +27,9 @@ Ghi lại các thay đổi đáng chú ý. Định dạng theo
 - Claude Code kết nối tới gateway qua proxy stdio (`agw mcp-stdio`), tự kết nối lại sau khi gateway
   khởi động lại.
 
+- Cron an toàn của mỗi phiên chạy 3 giờ một lần thay vì 30 phút: mỗi lần chạy, phiên phải đọc lại
+  toàn bộ hội thoại, nên các phiên rảnh tốn rất nhiều token chỉ để kiểm tra hàng đợi.
+
 ### Telegram
 - Kênh thông báo hệ thống riêng (`TELEGRAM_NOTICE_CHAT_ID`). Task, ask, báo cáo và câu hỏi vẫn ở
   nhóm điều khiển.

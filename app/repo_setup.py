@@ -219,7 +219,9 @@ once the command has finished, call `report_deployment`:
 """
 
 
-SAFETY_CRON = "*/30 * * * *"  # the waiter wakes sessions; this only catches a waiter that died
+# the waiter wakes sessions; this only catches a waiter that died. Every round re-reads the whole
+# conversation (seen: ~45 idle rounds a day at 200-500k tokens each), so it runs every 3 hours
+SAFETY_CRON = "7 */3 * * *"
 
 
 def loop_prompt(project: str, client: str = "", agent: str = "claude_code") -> str:

@@ -570,7 +570,7 @@ def build_mcp_server(svc) -> MCPServer:
         your own asks (meta.kind "answer" -> use them, no reply) and gateway offers (meta.kind "offer"
         -> answer with bid, do not start them). agent: your tool, e.g. "claude_code";
         client: "app" when you run as a desktop app or in an IDE, "cli" in a terminal.
-        Call it when the `agw wait` waiter wakes you (or from its 30-minute safety cron).
+        Call it when the `agw wait` waiter wakes you (or from its 3-hourly safety cron).
         Each message: message_id, text (the request), meta.
         Do each request, then answer it with reply_message(message_id=..., session_id=...).
         The session stays registered while it polls (5 min); the operator can switch it off (/off)."""
