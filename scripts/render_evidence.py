@@ -1,4 +1,4 @@
-"""Render docs/evidence/demo_results.json (written by scripts.demo) as docs/DEMO_EVIDENCE.md."""
+"""Render docs/evidence/demo_results.json (written by scripts.demo) as docs/evidence/DEMO_EVIDENCE.md."""
 
 import json
 from pathlib import Path
@@ -154,7 +154,7 @@ def main():
         "```",
         "",
     ]
-    (ROOT / "docs/DEMO_EVIDENCE.md").write_text("\n".join(md))
+    (ROOT / "docs/evidence/DEMO_EVIDENCE.md").write_text("\n".join(md))
 
 
 if __name__ == "__main__":

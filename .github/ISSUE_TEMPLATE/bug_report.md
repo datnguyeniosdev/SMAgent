@@ -1,21 +1,21 @@
 ---
-name: Bug report
-about: Something does not work as documented
+name: Báo lỗi
+about: Có chức năng không chạy như tài liệu mô tả
 labels: bug
 ---
 
-**What happened**
+**Chuyện gì đã xảy ra**
 
-**What you expected**
+**Bạn mong đợi điều gì**
 
-**Steps to reproduce**
+**Các bước tái hiện**
 
 1.
 
-**Environment**
-- Agent Gateway commit or version:
-- OS:
-- Agent tool and version (Claude Code, Codex, Cursor, Antigravity, OpenCode):
-- `uv run agw doctor` output (remove anything private):
+**Môi trường**
+- Commit hoặc phiên bản Agent Gateway:
+- Hệ điều hành:
+- Công cụ agent và phiên bản (Claude Code, Codex, Cursor, Antigravity, OpenCode):
+- Kết quả `uv run agw doctor` (bỏ mọi thông tin riêng tư):
 
-**Logs** (`var/agw.log`, with tokens and keys removed)
+**Log** (`var/agw.log`, đã xoá token và key)

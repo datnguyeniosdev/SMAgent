@@ -84,7 +84,7 @@ class Settings(BaseSettings):
     # project -> skills its agents must load first for every request through the gateway (the first
     # one leads), e.g. CORE_SKILLS='{"UIUXAgent": ["uiux-art-director"]}'
     core_skills: dict[str, list[str]] = {}
-    # central routing: requests the rules (config/routing/channel.yaml) cannot place go to the main
+    # central routing: requests the rules (config/routing/routing.yaml) cannot place go to the main
     # session of this project, the shared Gateway Agent
     gateway_agent_project: str = "Agent Gateway"
     gate_cli: bool = (

@@ -592,7 +592,7 @@ def build_mcp_server(svc) -> MCPServer:
                     "saw it, another conversation of this folder is doing it: leave it and do nothing.")  # fmt: skip
         else:
             note = "" if msgs else "no new requests; do nothing"
-        # Polled every minute: only non-default fields, so an idle poll costs a few tokens.
+        # Polled on every waiter wake-up and safety round: only non-default fields, so it stays short.
         out: dict[str, Any] = {"session_id": sess.session_id, "messages": [slim(m) for m in msgs]}
         if not sess.enabled:
             out["enabled"] = False

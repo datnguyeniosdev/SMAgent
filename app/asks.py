@@ -2,7 +2,8 @@
 
 Agent A asks agent B (a session s#, or a project): the request lands in B's inbox like any Telegram
 request, labelled as coming from A. B answers with reply_message; the answer goes back to A's inbox
-as an "answer" message (and to get_ask). Nothing of this is posted to Telegram unless it goes wrong.
+as an "answer" message (and to get_ask). The request and its answer are copied to the operator's
+group, and the session that takes it stays the asker's partner in that project.
 
 The watchdog (every 30 s) escalates to the operator when B cannot take the request (no open, enabled,
 unblocked session) for UNREACHABLE, or has not answered by the deadline. A B whose session is still

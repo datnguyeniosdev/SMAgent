@@ -1,7 +1,7 @@
-## What and why
+## Thay đổi gì và vì sao
 
-## How it was tested
+## Đã kiểm tra thế nào
 
 - [ ] `uv run pytest -q`
 - [ ] `uv run ruff check . && uv run ruff format --check .`
-- [ ] docs updated (if behaviour, commands or config changed)
+- [ ] đã cập nhật tài liệu (nếu hành vi, lệnh hoặc cấu hình thay đổi)

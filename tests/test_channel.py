@@ -663,7 +663,7 @@ async def test_stale_pull_id_and_answers_stay_with_their_tool(settings, cfg_dir)
 async def test_main_session_routes_lanes_to_children_in_worktrees(
     settings, cfg_dir, tmp_path, monkeypatch
 ):
-    """docs/DISPATCH_DESIGN.md: project work -> the main session, which only routes; one child per
+    """docs/ARCHITECTURE.md: project work -> the main session, which only routes; one child per
     lane (same lane in order), a new lane opens a new child in its own git worktree."""
     import subprocess
     from datetime import timedelta

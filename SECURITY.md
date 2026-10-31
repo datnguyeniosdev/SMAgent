@@ -1,33 +1,30 @@
-# Security policy
+# Chính sách bảo mật
 
-## Reporting a vulnerability
+## Báo cáo lỗ hổng
 
-Please do not open a public issue. Report it privately through
-[GitHub security advisories](https://github.com/datnguyeniosdev/SMAgent/security/advisories/new).
-Include:
+Vui lòng không mở issue công khai. Hãy báo riêng qua
+[GitHub security advisories](https://github.com/datnguyeniosdev/SMAgent/security/advisories/new), kèm:
 
-- the affected version or commit
-- the steps to reproduce
-- the impact
+- phiên bản hoặc commit bị ảnh hưởng
+- các bước tái hiện
+- mức độ ảnh hưởng
 
-You should get an answer within 7 days. Once the fix is released, you will be credited, unless you
-prefer not to be.
+Bạn sẽ nhận phản hồi trong vòng 7 ngày. Khi bản sửa được phát hành, bạn sẽ được ghi công, trừ khi bạn
+không muốn.
 
-## Supported versions
+## Phiên bản được hỗ trợ
 
-The project is alpha, so only the latest release on `main` gets fixes.
+Dự án đang ở giai đoạn alpha, nên chỉ bản mới nhất trên `main` được sửa lỗi.
 
-## Scope
+## Phạm vi
 
-In scope:
-- the gateway's REST API and `/mcp` server
-- Telegram access control (the allowlist, passcode confirmations, key entry)
-- secret handling
-- the setup commands that change agent configs
+Trong phạm vi:
+- REST API của gateway và MCP server `/mcp`
+- kiểm soát truy cập Telegram (danh sách cho phép, xác nhận bằng passcode, nhập key)
+- cách xử lý bí mật
+- các lệnh setup có thay đổi cấu hình của agent
 
-Out of scope:
-- the limits documented in [docs/SECURITY.md](docs/SECURITY.md#known-limitations), for example agent
-  runtimes that run as your user without a sandbox
+Ngoài phạm vi: các giới hạn đã ghi trong [docs/SECURITY.md](docs/SECURITY.md), ví dụ runtime của agent
+chạy bằng quyền người dùng mà không có sandbox.
 
-How the gateway is secured is described in [docs/SECURITY.md](docs/SECURITY.md) and
-[docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md).
+Cách gateway được bảo vệ được mô tả trong [docs/SECURITY.md](docs/SECURITY.md).

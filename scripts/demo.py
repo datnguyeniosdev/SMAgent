@@ -1,7 +1,7 @@
 """Run every required demonstration for real and write evidence.
 
 Usage:  uv run python -m scripts.demo [--unity-project PATH]
-Writes: docs/evidence/demo_results.json and docs/DEMO_EVIDENCE.md
+Writes: docs/evidence/demo_results.json and docs/evidence/DEMO_EVIDENCE.md
 
 Everything goes through the real gateway (TaskRequest -> planner -> engine -> tools/plugins
 -> validators -> artifacts). External providers are used only if configured; otherwise the

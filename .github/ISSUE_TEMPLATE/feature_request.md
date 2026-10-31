@@ -1,11 +1,11 @@
 ---
-name: Feature request
-about: Suggest an idea or a new agent integration
+name: Đề xuất tính năng
+about: Gợi ý ý tưởng hoặc một tích hợp agent mới
 labels: enhancement
 ---
 
-**Problem**: what are you trying to do?
+**Vấn đề**: bạn đang muốn làm gì?
 
-**Proposal**
+**Đề xuất**
 
-**Alternatives you considered**
+**Các phương án khác đã cân nhắc**

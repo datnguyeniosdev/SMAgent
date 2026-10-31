@@ -996,8 +996,8 @@ def main(argv: list[str] | None = None) -> int:
     def repo_args(sp, required: bool):
         sp.add_argument("--project", help="project name (single repo only; default: from README)")
         sp.add_argument("--kind", choices=["product", "tool"], default=None,
-                        help="product (default for a new project): one worker on the code, deploys in "
-                        "fresh sessions; tool: requests run in parallel sessions")  # fmt: skip
+                        help="product (default for a new project): one worker and one deploy session; "
+                        "tool: requests run in parallel sessions, one per topic")  # fmt: skip
         sp.add_argument("--template", action="store_true",
                         help="template repo: CLAUDE.md block only, placeholder project, no machine files")  # fmt: skip
         if required:

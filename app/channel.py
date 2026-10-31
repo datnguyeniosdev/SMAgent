@@ -8,7 +8,7 @@ pull  any session (desktop app, VS Code, terminal): the `agw wait` waiter (app/w
 
 Each session has an operator switch (/on, /off, persisted per session id). Messages go to an open,
 enabled, non-blocked session of the project (push preferred, newest first) and otherwise wait.
-Routing (docs/DISPATCH_DESIGN.md): work for a named session (/send s#, a reply to its report) stays
+Routing (docs/ARCHITECTURE.md): work for a named session (/send s#, a reply to its report) stays
 in that session, one job after another. Project work goes to the project's main session, which only
 routes it with `dispatch`: to the child session of that lane (same lane: in order) or to a new child
 in its own copy-on-write copy of the project (other lanes: in parallel). Answers to a session's own questions skip the
@@ -585,7 +585,7 @@ class ChannelHub:
                     self._stall([msg], s.session_id,
                                 f"not picked up within {int(QUEUE_WAIT.total_seconds() // 60)} min")  # fmt: skip
 
-    # ---- main session and children: docs/DISPATCH_DESIGN.md ----
+    # ---- main session and children: docs/ARCHITECTURE.md ----
 
     def child(self, s: LiveSession) -> dict | None:
         """The child record of a session opened by dispatch (lane, branch, worktree), else None."""
@@ -1094,7 +1094,7 @@ class ChannelHub:
 
     def default_lane(self, msg: dict) -> str:
         """The lane when nobody reads the request: a tool project's shared task lane; a product's
-        deploy or qa lane when the request says so, else its dev lane (one worker on the code)."""
+        deploy lane when the request says so, else its dev lane (its one worker)."""
         if self.kind(msg["project"]) == "tool":
             return "task"
         text = msg.get("orig_text") or msg.get("text", "")

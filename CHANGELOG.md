@@ -1,42 +1,59 @@
-# Changelog
+# Nhật ký thay đổi
 
-All notable changes are listed here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
-[Semantic Versioning](https://semver.org/).
+Ghi lại các thay đổi đáng chú ý. Định dạng theo
+[Keep a Changelog](https://keepachangelog.com/vi/1.1.0/), phiên bản theo
+[Semantic Versioning](https://semver.org/lang/vi/).
 
-## [Unreleased]
+## [Chưa phát hành]
 
-### Added
-- Codex and Cursor questions asked only in their own chat are forwarded to Telegram with buttons;
-  the answer wakes the session.
-- Stuck work goes to the operator. When an agent stops on a rate limit or API error, or misses its
-  lease, its work is held on Telegram with buttons to move it to another session, wait, or cancel.
-  When that agent runs again, the gateway asks before it goes on.
-- ❌ Từ chối for generated art. Telegram passcode entry happens in a private chat with the bot, and 3
-  wrong tries cancel the question.
-- Cursor integration. A `sessionStart` hook gives each chat the gateway rules. A `stop` hook waits
-  for Telegram work and submits it as the next message.
-- Antigravity integration. A detached `agw wait --agent antigravity` wakes the conversation through
-  `agentapi`.
-- `agw wait` with a server long-poll (`/api/v1/channel/wait`). Idle sessions now cost nothing, and
-  this replaces cron polling and health checks.
-- The server pushes queued work into open Codex desktop threads.
-- Results of delegated tasks, art reviews, project reviews and answered questions are pushed back to
-  the session that asked, in the same tool.
-- Secure questions (`request_human_input(secure=true)`) with passcode confirmation from Telegram.
-  Unanswered questions are re-sent every 30 minutes. `close_question` closes the Telegram copy.
-- Session titles that name the tool and project, for example `ClaudeCode(App)-MarioClone`. Telegram
-  reports a dropped session with the reason.
-- Open-source files: LICENSE (MIT), CONTRIBUTING, CODE_OF_CONDUCT, SECURITY, issue and PR templates,
-  and an operator guide.
+### Định tuyến và session
+- Một router duy nhất cho mọi dự án: Gateway Agent là phiên Claude CLI do gateway tự mở và giữ
+  sống (`GATE_CLI`). Tình trạng của gate được theo dõi qua PID trong `/health`.
+- Dự án có hai kiểu định tuyến: `central` (gateway định tuyến) và `main` (session chính của dự án
+  định tuyến). Mỗi dự án có id ổn định, giữ được tên cũ làm bí danh.
+- Loại dự án: `product` (mặc định) chỉ có một worker (`dev`) và một session deploy dùng lại. `tool`
+  (QA, UI/UX, PO, research…) chạy nhiều session, mỗi chủ đề một lane.
+- Câu hỏi tiếp theo về cùng chủ đề quay về đúng session đang làm việc đó. Yêu cầu giữa các agent
+  được ghép cặp với session nhận ngay khi giao.
+- Mỗi lane chỉ được mở một lần: hết cảnh một yêu cầu mở ra nhiều session khi tạo worktree chậm.
+- Offer/bid (`BID_PROJECTS`, chỉ cho dự án tool): chủ đề mới được hỏi các session rảnh trước. Session
+  đồng ý và có nhiều ngữ cảnh nhất sẽ nhận việc.
+- Session con nhận lời nhắc đầu tiên để lấy việc, được mang theo quy tắc và skill của dự án, và nhận
+  role (`uiux`, `art`, `qa`, `po`, `gamedev`) cùng `get_task_brief`.
+- Skill và lệnh bắt buộc được hook `PreToolUse` kiểm tra. Mọi tác vụ dịch ngược mã nguồn bắt buộc
+  dùng `rea`.
+- `#Main`: một cuộc hội thoại có thể trở thành session chính của dự án cho tới khi ngắt kết nối.
+- Session chính chỉ định tuyến; việc gõ trực tiếp vào đó được chuyển đi.
+- Claude Code kết nối tới gateway qua proxy stdio (`agw mcp-stdio`), tự kết nối lại sau khi gateway
+  khởi động lại.
 
-### Changed
-- Detection of new or renamed project folders (`.git`, `AGENTS.md` or `CLAUDE.md`; renames are found
-  by the README name).
-- Phase plans and audits moved to `docs/history/`.
+### Telegram
+- Kênh thông báo hệ thống riêng (`TELEGRAM_NOTICE_CHAT_ID`). Task, ask, báo cáo và câu hỏi vẫn ở
+  nhóm điều khiển.
+- Câu hỏi cần passcode vẫn giữ đủ các lựa chọn của agent. Câu trả lời ghi rõ lựa chọn đã chọn, và
+  lựa chọn kiểu "Chưa…", "Không…", "Để sau" không cần passcode.
+- Auto-accept (nút 🌙, lệnh `/auto`): bật bằng passcode, tự trả lời câu hỏi khi người vận hành vắng.
+- Câu hỏi đã trả lời sẽ mất nút trên Telegram. Câu hỏi đã giải quyết trong session không bị gửi lại.
+- Ảnh chụp màn hình được giữ lại cùng câu trả lời của agent.
+
+### Dữ liệu
+- Dọn dữ liệu hằng ngày (`DATA_RETENTION_DAYS`), không xoá task của session đang sống. Bản sao lưu cũ
+  hơn 3 ngày được tự xoá.
+- Game Intelligence: bằng chứng, quan sát và nhận định có kiểu, không bị dọn theo hạn giữ dữ liệu.
+
+### Tích hợp
+- Codex, Cursor và Antigravity: câu hỏi chỉ hỏi trong chat cũng được gửi lên Telegram, và câu trả lời
+  đánh thức session.
+- `agw wait`: chờ việc bằng long-poll phía server, nên session rảnh không tốn gì.
+- Việc bị kẹt (giới hạn tần suất, lỗi API, quá hạn) được chuyển cho người vận hành quyết định:
+  chuyển session, chờ, hoặc huỷ.
+
+### Tài liệu
+- Viết lại toàn bộ tài liệu bằng tiếng Việt. Xoá các audit, kế hoạch theo phase và bằng chứng demo
+  cũ.
 
 ## [0.1.0] - 2026-10-20
 
-### Added
-- First version: the gateway with a REST API, Telegram control, an MCP server and a workflow engine,
-  with software, documents, data, media and Unity plugins.
+### Thêm mới
+- Phiên bản đầu: gateway với REST API, điều khiển qua Telegram, MCP server và workflow engine, kèm
+  plugin phần mềm, tài liệu, dữ liệu, media và Unity.
