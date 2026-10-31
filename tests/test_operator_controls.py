@@ -214,8 +214,8 @@ async def test_secure_confirmation_asks_the_passcode_in_private_and_cancels_afte
     user = next(iter(orch.s.telegram_allowed_user_ids))
     s, _, _ = orch.channel.pull(A, None)
     ask = lambda: orch.collab.request_human_input(  # noqa: E731
-        "Release lên prod?", options=["Release", "Huỷ"], project=A, session_id=s.session_id,
-        secure=True)  # fmt: skip
+        "Commit P5?", options=["Commit main", "Commit nhánh mới", "Chưa commit"], project=A,
+        session_id=s.session_id, secure=True)  # fmt: skip
 
     async def get_me():
         return SimpleNamespace(username="agw_bot")
@@ -248,29 +248,37 @@ async def test_secure_confirmation_asks_the_passcode_in_private_and_cancels_afte
 
     hi = await ask()
     kb = gw.bot.sent[-1][1]["reply_markup"].inline_keyboard
-    assert [b.text for row in kb for b in row] == [APPROVE_PASSCODE, REFUSE]
+    # every option stays: going ahead needs the passcode, holding back does not
+    assert [(b.text, b.callback_data.split(":")[-1]) for row in kb for b in row] == [
+        ("🔐 Commit main", "p0"),
+        ("🔐 Commit nhánh mới", "p1"),
+        ("Chưa commit", "2"),
+    ]
     assert "chat riêng" in gw.bot.sent[-1][1]["text"]
-    try:  # a typed "Release" or the option itself does not approve it
-        orch.collab.answer_human_input(hi.request_id, "Release", "1", free=True)
+    try:  # a typed option or the option itself does not approve it
+        orch.collab.answer_human_input(hi.request_id, "Commit main", "1", free=True)
         raise AssertionError("approved without the passcode")
     except CollaborationError as e:
         assert e.code == "passcode_required"
     with pytest.raises(SkipHandler):  # no ✅ pressed: private text is not a passcode
         await gw.on_passcode_value(dm("Pa55-kode!"))
 
-    await gw.on_question_button(press(hi, "p"))  # ✅: the passcode is asked for in private
+    await gw.on_question_button(press(hi, "p1"))  # 🔐 an option: the passcode, in private
     assert any(
-        kw.get("chat_id") == user and hi.request_id in kw["text"] for _, kw, _ in gw.bot.sent
+        kw.get("chat_id") == user
+        and hi.request_id in kw["text"]
+        and "Commit nhánh mới" in kw["text"]
+        for _, kw, _ in gw.bot.sent
     )
     assert "chat riêng" in group[-1]
     await gw.on_passcode_value(dm("Pa55-kode!"))
     assert deleted == ["Pa55-kode!"] and "Đã duyệt" in private[-1]
     assert orch.collab.get_human_input(hi.request_id).status == "answered"
     _, msgs, _ = orch.channel.pull(A, s.session_id, limit=5)
-    assert "đã xác minh passcode" in msgs[-1]["text"]
+    assert "đã xác minh passcode): Commit nhánh mới" in msgs[-1]["text"]  # which option
 
     hi = await ask()
-    await gw.on_question_button(press(hi, "p"))
+    await gw.on_question_button(press(hi, "p0"))
     for code, left in (("0000", "2"), ("1111", "1")):
         await gw.on_passcode_value(dm(code))
         assert f"còn {left} lần" in private[-1]
@@ -283,7 +291,16 @@ async def test_secure_confirmation_asks_the_passcode_in_private_and_cancels_afte
         await gw.on_passcode_value(dm("Pa55-kode!"))
 
     hi = await ask()
-    orch.collab.answer_human_input(hi.request_id, REFUSE, "1")  # refusing needs no passcode
+    await gw.on_question_button(press(hi, "2"))  # holding back needs no passcode
+    assert orch.collab.get_human_input(hi.request_id).response == "Chưa commit"
+    plain = await orch.collab.request_human_input("Release?", project=A, session_id=s.session_id,
+                                                  secure=True)  # fmt: skip
+    kb = gw.bot.sent[-1][1]["reply_markup"].inline_keyboard
+    assert [b.text for row in kb for b in row] == [
+        APPROVE_PASSCODE,
+        REFUSE,
+    ]  # no options: as before
+    orch.collab.answer_human_input(plain.request_id, REFUSE, "1")
     rows = orch.store._db.execute(
         "SELECT body FROM records UNION ALL SELECT body FROM events"
     ).fetchall()

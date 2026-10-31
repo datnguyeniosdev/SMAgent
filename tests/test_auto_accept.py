@@ -56,6 +56,14 @@ async def test_auto_accept_needs_the_passcode_and_answers_every_question_while_o
         "Release?", project=A, session_id=s.session_id, secure=True
     )
     free = await collab.request_human_input("Tên level?", project=A, session_id=s.session_id)
+    picked = await collab.request_human_input(
+        "Commit?",
+        options=["Chưa commit", "Commit main"],
+        project=A,
+        session_id=s.session_id,
+        secure=True,
+    )
+    assert picked.response == APPROVED + ": Commit main"  # the option that goes ahead
     assert secure.status == "answered" and secure.response == APPROVED
     assert free.response == AUTO_ANSWER and "Auto-accept đang bật" in gw.bot.sent[-1][1]["text"]
 

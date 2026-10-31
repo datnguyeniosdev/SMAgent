@@ -73,6 +73,21 @@ class Feedback(BaseModel):
 
 REFUSE = "❌ Từ chối"  # the one answer a secure question takes without the passcode
 APPROVED = "✅ Duyệt (đã xác minh passcode)"
+# an option that holds the step back ("Chưa commit", "❌ Không build", "Để sau"): no passcode needed
+_HOLD = re.compile(
+    r"(?i)^\s*(❌|🚫|chưa\b|không\b|từ chối|huỷ|hủy|dừng|để sau|no\b|not now|cancel|reject|decline)"
+)
+
+
+def is_refusal(option: str) -> bool:
+    return option.strip() == REFUSE or bool(_HOLD.match(option))
+
+
+def approved(choice: str | None = None) -> str:
+    """A secure question approved with the passcode, naming the option the operator chose."""
+    return f"{APPROVED}: {choice}" if choice else APPROVED
+
+
 AUTO_ANSWER = (
     "Bạn tự quyết theo đề xuất tốt nhất của bạn"  # auto-accept, a question without options
 )
@@ -851,8 +866,10 @@ class CollaborationService:
 
     def _auto_answer(self, hi: HumanInput) -> HumanInput | None:
         """The operator chose this (passcode given when it was switched on): a secure question is
-        approved, otherwise the first option (the agent's recommendation) or "decide yourself"."""
-        text = APPROVED if hi.secure else (hi.options[0] if hi.options else AUTO_ANSWER)
+        approved with its first option that goes ahead (the agent's recommendation), otherwise the
+        first option or "decide yourself"."""
+        go = next((o for o in hi.options if not is_refusal(o)), None)
+        text = approved(go) if hi.secure else (hi.options[0] if hi.options else AUTO_ANSWER)
         try:
             return self.answer_human_input(
                 hi.request_id, text, "auto-accept", free=True, passcode_ok=hi.secure
@@ -999,9 +1016,12 @@ class CollaborationService:
                 log.exception("close notice for %s failed", request_id)
         return hi
 
-    def check_passcode(self, request_id: str, text: str, responder: str) -> str:
-        """The passcode for a secure question: approved | wrong (tries left in the text) | cancelled
-        (3rd wrong try: never approved) | no_passcode. The passcode itself is never stored or logged."""
+    def check_passcode(
+        self, request_id: str, text: str, responder: str, choice: str | None = None
+    ) -> str:
+        """The passcode for a secure question: approved (the answer names `choice`, the option the
+        operator pressed) | wrong (tries left in the text) | cancelled (3rd wrong try: never approved)
+        | no_passcode. The passcode itself is never stored or logged."""
         import hmac
 
         hi = self.get_human_input(request_id)
@@ -1011,7 +1031,7 @@ class CollaborationService:
         if code is None:
             return "no_passcode"
         if hmac.compare_digest(text.strip().encode(), code.get_secret_value().encode()):
-            self.answer_human_input(request_id, APPROVED, responder, free=True,
+            self.answer_human_input(request_id, approved(choice), responder, free=True,
                                     passcode_ok=True)  # fmt: skip
             self.store.event("human_input.passcode_ok", task_id=hi.task_id, request_id=request_id)
             return "approved"
@@ -1067,7 +1087,7 @@ class CollaborationService:
         hi = self.get_human_input(request_id)
         if hi.status != "pending":
             raise CollaborationError("duplicate", f"request {request_id} is {hi.status}")
-        if hi.secure and not passcode_ok and text.strip() != REFUSE:
+        if hi.secure and not passcode_ok and not is_refusal(text):
             raise CollaborationError(
                 "passcode_required",
                 "this confirmation needs the passcode (reply with it) or ❌ Từ chối",

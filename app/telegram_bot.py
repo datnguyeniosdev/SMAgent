@@ -271,8 +271,8 @@ class TelegramGateway:
             int, tuple[str, float]
         ] = {}  # user -> (variable, deadline): /keys entry
         self._pass_wait: dict[
-            int, tuple[str, float]
-        ] = {}  # user -> (request_id or AUTO, deadline): passcode
+            int, tuple[str, float, str | None]
+        ] = {}  # user -> (request_id or AUTO, deadline, the option pressed): passcode
         self._auto_tries: dict[int, int] = {}  # user -> wrong passcodes for auto-accept
         self._deploy_wait: dict[str, tuple] = {}  # token -> (repo, env, branch, dry_run): /deploy
         self._deploy_tasks: set[asyncio.Task] = set()  # running deploys (kept referenced)
@@ -649,7 +649,7 @@ class TelegramGateway:
             )
             return
         self._key_wait.pop(user, None)
-        self._pass_wait[user] = (AUTO, time.monotonic() + PASSCODE_WAIT_S)
+        self._pass_wait[user] = (AUTO, time.monotonic() + PASSCODE_WAIT_S, None)
         ask = ("🔐 Gửi passcode để BẬT auto-accept trong 5 phút (em xoá tin ngay). Khi bật, mọi câu hỏi "
                "của agent được tự trả lời, kể cả commit/release. /cancel để thôi.")  # fmt: skip
         dm = await self._send(self.bot.send_message, chat_id=user, text=ask)
@@ -1093,13 +1093,25 @@ class TelegramGateway:
             [InlineKeyboardButton(text=o[:60], callback_data=f"h:{hi.request_id}:{i}")]
             for i, o in enumerate(hi.options)
         ]) if hi.options else None  # fmt: skip
-        if getattr(hi, "secure", False):  # approving asks for the passcode in a private chat
-            from app.collaboration import REFUSE
+        if getattr(hi, "secure", False):  # going ahead asks for the passcode in a private chat
+            from app.collaboration import REFUSE, is_refusal
 
-            rows = [[InlineKeyboardButton(text=REFUSE, callback_data=f"h:{hi.request_id}:r")]]
-            if self.s.telegram_confirm_passcode:
-                rows.insert(0, [InlineKeyboardButton(text=APPROVE_PASSCODE,
-                                                     callback_data=f"h:{hi.request_id}:p")])  # fmt: skip
+            # every option stays (the answer must say which one): one that holds the step back is
+            # answered at once, any other asks for the passcode first
+            rid, rows = hi.request_id, []
+            for i, o in enumerate(hi.options):
+                if is_refusal(o):
+                    rows.append([InlineKeyboardButton(text=o[:60], callback_data=f"h:{rid}:{i}")])
+                elif self.s.telegram_confirm_passcode:
+                    rows.append(
+                        [InlineKeyboardButton(text=f"🔐 {o}"[:60], callback_data=f"h:{rid}:p{i}")]
+                    )
+            if not hi.options and self.s.telegram_confirm_passcode:
+                rows.append(
+                    [InlineKeyboardButton(text=APPROVE_PASSCODE, callback_data=f"h:{rid}:p")]
+                )
+            if not any(is_refusal(o) for o in hi.options):
+                rows.append([InlineKeyboardButton(text=REFUSE, callback_data=f"h:{rid}:r")])
             kb = InlineKeyboardMarkup(inline_keyboard=rows)
         msg = await self._send(self.bot.send_message, chat_id=self.s.telegram_control_chat_id, text=html,
                                reply_markup=kb)  # fmt: skip
@@ -1116,7 +1128,9 @@ class TelegramGateway:
             except Exception as e:  # noqa: BLE001 - already without buttons, or too old to edit
                 log.info("buttons of message %s stay: %s", mid, type(e).__name__)
 
-    async def _ask_passcode(self, q: CallbackQuery, request_id: str) -> None:
+    async def _ask_passcode(
+        self, q: CallbackQuery, request_id: str, choice: str | None = None
+    ) -> None:
         """✅ on a secure question: the passcode is asked for in a private chat (like /keys), never in
         the group."""
         hi = self.orch.collab.get_human_input(request_id)
@@ -1125,9 +1139,10 @@ class TelegramGateway:
             return
         user = q.from_user.id
         self._key_wait.pop(user, None)  # one secret entry at a time
-        self._pass_wait[user] = (request_id, time.monotonic() + PASSCODE_WAIT_S)
+        self._pass_wait[user] = (request_id, time.monotonic() + PASSCODE_WAIT_S, choice)
         await q.answer()
-        ask = (f"🔐 Gửi passcode để duyệt <code>{request_id}</code> trong 5 phút (em xoá tin ngay). "
+        what = f" (<b>{escape(choice)}</b>)" if choice else ""
+        ask = (f"🔐 Gửi passcode để duyệt <code>{request_id}</code>{what} trong 5 phút (em xoá tin ngay). "
                f"Còn {3 - hi.attempts} lần thử; /cancel để thôi.")  # fmt: skip
         dm = await self._send(self.bot.send_message, chat_id=user, text=ask)
         if q.message:
@@ -1146,7 +1161,7 @@ class TelegramGateway:
         text = (m.text or "").strip()
         if wait is None or user not in self.s.telegram_allowed_user_ids:
             raise SkipHandler()
-        request_id, deadline = wait
+        request_id, deadline, choice = wait
         if text.startswith("/"):
             if text.split()[0].lower() == "/cancel":
                 self._pass_wait.pop(user, None)
@@ -1169,7 +1184,7 @@ class TelegramGateway:
         from app.collaboration import CollaborationError
 
         try:
-            result = self.orch.collab.check_passcode(request_id, text, str(user))
+            result = self.orch.collab.check_passcode(request_id, text, str(user), choice)
         except CollaborationError as e:
             self._pass_wait.pop(user, None)
             await say(m, f"❌ {escape(str(e))}" + gone)
@@ -1207,8 +1222,10 @@ class TelegramGateway:
             from app.collaboration import REFUSE
 
             hi = self.orch.collab.get_human_input(request_id)
-            if idx == "p":
-                await self._ask_passcode(q, request_id)
+            if idx.startswith("p"):  # going ahead (with the option pressed): the passcode first
+                await self._ask_passcode(
+                    q, request_id, hi.options[int(idx[1:])] if idx[1:] else None
+                )
                 return
             choice = REFUSE if idx == "r" else hi.options[int(idx)]
             hi = self.orch.collab.answer_human_input(request_id, choice, str(q.from_user.id))
