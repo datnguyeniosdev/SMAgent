@@ -850,9 +850,26 @@ class TelegramGateway:
         hub = self.orch.channel
         live = hub.live()
         lines = ["🖥 <b>SESSIONS</b>"]
-        lines += [session_line(x, self.orch.channel) for x in live] or [
-            "none open · terminal: <code>agw session</code> (⚡ push) · any session: agw wait + get_messages (🔄 pull)"
-        ]
+        # one row per folder (a Terminal child's push and pull twins are one conversation); a plain
+        # conversation with no role and no work is only named, unless /list all
+        folders: dict[str, list] = {}
+        for x in live:
+            folders.setdefault(x.cwd or x.session_id, []).append(x)
+        quiet = []
+        for twins in folders.values():
+            x = max(twins, key=lambda t: t.mode == "push")
+            more = "".join(f" + s{t.num}" for t in twins if t is not x)
+            busy = any(not hub._idle(t) or not t.deliverable for t in twins)
+            if full or busy or hub.child(x) or any(hub.main_for(t.project) is t for t in twins):
+                lines.append(session_line(x, hub) + more)
+            else:
+                quiet.append(f"s{x.num}{more.replace(' ', '')} {escape(x.project)}")
+        if quiet:
+            lines.append(f"💤 {len(quiet)} idle conversation(s), no role: {' · '.join(quiet)} "
+                         "(<code>/list all</code> shows them)")  # fmt: skip
+        if not live:
+            lines.append("none open · terminal: <code>agw session</code> (⚡ push) · any session: "
+                         "agw wait + get_messages (🔄 pull)")  # fmt: skip
         lines += ["", "📁 <b>PROJECTS</b>"]
         waiting = {}
         for x in hub.open_messages():

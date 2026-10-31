@@ -102,3 +102,23 @@ def test_old_backups_go_after_three_days_by_the_time_in_their_name(settings, cfg
     (d / "notes.bak-later").write_text("x")  # not a timestamp: not ours
     assert orch.purge_backups() == 2
     assert sorted(p.name for p in d.glob("*.bak-*")) == ["notes.bak-later", f"state.db.bak-{new}"]
+
+
+def test_list_shows_one_row_per_folder_and_names_idle_conversations_only(settings, cfg_dir):
+    orch, _ = make(settings, cfg_dir, [])
+    gw = gateway(orch)
+    hub = orch.channel
+    main, _, _ = hub.pull("Zen Word (EG07)", None, "/w/eg07")
+    push = hub.connect("cc_lane", "Zen Word (EG07)", "/w/eg07/.agw-children/dev-1")
+    pull, _, _ = hub.pull("Zen Word (EG07)", None, "/w/eg07/.agw-children/dev-1")
+    orch.store.put("channel_child", "/w/eg07/.agw-children/dev-1",
+                   {"project": "Zen Word (EG07)", "lane": "dev", "path": "/w/eg07/.agw-children/dev-1",
+                    "branch": "agw/dev-1"})  # fmt: skip
+    spare, _, _ = hub.pull("Zen Word (EG07)", None, "/w/eg07/.claude/worktrees/spare")
+
+    text = gw._list_text()
+    assert f"<b>s{main.num}</b>" in text and "👑 main" in text
+    assert f"<b>s{push.num}</b>" in text and f" + s{pull.num}" in text  # twins: one row
+    assert f"<b>s{pull.num}</b>" not in text
+    assert f"💤 1 idle conversation(s), no role: s{spare.num} Zen Word (EG07)" in text
+    assert f"<b>s{spare.num}</b>" in gw._list_text(full=True)
