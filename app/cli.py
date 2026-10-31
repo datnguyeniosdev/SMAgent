@@ -45,8 +45,9 @@ def _gateway_url(host: str, port: int) -> str:
 
 
 def _clean_env() -> dict:
-    # `claude` refuses to run nested inside a Claude Code session.
-    return {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+    from app.config import child_env
+
+    return child_env()
 
 
 # ---------------------------------------------------------------- .env
@@ -122,7 +123,7 @@ def _opencode_env(s) -> dict:
     if not s.opencode_password:
         raise SystemExit("OPENCODE_PASSWORD is empty: run `uv run agw init-env` first")
     return {
-        **os.environ,
+        **_clean_env(),
         "OPENCODE_SERVER_PASSWORD": s.opencode_password.get_secret_value(),
         "OPENCODE_SERVER_USERNAME": s.opencode_username,
     }

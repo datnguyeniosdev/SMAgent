@@ -130,6 +130,17 @@ def test_deploy_env_drops_gateway_secrets(monkeypatch):
     assert env == {"PATH": "/bin"}
 
 
+def test_child_processes_get_no_gateway_secret(monkeypatch):
+    from app import keys
+    from app.config import child_env, secret_env_names
+
+    monkeypatch.setattr(keys, "RUNTIME", {"SET_WITH_KEYS"})  # a key saved with /keys
+    assert {"OPERATOR_TOKEN", "TELEGRAM_CONFIRM_PASSCODE", "OPENCODE_PASSWORD", "AGW_SECRET_KEY",
+            "SET_WITH_KEYS"} <= secret_env_names()  # fmt: skip
+    env = {n: "x" for n in secret_env_names() | {"PATH", "ANTHROPIC_API_KEY", "AGW_API_TOKEN"}}
+    assert child_env(env) == {"PATH": "x", "ANTHROPIC_API_KEY": "x", "AGW_API_TOKEN": "x"}
+
+
 async def test_agents_cannot_cancel_the_operators_tasks(settings, cfg_dir):
     from mcp.client import Client
 

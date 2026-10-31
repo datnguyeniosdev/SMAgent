@@ -19,7 +19,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from app.config import require_prod
+from app.config import child_env, require_prod
 
 SKILL = "agent-gateway"
 PROJECT_REF = "the project named in the agent-gateway session note"
@@ -113,7 +113,7 @@ def _claude(*args: str) -> subprocess.CompletedProcess | None:
     claude = shutil.which("claude")
     if claude is None:
         return None
-    env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+    env = child_env()
     return subprocess.run([claude, *args], capture_output=True, text=True, env=env)
 
 

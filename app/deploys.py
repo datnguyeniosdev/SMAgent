@@ -39,10 +39,10 @@ def deploy_env(environ: dict | None = None) -> dict:
     deploy script gets what it needs from its own .env.deploy or the operator's shell."""
     from dotenv import dotenv_values
 
-    from app.config import env_file
+    from app.config import child_env, env_file
 
-    env = dict(os.environ if environ is None else environ)
-    drop = set(dotenv_values(env_file())) | {"CLAUDECODE"}
+    env = child_env(environ)
+    drop = set(dotenv_values(env_file()))
     try:
         from app.config import get_settings
         from app.main import load_gateway_config

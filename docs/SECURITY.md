@@ -146,8 +146,12 @@ scratch), `.venv/`, `*.log`.
 1. `QA_SANDBOX=none` (mặc định), runtime Claude Code/OpenCode và các session agent chạy trên máy với quyền
    của bạn, **không** sandbox. `claude -p` còn nạp hook và `.mcp.json` của repo đích, nên chỉ trỏ
    `WORKSPACE_ROOT` vào repo tin cậy.
-2. Runtime Claude Code chỉ bị gỡ một số biến bí mật; các biến khác trong môi trường gateway (ví dụ
-   `OPERATOR_TOKEN`, `FAL_KEY`, key đặt qua `/keys`) vẫn được kế thừa.
+2. Process con (runtime Claude Code, `agw session`, Codex relay, OpenCode server, review, deploy, lệnh QA)
+   nhận môi trường đã gỡ bí mật của gateway (`config.child_env`): mọi trường `SecretStr` của `Settings`,
+   `AGW_SECRET_KEY`, `OPENCODE_SERVER_PASSWORD`, key provider trong config và key đặt qua `/keys`. Key
+   riêng của agent (ví dụ `ANTHROPIC_API_KEY`, `AGW_API_TOKEN`) vẫn giữ. Agent cần key trùng tên key
+   provider của gateway (ví dụ OpenCode dùng `OPENAI_API_KEY`) phải tự đăng nhập (`opencode auth login`).
+   `env_passthrough` của MCP server vẫn chuyển đúng biến được khai báo, kể cả bí mật.
 3. Prompt xin quyền từng tool của Claude Code không được chuyển lên Telegram; approval của gateway bao trùm
    cả một lượt chạy agent.
 4. Plugin là code Python chạy trong process. Trần quyền chỉ kiểm soát **tool** đi qua policy engine; plugin

@@ -16,6 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
+from app.config import child_env
 from app.models import new_id, now
 
 _ENV_KEEP = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR")
@@ -113,7 +114,7 @@ class QARunner:
             res.stderr = f"executable not found: {argv[0]}"
             res.finished_at = now()
             return res
-        env = {k: v for k, v in os.environ.items() if k in self.env_keep}
+        env = {k: v for k, v in child_env().items() if k in self.env_keep}
         start = time.monotonic()
         proc = await asyncio.create_subprocess_exec(
             exe,

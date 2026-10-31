@@ -13,6 +13,7 @@ from cryptography.fernet import Fernet, InvalidToken
 
 KIND = "setting"
 SECRET_ENV = "AGW_SECRET_KEY"  # noqa: S105 - the variable name, not a secret
+RUNTIME: set[str] = set()  # names put into os.environ here: kept out of child processes
 # one line of printable ASCII without spaces, quotes or backslashes
 _VALUE = re.compile(r"[!#-&(-\[\]-~]{1,500}")
 
@@ -72,6 +73,7 @@ def save(store, name: str, value: str) -> None:
         KIND, name, {"name": name, "enc": _fernet().encrypt(value.encode()).decode()}, state="set"
     )
     os.environ[name] = value
+    RUNTIME.add(name)
     if name.endswith(("_KEY", "_TOKEN", "_SECRET", "_PASSWORD")):
         _mask_in_logs(value)
 
@@ -103,6 +105,7 @@ def load(store) -> list[str]:
     for r in rows:
         try:
             os.environ[r["name"]] = value = f.decrypt(r["enc"].encode()).decode()
+            RUNTIME.add(r["name"])
             if r["name"].endswith(("_KEY", "_TOKEN", "_SECRET", "_PASSWORD")):
                 _mask_in_logs(value)
         except (InvalidToken, AttributeError):

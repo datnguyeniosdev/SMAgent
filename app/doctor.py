@@ -9,6 +9,8 @@ from dataclasses import dataclass
 
 import httpx
 
+from app.config import child_env
+
 
 @dataclass
 class Check:
@@ -22,7 +24,7 @@ def _claude_mcp(name: str) -> bool | None:
     claude = shutil.which("claude")
     if claude is None:
         return None
-    env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+    env = child_env()
     r = subprocess.run(
         [claude, "mcp", "get", name], capture_output=True, text=True, env=env, timeout=30
     )

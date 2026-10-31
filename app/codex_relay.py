@@ -15,6 +15,8 @@ import os
 import shutil
 from pathlib import Path
 
+from app.config import child_env
+
 log = logging.getLogger(__name__)
 
 # Codex installed with the ChatGPT desktop app is not on PATH.
@@ -107,7 +109,7 @@ async def push_round(hub, relays: Path, refresh: bool) -> None:
         if nxt is None or mark == data.get("pushed") or exe is None:
             continue
         proc = await asyncio.create_subprocess_exec(
-            exe, "queue", "--thread", thread, "--message", codex_prompt(project, cwd),
+            exe, "queue", "--thread", thread, "--message", codex_prompt(project, cwd), env=child_env(),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
         )  # fmt: skip
         try:

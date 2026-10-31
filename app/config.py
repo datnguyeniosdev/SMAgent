@@ -3,7 +3,7 @@ import os
 import re
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, get_args
 
 from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -273,3 +273,36 @@ def load_settings() -> Settings:
 @lru_cache
 def get_settings() -> Settings:
     return load_settings()
+
+
+@lru_cache
+def _provider_keys() -> frozenset[str]:
+    """api_key_env of every provider in the config (FAL_KEY, MESHY_API_KEY, ...)."""
+    try:
+        from app.gateway_config import load_or_raise
+
+        d = get_settings().config_dir
+        if d is None or not (d / "app.yaml").exists():
+            return frozenset()
+        return frozenset(
+            p.api_key_env for p in load_or_raise(d).providers.values() if p.api_key_env
+        )
+    except Exception:  # noqa: BLE001 - without a config the other names still apply
+        return frozenset()
+
+
+def secret_env_names() -> set[str]:
+    """Variables holding the gateway's own secrets: every SecretStr setting, AGW_SECRET_KEY, the
+    OpenCode server password and every provider key (from the config or set at runtime with /keys)."""
+    from app.keys import RUNTIME, SECRET_ENV
+
+    fields = Settings.model_fields.items()
+    names = {n.upper() for n, f in fields if SecretStr in (f.annotation, *get_args(f.annotation))}
+    return names | {SECRET_ENV, "OPENCODE_SERVER_PASSWORD"} | _provider_keys() | RUNTIME
+
+
+def child_env(environ: dict | None = None) -> dict:
+    """The environment for an agent or tool subprocess: ours without the gateway's secrets (and
+    CLAUDECODE, so `claude` starts). Agents keep their own keys (ANTHROPIC_API_KEY, logins, ...)."""
+    drop = secret_env_names() | {"CLAUDECODE"}
+    return {k: v for k, v in (os.environ if environ is None else environ).items() if k not in drop}

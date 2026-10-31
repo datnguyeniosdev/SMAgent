@@ -11,16 +11,10 @@ import json
 import os
 import signal
 
+from app.config import child_env
 from app.connectors.base import AgentRequest, AgentResult, Cap, ConnectorError
 from app.logs import redact
 
-_STRIP_ENV = {
-    "CLAUDECODE",  # CLI refuses to start nested inside another Claude Code session
-    "TELEGRAM_BOT_TOKEN",
-    "API_TOKEN",
-    "OPENAI_API_KEY",
-    "DEEPSEEK_API_KEY",
-}
 _READ_ONLY_TOOLS = "Read,Grep,Glob"
 
 
@@ -96,7 +90,7 @@ class ClaudeCodeConnector:
     async def execute(self, req: AgentRequest) -> AgentResult:
         if req.workspace is None:
             raise ConnectorError("claude_code requires a workspace directory", "unsupported")
-        env = {k: v for k, v in os.environ.items() if k not in _STRIP_ENV}
+        env = child_env()
         try:
             proc = await asyncio.create_subprocess_exec(
                 *self.build_argv(req),
@@ -150,7 +144,7 @@ class ClaudeCodeConnector:
         """Free check: binary runs and reports a version. Auth is only proven by a real run."""
         if not self.available:
             return "unavailable", "CLAUDE_CODE_ENABLED is false"
-        env = {k: v for k, v in os.environ.items() if k not in _STRIP_ENV}
+        env = child_env()
         try:
             proc = await asyncio.create_subprocess_exec(
                 self.binary,
