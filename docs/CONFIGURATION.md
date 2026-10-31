@@ -65,6 +65,7 @@ Một bot chỉ phục vụ một gateway: hai gateway cùng poll một bot sẽ
 | `CHILD_MODEL` | `opus` | Model Claude của phiên con (làm việc). Đổi theo project bằng `/model`, theo task bằng `dispatch(model=)` |
 | `ROUTER_MODEL` | `sonnet` | Model của phiên router tạm thời (chỉ định tuyến, báo cáo) |
 | `GATEWAY_AGENT_PROJECT` | `Agent Gateway` | Project có main session là Gateway Agent dùng chung: nhận request mà `channel_rules` không xếp được (project ở routing mode `central`) |
+| `MAIN_PROJECTS` | `[]` | Project khác (ngoài project gateway) vẫn giữ main session. Mặc định không có: gateway định tuyến mọi project game/tool |
 | `GATE_CLI` | `false` | Gateway tự mở và giữ sống một phiên CLI làm Gateway Agent (thư mục `.agw-children/gate` của project trên); trong lúc chưa kết nối, request được xếp bằng lane mặc định |
 | `TOOL_PARALLEL` | `3` | Số phiên tối đa chạy song song cho lane `task` của một project kind `tool` |
 | `BID_PROJECTS` | `[]` | Project (kind `tool`) mà topic mới được *offer* cho các phiên rảnh trước; phiên nhận với nhiều context nhất thắng, không ai nhận thì mở phiên mới. Có thể tắt tạm bằng switch `bid` trong `/mcp` |

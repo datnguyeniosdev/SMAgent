@@ -828,6 +828,8 @@ def build_mcp_server(svc) -> MCPServer:
                 "make every one of them the main. Run `agw main` with Bash instead (the agw of your "
                 "waiter command, `main` in place of `wait ...`): it makes this conversation alone the main"
             )
+        if not svc.channel.has_main(s.project):
+            raise GatewayToolError(f"{s.project} has no main session: the gateway routes its work")
         if cur := svc.channel.outranked(s):
             raise GatewayToolError(
                 f"{svc.channel._label(cur)} (desktop app) is the main: a desktop-app main is kept"

@@ -609,6 +609,8 @@ class ChannelHub:
         session of a project: it routes the project's work. pin=None keeps the project's pin.
         A 🧭 child made the main (#Main in it) leaves its lane: it is no longer a child, and new
         lanes are still copied from the project repo, not from its copy."""
+        if not self.has_main(s.project):
+            raise ValueError(f"{s.project} has no main session: the gateway routes its work")
         pin = self.pinned(s.project) if pin is None else pin
         rec = {"project": s.project, "session_id": s.session_id, "cwd": s.cwd, "agent": s.agent,
                "kind": s.kind, "pinned": pin}  # fmt: skip
@@ -642,6 +644,8 @@ class ChannelHub:
         """#Main typed in a conversation (`agw main`): it leaves the folder's shared session for its
         own and becomes the project's pinned 👑 main until it disconnects or is removed. Returns
         (session, None), or (None, why) when a desktop-app main keeps the place."""
+        if not self.has_main(project):
+            return None, f"{project} has no main session: the gateway routes its work"
         sid = self.pull_id(project, agent, cwd, client, instance)
         probe = LiveSession(sid, project, cwd, "", mode="pull", agent=agent, client=client)
         if cur := self.outranked(probe):
@@ -679,7 +683,9 @@ class ChannelHub:
         not picking up): a temporary router session is opened in <repo>/.agw-children/router and
         routes for it with the same lanes (they live in the store); when the main works again it
         takes over, hears what was routed, and the router is closed. The main offline: None (the
-        operator is asked)."""
+        operator is asked). Only the gateway project has one (has_main)."""
+        if not self.has_main(project):
+            return None
         rec = self.svc.store.get("channel_main", _norm(project))
         router_cwd = (rec or {}).get("router_cwd") or ""
         mine = [x for x in self.sessions.values() if _norm(x.project) == _norm(project)
@@ -1020,8 +1026,7 @@ class ChannelHub:
             if c := self.svc.store.get("channel_child", rec.get("cwd") or ""):
                 msg.setdefault("lane", c["lane"])
                 msg.setdefault("lane_path", c["path"])
-        p = self.registry.resolve(project)
-        if p is not None and p.routing_mode == "central":
+        if self.central(project):
             return self._route_central(msg, exclude)
         main = self.main_for(project)
         if main is not None and main.session_id == exclude:  # the main asked its own project
@@ -1039,10 +1044,26 @@ class ChannelHub:
 
     # ---- central routing (projects with routing_mode "central") ----
 
+    def gateway_project(self) -> str:
+        return getattr(getattr(self.svc, "s", None), "gateway_agent_project", "") or "Agent Gateway"
+
+    def has_main(self, project: str) -> bool:
+        """Only the gateway project (its Gateway Agent) and Settings.main_projects have a main
+        session: the gateway routes every other project's work (central), whatever its routing_mode."""
+        extra = getattr(getattr(self.svc, "s", None), "main_projects", None) or []
+        return _norm(project) in {_norm(n) for n in [self.gateway_project(), *extra]}
+
+    def central(self, project: str) -> bool:
+        p = self.registry.resolve(project)
+        return not self.has_main(project) or (p is not None and p.routing_mode == "central")
+
     def gateway_agent(self) -> LiveSession | None:
         """The shared Gateway Agent: the main session of Settings.gateway_agent_project."""
-        s = getattr(self.svc, "s", None)
-        return self.main_for(getattr(s, "gateway_agent_project", "") or "Agent Gateway")
+        return self.main_for(self.gateway_project())
+
+    def product_lane(self, lane: str) -> bool:
+        """A tool project's lane named after a product: that product's own session of the tool."""
+        return any(p.kind == "product" and _lane_name(p.name) == lane for p in self.registry.all())
 
     def rule_lane(self, msg: dict) -> str | None:
         """Deterministic placement: a lane named on the message, else the first matching
@@ -1073,7 +1094,7 @@ class ChannelHub:
             lane = self.default_lane(msg)
             if "gateway" not in self._main_asked:  # said once; the work does not wait for it
                 self._main_asked.add("gateway")
-                self._notify("send_main_offline", getattr(self.svc.s, "gateway_agent_project", ""))
+                self._notify("send_main_offline", self.gateway_project())
         msg["lane"] = lane = self.lane_for(msg["project"], lane)
         if gw is None and self._offers_for(msg, lane) and (offers := self._ranked(msg, lane, "")):
             kw = dict(by="gateway", brief="", model="", agent="", main=None, skills=[])
@@ -1116,9 +1137,9 @@ class ChannelHub:
     def _gateway_note(self, msg: dict) -> str:
         project = msg["project"]
         policy = (
-            "It is a tool agent: its requests run in parallel, one session per topic, so pick a lane "
-            "by topic: a follow-up or question about work in progress keeps that work's lane (it reaches "
-            "the session doing it); a new topic gets a new lane."
+            "It is a tool agent with one session per game: lane = the name of the product (game) the "
+            "request is about, so that game's session keeps its context; a request about no game gets "
+            "a topic lane."
             if self.kind(project) == "tool"
             else "It is a product: it has two sessions, its worker (lane dev: every kind of work, "
             "in order) and its deploy session (lane deploy: build, release, deploy); any other lane goes "
@@ -1233,10 +1254,7 @@ class ChannelHub:
         router = (
             bool(rec.get("router_cwd")) and main.cwd == rec["router_cwd"]
         )  # finishing its routing
-        central = (
-            p := self.registry.resolve(msg["project"])
-        ) is not None and p.routing_mode == "central"
-        if central:
+        if central := self.central(msg["project"]):
             if main is not self.gateway_agent():
                 raise PermissionError(
                     f"{msg['project']} is routed by the gateway: only the Gateway Agent dispatches its work"
@@ -1279,12 +1297,14 @@ class ChannelHub:
 
     def _offers_for(self, msg: dict, lane: str) -> bool:
         """Offers are made for a new topic of a tool project in bid_projects only: a lane that has a
-        session keeps it (its context), and a product's two sessions are never auctioned."""
+        session keeps it (its context), a game's lane opens its own, and a product's two sessions
+        are never auctioned."""
         project = msg["project"]
         if self.kind(project) != "tool" or not self.bids_on(project):
             return False
-        if lane != "task" and any(x.deliverable and _norm(x.project) == _norm(project)
-                                  and self._in_lane(self.child(x), lane) for x in self.sessions.values()):  # fmt: skip
+        if lane != "task" and (self.product_lane(lane) or any(
+                x.deliverable and _norm(x.project) == _norm(project)
+                and self._in_lane(self.child(x), lane) for x in self.sessions.values())):  # fmt: skip
             return False
         msg.setdefault("request", msg.get("orig_text") or msg["text"])
         return True

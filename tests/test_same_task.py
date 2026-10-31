@@ -47,10 +47,11 @@ async def test_an_agents_follow_up_goes_to_the_session_doing_its_first_ask(
     hub.registry.set_kind(A, "tool")
     asker, _, _ = hub.pull("Glazed Gems (GMA)", None, str(tmp_path), 0, "claude_code", "app")
     ask1 = orch.asks.create(A, "IP check of the app icon", from_session=asker.session_id)
-    hub.pull("Agent Gateway", gw.session_id)
-    r = await hub.dispatch(gw.session_id, ask1["message_id"], "qa-icon-ip")
-    qa, _, _ = hub.pull(A, None, r["path"], 0, "claude_code", "cli")
-    hub.pull(A, qa.session_id)  # working on ask 1, not answered yet
+    await settle(opened, 1)
+    assert len(opened) == 1 and "glazed-gems-gma" in str(opened[0])  # the game's session, no Gate
+    qa, _, _ = hub.pull(A, None, str(opened[0]), 0, "claude_code", "cli")
+    _, got, _ = hub.pull(A, qa.session_id)  # working on ask 1, not answered yet
+    assert got[0]["message_id"] == ask1["message_id"]
 
     ask2 = orch.asks.create(
         A, "Follow-up: the production pack is ready", from_session=asker.session_id

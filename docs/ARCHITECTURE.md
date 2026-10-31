@@ -97,7 +97,10 @@ Các bước:
 
 ### Main session
 
-- Mỗi project có một main (bản ghi `channel_main`). Chưa chọn và `auto_main` bật: session mở lâu nhất
+- Chỉ project gateway (`GATEWAY_AGENT_PROJECT`, Gateway Agent) và các project trong `MAIN_PROJECTS`
+  (mặc định rỗng) có main. Mọi project khác (game, tool) luôn do gateway định tuyến (`central`), bất kể
+  `routing_mode`; `/main`, `#Main`, `set_main` và `/route p# main` bị từ chối với chúng.
+- Project có main giữ một main (bản ghi `channel_main`). Chưa chọn và `auto_main` bật: session mở lâu nhất
   (app trước CLI, không phải child) thành main. `/main` ghim một session; `/main p# auto` bỏ ghim.
 - Hook PreToolUse (`agw hook-tool`) chặn sửa file và lệnh shell (trừ `agw`) trong conversation là
   main: main chỉ định tuyến.
@@ -121,7 +124,7 @@ Các bước:
 
 | Thuộc tính | Giá trị | Ý nghĩa |
 |---|---|---|
-| `routing_mode` | `main` (mặc định) | main của chính project định tuyến |
+| `routing_mode` | `main` (mặc định) | main của chính project định tuyến; chỉ có hiệu lực với project có main (xem Main session) |
 | | `central` | rule, rồi Gateway Agent định tuyến; đổi bằng `/route p# central\|main` |
 | `kind` | `product` (mặc định) | repo game/app: một worker trên code, một session deploy |
 | | `tool` | project agent (QA, UI/UX, PO, research): yêu cầu chạy song song; đổi bằng `/route p# tool\|product` hoặc `agw setup --repo PATH --kind tool` |
@@ -197,7 +200,8 @@ Các bước:
 | `product` | `dev` | worker duy nhất, mọi loại việc, tuần tự |
 | `product` | `deploy` | session deploy, dùng lại |
 | `product` | lane khác | đổi thành `dev` |
-| `tool` | lane theo chủ đề | một session mỗi lane, việc trong lane tuần tự |
+| `tool` | lane theo game | một session cố định cho mỗi game: `ask_agent` từ một product vào tool tự mang lane = tên game (không qua Gate, không offer); Gate cũng chọn lane = game |
+| `tool` | lane theo chủ đề | yêu cầu không gắn game: một session mỗi lane, việc trong lane tuần tự |
 | `tool` | `task` (lane không tên) | trải ra: session rảnh, nếu không thì mở thêm khi project còn dưới `tool_parallel` (mặc định 3) thư mục, nếu không thì session ít tải nhất |
 
 `default_lane` (khi không ai đọc yêu cầu): tool → `task`; product → `deploy` nếu yêu cầu nói deploy,

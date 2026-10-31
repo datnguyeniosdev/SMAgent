@@ -145,11 +145,12 @@ Cách tự trả lời:
 
 `/route` không đối số: Gateway Agent hiện tại và mỗi project dạng `p# tên · <mode> · <kind>`.
 
-**Ai điều hướng** (`/route p# central|main`, mặc định `main`):
+**Ai điều hướng** (`/route p# central|main`): chỉ project gateway (và `MAIN_PROJECTS`) có session chính;
+game và tool luôn `central`.
 
 | Mode | Ý nghĩa |
 |---|---|
-| `main` | 👑 session chính của project điều hướng; main offline thì group được hỏi (mục 8) |
+| `main` | 👑 session chính của project điều hướng (chỉ project gateway); main offline thì group được hỏi (mục 8) |
 | `central` | Gateway tự điều hướng (luật, rồi tới Gateway Agent) |
 
 **Loại project** (`/route p# tool|product`, mặc định `product`):

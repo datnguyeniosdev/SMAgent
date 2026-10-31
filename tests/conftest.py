@@ -1,6 +1,7 @@
 """Shared fixtures. Everything here is mocked: no network, no paid API calls."""
 
 import asyncio
+import json
 import shutil
 import subprocess
 import zlib
@@ -169,3 +170,15 @@ def _outside_a_claude_conversation(monkeypatch):
     """Tests run the same inside or outside a Claude session: no conversation id from the env."""
     monkeypatch.delenv("CLAUDE_CODE_HOST_SESSION_ID", raising=False)
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _games_keep_a_main(monkeypatch):
+    """The main-session tests run on these games (MAIN_PROJECTS); by default only the gateway project
+    has a main (test_no_main_outside_the_gateway_project)."""
+    monkeypatch.setenv("MAIN_PROJECTS", json.dumps(MAIN_GAMES))
+
+
+MAIN_GAMES = ["2048 Shooter (K05)", "Ball Shot (K10)", "Coin Rush (K10)", "Coinlets: Stack & Merge (TCN)",
+              "Gem Mosaic (GMA)", "Glazed Gems (GMA)", "Mario Clone (K10)", "PocketSort (ttg-002-coin_sort)",
+              "Toss Mallow (K05)", "Zen Word (EG07)", "Neon Ball Shooter"]  # fmt: skip

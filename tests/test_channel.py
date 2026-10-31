@@ -192,7 +192,8 @@ async def test_blocked_session_never_receives(tmp_path):
         tasks[t.task_id] = t
         return t
 
-    svc = SimpleNamespace(store=store, tasks=tasks, register_external=register_external)
+    s = SimpleNamespace(main_projects=[PROJECT])
+    svc = SimpleNamespace(store=store, tasks=tasks, register_external=register_external, s=s)
     hub = ChannelHub(svc)
     blocked = hub.connect("cc_b", PROJECT, "/x", blocked=True)
     msg, target = hub.send(PROJECT, "hello")

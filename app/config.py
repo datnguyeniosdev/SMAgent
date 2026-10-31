@@ -87,6 +87,9 @@ class Settings(BaseSettings):
     # central routing: requests the rules (config/routing/routing.yaml) cannot place go to the main
     # session of this project, the shared Gateway Agent
     gateway_agent_project: str = "Agent Gateway"
+    # projects that keep a main session besides the gateway project (default: none; the gateway
+    # routes every other project's work), e.g. MAIN_PROJECTS='["Some Project"]'
+    main_projects: Annotated[list[str], NoDecode] = []
     gate_cli: bool = (
         False  # the gateway opens and keeps alive its own CLI session as the Gateway Agent
     )
@@ -167,6 +170,7 @@ class Settings(BaseSettings):
         "qa_env_passthrough",
         "opencode_shell_allowlist",
         "bid_projects",
+        "main_projects",
         mode="before",
     )
     @classmethod

@@ -985,13 +985,18 @@ class TelegramGateway:
             if name is None:
                 await say(m, "Unknown project (projects: /list)")
                 return
+            if args[1] == "main" and not hub.has_main(name):
+                await say(m, f"Chỉ {escape(hub.gateway_project())} có session chính; "
+                             "project khác do gateway điều hướng ạ.")  # fmt: skip
+                return
             p = hub.registry.set_routing_mode(hub.registry.ensure(name).project_id, args[1])
             how = ("the gateway routes it (rules, then the Gateway Agent)" if p.routing_mode == "central"
                    else "its own main session routes it")  # fmt: skip
             await say(m, f"🧭 <b>{escape(p.name)}</b>: {how}")
             return
         gw = hub.gateway_agent()
-        modes = {p.name: f"{p.routing_mode} · {p.kind}" for p in hub.registry.all()}
+        modes = {p.name: f"{'central' if hub.central(p.name) else 'main'} · {p.kind}"
+                 for p in hub.registry.all()}  # fmt: skip
         rows = [
             f"p{num} {escape(name)} · <b>{modes.get(name, 'main')}</b>"
             for num, name in hub.projects()
@@ -1581,6 +1586,10 @@ class TelegramGateway:
                 "from /list) · /main p# auto · /main auto on|off\n"
                 f"Auto: {'on' if hub.auto_main() else 'off'} · pinned: {', '.join(pins) or 'none'}",
             )
+            return
+        if not hub.has_main(s.project):
+            await say(m, f"Chỉ {escape(hub.gateway_project())} có session chính; "
+                         "project khác do gateway điều hướng ạ.")  # fmt: skip
             return
         hub.set_main(s, pin=True)
         await say(m, f"👑📌 {session_line(s, hub)}")

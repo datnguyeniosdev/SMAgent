@@ -657,3 +657,14 @@ async def test_system_notices_go_to_the_notice_channel_and_work_stays_in_the_gro
     assert gw.bot.sent[-1][1]["chat_id"] == -100999 and gw.bot.sent[-1][1]["disable_notification"]
     await orch.collab.request_human_input("Duyệt commit?", project=A, options=["Có", "Không"])
     assert gw.bot.sent[-1][1]["chat_id"] == CONTROL  # a question stays with the operator's work
+
+
+async def test_only_the_gateway_project_has_a_main(settings, cfg_dir, tmp_path, monkeypatch):
+    settings.main_projects = []  # the default: no MAIN_PROJECTS
+    orch, hub, gw, own, game, opened = central_setup(settings, cfg_dir, tmp_path, monkeypatch)
+    hub.registry.set_routing_mode(A, "main")  # ignored: a game has no main
+    assert hub.main_for(A) is None and hub.main_for("Agent Gateway") is gw
+    with pytest.raises(ValueError):
+        hub.set_main(own)
+    m, target = hub.send(A, "fix the hud")
+    assert target is gw and "do not do it yourself" in m["text"].lower()  # the gateway routes it
